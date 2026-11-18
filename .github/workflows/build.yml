@@ -53,6 +53,11 @@ jobs:
       - run: dotnet pack MessageBus.Client.slnx -c Release -p:Version=0.0.0-ci.1 -o artifacts/packages
       - run: bash eng/verify-packages.sh artifacts/packages 0.0.0-ci.1
       - run: python eng/test-check-packages.py
+      - run: python eng/test-release-version.py
+      - if: runner.os == 'Linux'
+        run: |
+          python eng/test-org-strings.py
+          node --test eng/test-release-workflow.cjs
       - name: Build the runner image build stage
         if: runner.os == 'Linux'
         run: docker build -f docker/runner/Dockerfile --target build .

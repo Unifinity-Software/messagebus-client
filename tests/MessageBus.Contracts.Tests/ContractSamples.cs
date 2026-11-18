@@ -268,7 +268,6 @@ internal static class ContractSamples
         new InboxTarget { InboxId = "inb_01jcz7m2v1g3x4y5z6a7b8c9d9" },
         PlainBody,
         Friction,
-        new FrictionTask { ThreadId = Thr, ProjectId = Prj, Role = "developer", At = T, Kinds = ["missing-context"] },
         Body,
         PrRef,
         Attachment,

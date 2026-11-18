@@ -73,63 +73,124 @@ jobs:
               "$GITHUB_SERVER_URL/$GH_REPO.git" "$BASE_SHA"
           fi
           python3 - <<'PY'
-          import json
           import os
+          import re
           import subprocess
           import sys
 
-          sha = os.environ["SCAN_SHA"]
-          base = os.environ["BASE_SHA"]
-          maintainer_logins = set(os.environ["MAINTAINERS"].lower().split())
-          patterns = os.environb.get(b"ORG_STRINGS", b"").splitlines()
-          patterns = tuple(pattern for pattern in patterns if pattern.strip())
-          if not patterns:
-              sys.exit("Configure ORG_STRINGS as one literal per line.")
+          OID = rb"[0-9a-f]{40}"
+          ZERO = "0" * 40
 
-          def git(*args):
-              return subprocess.check_output(["git", *args])
 
-          def matches(data):
-              return any(pattern in data for pattern in patterns)
+          def git(*args, **kwargs):
+              return subprocess.check_output(["git", *args], stderr=subprocess.DEVNULL, **kwargs)
 
-          def display(path):
-              escaped = json.dumps(os.fsdecode(path), ensure_ascii=True)
-              escaped = escaped.replace("#", r"\u0023").replace(":", r"\u003a")
-              # Keep filename data on one line and hide filenames containing a restricted value.
-              return "[redacted filename]" if matches(path) or matches(escaped.encode()) else escaped
 
-          passed = True
-          for record in git("ls-tree", "-rz", sha).split(b"\0"):
-              if not record:
-                  continue
-              header, path = record.split(b"\t", 1)
-              _, kind, obj = header.split()
-              if matches(path):
-                  print(f"Restricted filename {display(path)}:1")
+          def scan():
+              sha = os.environ["SCAN_SHA"]
+              base = os.environ["BASE_SHA"]
+              if not all(re.fullmatch(OID, value.encode()) for value in (sha, base)):
+                  raise ValueError
+              for value in (sha, base):
+                  if value != ZERO and git("cat-file", "-t", value) != b"commit\n":
+                      raise ValueError
+
+              logins = set(os.environ["MAINTAINERS"].lower().split())
+              lines = (line.strip().lower() for line in os.environb.get(b"ORG_STRINGS", b"").splitlines())
+              patterns = tuple(line for line in lines if line and not line.startswith(b"#"))
+              if not patterns:
+                  sys.exit("Configure ORG_STRINGS with at least one literal.")
+
+              def matches(data):
+                  folded = data.lower()
+                  return any(pattern in folded for pattern in patterns)
+
+              passed = True
+
+              def report(message):
+                  nonlocal passed
                   passed = False
-              if kind == b"blob":
-                  for number, line in enumerate(git("cat-file", "blob", obj.decode()).split(b"\n"), 1):
-                      if matches(line):
-                          print(f"Restricted content {display(path)}:{number}")
-                          passed = False
+                  print(message)
 
-          revision = sha if base == "0" * 40 else f"{base}..{sha}"
-          for commit in git("rev-list", revision).decode().splitlines():
-              data = json.loads(subprocess.check_output(
-                  ["gh", "api", f"repos/{os.environ['GH_REPO']}/commits/{commit}",
-                   "--jq", "{author: .author.login, committer: .committer.login}"],
-                  stderr=subprocess.DEVNULL,
-              ))
-              author, committer = git("show", "-s", "--format=%ae%x00%ce", commit).rstrip(b"\n").split(b"\0")
-              for field, email in (("author", author), ("committer", committer)):
-                  login = (data.get(field) or "").lower()
-                  if login in maintainer_logins and not (
-                      email.lower() == b"noreply@unifinity.com"
-                      or email.lower().endswith(b"@users.noreply.github.com")
-                  ):
-                      print(f"Maintainer {field} must use a noreply address in commit {commit}.")
-                      passed = False
-          sys.exit(0 if passed else 1)
+              tip_blobs = set()
+              for record in git("ls-tree", "-rz", "-t", sha).split(b"\0"):
+                  if not record:
+                      continue
+                  header, path = record.split(b"\t", 1)
+                  _, kind, obj = header.split()
+                  if matches(path):
+                      report(f"Restricted filename in tree {sha} (object {obj.decode()}).")
+                  if kind == b"blob":
+                      tip_blobs.add(obj)
+
+              revision = sha if base == ZERO else f"{base}..{sha}"
+              objects = set(git("rev-list", "--objects", "--no-object-names", revision).splitlines())
+              commits = git("rev-list", revision)
+              paths = git("diff-tree", "--stdin", "--root", "-m", "-r", "--no-renames",
+                          "--no-commit-id", "--name-only", "-z", input=commits)
+              if any(matches(path) for path in paths.split(b"\0")):
+                  report(f"Restricted historical filename in range ending at {sha}.")
+
+              with subprocess.Popen(["git", "cat-file", "--batch"], stdin=subprocess.PIPE,
+                                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) as batch:
+                  try:
+                      for obj in sorted(tip_blobs | objects):
+                          if not re.fullmatch(OID, obj):
+                              raise ValueError
+                          batch.stdin.write(obj + b"\n")
+                          batch.stdin.flush()
+                          returned, kind, length = batch.stdout.readline().split()
+                          if returned != obj:
+                              raise ValueError
+                          size = int(length)
+                          data = batch.stdout.read(size)
+                          if len(data) != size or batch.stdout.read(1) != b"\n":
+                              raise ValueError
+                          identity = obj.decode()
+                          if kind == b"blob" and matches(data):
+                              report(f"Restricted content in blob {identity}.")
+                          if kind != b"commit":
+                              continue
+
+                          header, separator, message = data.partition(b"\n\n")
+                          if not separator:
+                              raise ValueError
+                          if matches(message):
+                              report(f"Restricted commit message in {identity}.")
+                          attributed = subprocess.check_output(
+                              ["gh", "api", f"repos/{os.environ['GH_REPO']}/commits/{identity}",
+                               "--jq", '[.author.login // "", .committer.login // ""] | @tsv'],
+                              stderr=subprocess.DEVNULL,
+                          ).removesuffix(b"\n").decode().split("\t")
+                          author_login, committer_login = attributed
+                          for field, login in ((b"author", author_login), (b"committer", committer_login)):
+                              field_name = field.decode()
+                              entries = [line for line in header.split(b"\n") if line.startswith(field + b" ")]
+                              if len(entries) != 1:
+                                  raise ValueError
+                              entry = re.fullmatch(field + rb" (.*) <([^<>]*)> -?[0-9]+ [+-][0-9]{4}", entries[0])
+                              if entry is None:
+                                  raise ValueError
+                              name, email = entry.groups()
+                              for label, value in (("name", name), ("email", email)):
+                                  if matches(value):
+                                      report(f"Restricted {field_name} {label} in commit {identity}.")
+                              noreply = re.fullmatch(rb"noreply@[a-z0-9.-]+\.[a-z0-9-]+", email.lower())
+                              github_noreply = re.fullmatch(rb"[^@]+@users\.noreply\.github\.com", email.lower())
+                              if login.lower() in logins and not (noreply or github_noreply):
+                                  report(f"Maintainer {field_name} must use a noreply address in commit {identity}.")
+                  finally:
+                      batch.stdin.close()
+                      batch.stdout.close()
+                  if batch.wait() != 0:
+                      raise ValueError
+              return passed
+
+
+          try:
+              sys.exit(0 if scan() else 1)
+          except (ValueError, OSError, subprocess.SubprocessError):
+              sys.exit("The organization scan could not verify the requested Git objects or commit metadata.")
           PY
       - name: Set commit status
         if: always() && steps.target.outputs.sha != ''

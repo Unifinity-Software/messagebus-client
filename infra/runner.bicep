@@ -2,6 +2,9 @@
 // no inbound address, its secrets read from an existing Key Vault. The
 // runner connects out to the server, picks up tasks and runs a coding agent for each. Deploy it in
 // the same resource group as the vault. See docker/runner/README.md for runner credentials.
+// Check out mbus-v<version>, build from docker/runner/Dockerfile, and push the resulting
+// <registry>.azurecr.io/messagebus-runner:<version> image to your registry. For a development
+// build, use your development checkout and an explicit development image tag.
 
 @description('Azure region for the runner.')
 param location string = resourceGroup().location
@@ -10,7 +13,7 @@ param location string = resourceGroup().location
 @maxLength(32)
 param runnerName string = 'runner-1'
 
-@description('The runner image, e.g. myregistry.azurecr.io/messagebus-runner:1.0 (built from docker/runner/Dockerfile).')
+@description('Runner image built from source, e.g. <registry>.azurecr.io/messagebus-runner:<version>.')
 param runnerImage string
 
 @description('Azure Container Registry in this resource group the image comes from. Empty: a public image.')

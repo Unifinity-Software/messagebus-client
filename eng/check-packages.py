@@ -13,7 +13,7 @@ PACKAGES = LIBRARIES | {TOOL}
 PACKAGE_IDS_LOWER = {package.lower() for package in PACKAGES}
 
 
-def check_archive(path, version, expected, symbols):
+def check_archive(path, version, expected, symbols, commit):
     with ZipFile(path) as archive:
         names = archive.namelist()
         if len(names) != len(set(names)):
@@ -27,6 +27,10 @@ def check_archive(path, version, expected, symbols):
             raise ValueError(f"unexpected or duplicate package ID: {package}")
         if metadata.findtext("{*}version") != version:
             raise ValueError(f"expected version {version}")
+        if commit is not None:
+            repository = metadata.find("{*}repository")
+            if repository is None or repository.get("commit") != commit:
+                raise ValueError("repository commit must match the verified candidate")
         if path.name != f"{package}.{version}{path.suffix}":
             raise ValueError("filename must agree with package ID and version")
         for dependency in metadata.findall("{*}dependencies//{*}dependency"):
@@ -53,14 +57,14 @@ def check_archive(path, version, expected, symbols):
         expected.remove(package)
 
 
-def verify(folder, version):
+def verify(folder, version, commit=None):
     remaining = {".nupkg": PACKAGES.copy(), ".snupkg": LIBRARIES.copy()}
     for path in sorted(folder.iterdir()):
         suffix = path.suffix.lower()
         if suffix not in remaining:
             continue
         try:
-            check_archive(path, version, remaining[suffix], suffix == ".snupkg")
+            check_archive(path, version, remaining[suffix], suffix == ".snupkg", commit)
         except (ValueError, BadZipFile, ElementTree.ParseError, OSError) as error:
             raise ValueError(f"{path.name}: {error}") from error
     for suffix, missing in remaining.items():
@@ -70,6 +74,6 @@ def verify(folder, version):
 
 if __name__ == "__main__":
     try:
-        verify(Path(sys.argv[1]), sys.argv[2])
+        verify(Path(sys.argv[1]), *sys.argv[2:])
     except (ValueError, OSError) as error:
         sys.exit(str(error))

@@ -7,11 +7,21 @@ It opens no port.
 
 ## Build
 
-From the repository root:
+Build your image from released source or from a development checkout. The project
+does not supply a ready-made runner image. To build from a release, start at
+the repository root and use the release version in both the checkout and image tag.
 
 ```sh
-podman build --ignorefile docker/runner/Dockerfile.dockerignore -f docker/runner/Dockerfile -t messagebus-runner .
-docker build -f docker/runner/Dockerfile -t messagebus-runner .
+version='<version>'
+git checkout "mbus-v$version"
+```
+
+For a development build, use your development checkout and set `version` to
+a development image tag.
+
+```sh
+podman build --ignorefile docker/runner/Dockerfile.dockerignore -f docker/runner/Dockerfile -t "messagebus-runner:$version" .
+docker build -f docker/runner/Dockerfile -t "messagebus-runner:$version" .
 ```
 
 The agent CLIs are installed at their newest version unless you pin them:
@@ -67,16 +77,21 @@ That covers the usual ways a secret store reaches a container:
 
 ## Run
 
+Set `image: messagebus-runner:<version>` in your copy of the Compose example.
+For Azure Container Apps use `<registry>.azurecr.io/messagebus-runner:<version>`.
+For Kubernetes use `<registry>/messagebus-runner:<version>`.
+Push the image you built to the registry before deploying to Azure or Kubernetes.
+
 ```sh
 podman run -d --name messagebus-runner \
   -e MBUS_SERVER=https://app.messagebus.ai -e MBUS_LOCATION="Build server" \
   --secret mbus_api_key --secret anthropic_api_key \
-  -v messagebus-runner-home:/home/runner messagebus-runner
+  -v messagebus-runner-home:/home/runner "messagebus-runner:$version"
 ```
 
 Agent sign-in state, mbus settings (with the runner's machine key) and checked-out code live in
 `/home/runner`; keep it on a volume so a restart doesn't lose them. Any other command runs as given, which helps when checking an image:
-`podman run --rm messagebus-runner claude --version`.
+`podman run --rm "messagebus-runner:$version" claude --version`.
 
 A container can't reach a server that listens on localhost only. To point a runner container at a
 server on the same computer, make that server reachable on a network address (or through a tunnel)

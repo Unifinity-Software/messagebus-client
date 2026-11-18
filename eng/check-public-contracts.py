@@ -22,9 +22,7 @@ CLIENTS = (
 # RefKinds is the wire reference vocabulary, used by the split MCP server.
 # The JSON context is serializer infrastructure, not a contract dependency root:
 # its JsonSerializable attributes must never keep unused DTOs public.
-# FrictionTask is already on the public serialization surface. Keep it until
-# a coordinated protocol change can retire it.
-ALLOW = {"RefKinds", "MessageBusJsonContext", "FrictionTask"}
+ALLOW = {"RefKinds", "MessageBusJsonContext"}
 # Exhaustive sample catalogs enumerate every DTO and cannot prove client usage.
 REFERENCE_EXCLUSIONS = {"tests/MessageBus.Contracts.Tests/ContractSamples.cs"}
 RAW_STRING = re.compile(r'\$*("{3,})')

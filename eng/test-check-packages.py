@@ -22,7 +22,7 @@ class Packages(unittest.TestCase):
             self.write(package, symbols=True)
 
     def write(self, package, *, symbols=False, version=VERSION, dependency=VERSION,
-              include_icon=True, pdb=b"BSJB"):
+              include_icon=True, pdb=b"BSJB", commit="a" * 40):
         suffix = ".snupkg" if symbols else ".nupkg"
         path = self.folder / f"{package}.{VERSION}{suffix}"
         with ZipFile(path, "w") as archive:
@@ -31,6 +31,7 @@ class Packages(unittest.TestCase):
   <metadata>
     <id>{package}</id><version>{version}</version>
     <readme>README.md</readme><icon>icon.png</icon><license type="expression">MIT</license>
+    <repository type="git" commit="{commit}"/>
     <dependencies><group><dependency id="MessageBus.Ai.Crypto" version="{dependency}"/></group></dependencies>
   </metadata>
 </package>""")
@@ -47,6 +48,16 @@ class Packages(unittest.TestCase):
 
     def test_complete_set(self):
         checker.verify(self.folder, VERSION)
+
+    def test_commit_is_bound_to_both_package_kinds(self):
+        commit = "a" * 40
+        checker.verify(self.folder, VERSION, commit)
+        for symbols in (False, True):
+            with self.subTest(symbols=symbols):
+                self.write(PACKAGE, symbols=symbols, commit="b" * 40)
+                with self.assertRaisesRegex(ValueError, "repository commit"):
+                    checker.verify(self.folder, VERSION, commit)
+                self.write(PACKAGE, symbols=symbols)
 
     def test_extra_package(self):
         self.write("Unexpected")
