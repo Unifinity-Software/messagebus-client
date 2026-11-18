@@ -7,7 +7,7 @@ namespace MessageBus.Cli.Tests.Update;
 
 /// <summary>
 /// <c>mbus update</c> end to end on this machine: a signed feed folder, the real verification, swap
-/// and start check, and a stand-in mbus script in a temp folder. This test build is mbus 0.1.0.
+/// and start check, and a stand-in mbus script in a temp folder. The test feed uses versions ahead of the source build.
 /// </summary>
 public sealed class UpdateCommandTests : IDisposable
 {
@@ -17,7 +17,7 @@ public sealed class UpdateCommandTests : IDisposable
 
     public UpdateCommandTests()
     {
-        _installed = File.ReadAllText(_feed.InstallCurrent("0.1.0"));
+        _installed = File.ReadAllText(_feed.InstallCurrent("0.2.0"));
         _machine.Env[UpdateEnvVars.Feed] = _feed.FeedFolder;
         _machine.Env[UpdateEnvVars.Target] = _feed.Target;
         _machine.Env[ReleaseKey.EnvVar] = _feed.PublicKey;
@@ -28,19 +28,19 @@ public sealed class UpdateCommandTests : IDisposable
     [Fact]
     public async Task Each_release_goes_into_its_own_folder_that_never_changes_and_mbus_names_the_current_one()
     {
-        var release = _feed.Publish("0.2.0");
+        var release = _feed.Publish("0.2.1");
 
         var run = await _machine.RunAsync("update");
 
         Assert.Equal(0, run.ExitCode);
         Assert.Equal(release, File.ReadAllText(_feed.Target));
-        Assert.Equal(_feed.VersionFile("0.2.0"), VersionedInstall.Current(_feed.Target));
+        Assert.Equal(_feed.VersionFile("0.2.1"), VersionedInstall.Current(_feed.Target));
         // The plain file this install was moved into the layout from, kept as the version before (this test build's version).
-        var before = Assert.Single(_feed.Versions(), v => v != "0.2.0");
-        Assert.StartsWith("0.1.0", before);
+        var before = Assert.Single(_feed.Versions(), v => v != "0.2.1");
+        Assert.StartsWith("0.2.0", before);
         Assert.Equal(_installed, File.ReadAllText(_feed.VersionFile(before)));
-        // What mbus connect writes into agents' MCP settings and mbus runner install into the service: mbus, not 0.2.0's file.
-        Assert.Equal(_feed.Target, VersionedInstall.StableFor(_feed.VersionFile("0.2.0")));
+        // What mbus connect writes into agents' MCP settings and mbus runner install into the service: mbus, not 0.2.1's file.
+        Assert.Equal(_feed.Target, VersionedInstall.StableFor(_feed.VersionFile("0.2.1")));
         Assert.Empty(_feed.Leftovers());
 
         // The version before is still running somewhere (an agent's mbus mcp holds its file, as every mbus does: MarkRunning).
@@ -50,8 +50,8 @@ public sealed class UpdateCommandTests : IDisposable
             Assert.Equal(0, (await _machine.RunAsync("update")).ExitCode);
 
             Assert.Equal(next, File.ReadAllText(_feed.Target));
-            Assert.Equal(release, File.ReadAllText(_feed.VersionFile("0.2.0"))); // what a running 0.2.0 reads is untouched
-            Assert.Equal([before, "0.2.0", "0.3.0"], _feed.Versions());
+            Assert.Equal(release, File.ReadAllText(_feed.VersionFile("0.2.1"))); // what a running 0.2.1 reads is untouched
+            Assert.Equal([before, "0.2.1", "0.3.0"], _feed.Versions());
         }
 
         // Once nothing runs it, a version older than the one before goes.
@@ -68,11 +68,11 @@ public sealed class UpdateCommandTests : IDisposable
     public async Task A_release_that_does_not_match_its_signature_is_refused_and_nothing_changes(string tampering)
     {
         using var otherKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
-        _feed.Publish("0.2.0", signWith: tampering == "signed by another key" ? otherKey : null);
+        _feed.Publish("0.2.1", signWith: tampering == "signed by another key" ? otherKey : null);
         if (tampering == "manifest edited")
-            _feed.EditManifest(json => json.Replace("\"0.2.0\"", "\"0.3.0\""));
+            _feed.EditManifest(json => json.Replace("\"0.2.1\"", "\"0.3.0\""));
         if (tampering == "binary edited")
-            _feed.EditBinary("0.2.0");
+            _feed.EditBinary("0.2.1");
 
         var run = await _machine.RunAsync("update");
 
@@ -101,17 +101,17 @@ public sealed class UpdateCommandTests : IDisposable
     public async Task A_pinned_version_is_installed_even_if_older_but_only_from_its_own_signed_list()
     {
         var pinned = _feed.Publish("0.0.9");
-        _feed.Publish("0.2.0");
+        _feed.Publish("0.2.1");
 
         var run = await _machine.RunAsync("update", "--version", "0.0.9");
         Assert.Equal(0, run.ExitCode);
         Assert.Equal(pinned, File.ReadAllText(_feed.Target));
 
         // A genuinely signed list, but of another version, served under the pinned one's name.
-        _feed.CopyVersionManifest(from: "0.2.0", to: "0.0.9");
+        _feed.CopyVersionManifest(from: "0.2.1", to: "0.0.9");
         var swapped = await _machine.RunAsync("update", "--version", "0.0.9");
         Assert.NotEqual(0, swapped.ExitCode);
-        Assert.Contains("is for mbus 0.2.0", swapped.Error);
+        Assert.Contains("is for mbus 0.2.1", swapped.Error);
         Assert.Equal(pinned, File.ReadAllText(_feed.Target));
     }
 
@@ -126,11 +126,11 @@ public sealed class UpdateCommandTests : IDisposable
         Assert.SkipWhen(failure == "signal" && OperatingSystem.IsWindows(), "Windows programs aren't stopped by signals.");
         var (script, shown) = failure switch
         {
-            "exit code" => (TestReleaseFeed.Script("0.2.0", 3, error: "libssl not found"), new[] { "code 3", "libssl not found" }),
+            "exit code" => (TestReleaseFeed.Script("0.2.1", 3, error: "libssl not found"), new[] { "code 3", "libssl not found" }),
             "other version" => (TestReleaseFeed.Script("0.1.9"), ["\"0.1.9\""]),
             _ => ("#!/bin/sh\nkill -KILL $$\n", ["code 137", "SIGKILL"]),
         };
-        _feed.Publish("0.2.0", script: script);
+        _feed.Publish("0.2.1", script: script);
 
         var run = await _machine.RunAsync("update");
 
@@ -147,13 +147,13 @@ public sealed class UpdateCommandTests : IDisposable
     [Fact]
     public async Task The_new_mbus_is_started_before_it_replaces_the_running_one()
     {
-        _feed.Publish("0.2.0");
+        _feed.Publish("0.2.1");
         string? installedDuringCheck = null;
         using var updater = new SelfUpdater(new SelfUpdaterOptions
         {
             Source = new FolderReleaseSource(_feed.ChannelFolder),
             PublicKey = _feed.PublicKey,
-            CurrentVersion = "0.1.0",
+            CurrentVersion = "0.2.0",
             TargetPath = _feed.Target,
             StartCheck = (path, version, ct) =>
             {
@@ -169,7 +169,7 @@ public sealed class UpdateCommandTests : IDisposable
     [Fact]
     public async Task A_new_mbus_that_cannot_be_started_is_reported_not_thrown_so_the_update_rolls_back()
     {
-        var problem = await VersionStartCheck.RunAsync(Path.Combine(_feed.InstallFolder, "missing-mbus"), "0.2.0", TestContext.Current.CancellationToken);
+        var problem = await VersionStartCheck.RunAsync(Path.Combine(_feed.InstallFolder, "missing-mbus"), "0.2.1", TestContext.Current.CancellationToken);
 
         Assert.StartsWith("it couldn't be started", problem);
     }
@@ -179,7 +179,7 @@ public sealed class UpdateCommandTests : IDisposable
     {
         // dotnet's layout (the original issue): <tools>/.store/<id>/<version>/<id>.<rid>/<version>/tools/any/<rid>/mbus.exe, its settings file beside it.
         var tools = Path.Combine(_feed.InstallFolder, "tools");
-        var folder = Path.Combine(tools, ".store", "messagebus.ai.cli", "0.1.0", "messagebus.ai.cli.win-x64", "0.1.0", "tools", "any", "win-x64");
+        var folder = Path.Combine(tools, ".store", "messagebus.ai.cli", "0.2.0", "messagebus.ai.cli.win-x64", "0.2.0", "tools", "any", "win-x64");
         Directory.CreateDirectory(folder);
         File.WriteAllText(Path.Combine(folder, DotnetToolInstall.SettingsFile), "<DotNetCliTool Version=\"2\" />");
         var target = Path.Combine(folder, Path.GetFileName(_feed.Target));
@@ -191,14 +191,14 @@ public sealed class UpdateCommandTests : IDisposable
 
         var source = Path.Combine(_feed.InstallFolder, "nuget");
         Directory.CreateDirectory(source);
-        File.WriteAllText(Path.Combine(source, "MessageBus.Ai.Cli.0.2.0.nupkg"), "test");
+        File.WriteAllText(Path.Combine(source, "MessageBus.Ai.Cli.0.2.1.nupkg"), "test");
         _machine.Env["MBUS_UPDATE_NUGET_SOURCE"] = source;
         _machine.RunnerServices = () => new MessageBus.Cli.Runner.Service.ServiceManager(
             MessageBus.Cli.Runner.Service.ServicePlatform.Other, "test", 0, (_, _) => throw new Exception());
         var check = await _machine.RunAsync("update", "--check");
         var install = await _machine.RunAsync("update");
 
-        Assert.Contains("mbus 0.2.0 is available", check.Output);
+        Assert.Contains("mbus 0.2.1 is available", check.Output);
         Assert.Equal(0, install.ExitCode);
         Assert.Contains("dotnet tool update --tool-path", install.Output);
         Assert.Contains(tools, install.Output);

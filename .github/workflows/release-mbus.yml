@@ -1,0 +1,240 @@
+name: Release mbus
+on:
+  push:
+    tags: ['mbus-v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Normalized SemVer package version
+        type: string
+        required: true
+      tagged_commit:
+        description: Exact tag commit supplied by the tag workflow
+        type: string
+        required: false
+
+permissions: {}
+
+jobs:
+  dispatch-tag:
+    if: github.event_name == 'push' && !github.event.deleted && vars.MBUS_RELEASE_ENABLED == 'true' && !github.event.repository.private
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Dispatch release on protected main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version=${GITHUB_REF_NAME#mbus-v}
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-z0-9.-]+)?$ ]]
+          gh workflow run release-mbus.yml --repo "$GITHUB_REPOSITORY" --ref main \
+            -f version="$version" -f tagged_commit="$GITHUB_SHA"
+
+  prepare:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && vars.MBUS_RELEASE_ENABLED == 'true' && !github.event.repository.private
+    runs-on: ubuntu-latest
+    concurrency:
+      group: mbus-prepare-${{ inputs.version }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: read
+    outputs:
+      sha: ${{ steps.eligible.outputs.sha }}
+      version: ${{ steps.eligible.outputs.version }}
+    steps:
+      - name: Verify merged main commit and its Build
+        id: eligible
+        uses: actions/github-script@v8
+        env:
+          VERSION: ${{ inputs.version }}
+          TAGGED_COMMIT: ${{ inputs.tagged_commit }}
+        with:
+          script: |
+            const repo = context.repo;
+            const { VERSION: version, TAGGED_COMMIT: tagCommit } = process.env;
+            if (!/^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[a-z0-9-]+(\.[a-z0-9-]+)*)?$/.test(version)) {
+              throw new Error('Use a normalized SemVer version.');
+            }
+            if (tagCommit && !/^[a-f0-9]{40}$/.test(tagCommit)) {
+              throw new Error('Invalid tag commit.');
+            }
+            const sha = tagCommit || context.sha;
+            const { data: comparison } = await github.rest.repos.compareCommitsWithBasehead({
+              ...repo, basehead: `${sha}...${context.sha}`, per_page: 1
+            });
+            if (comparison.merge_base_commit.sha !== sha) {
+              throw new Error('The selected commit must be reachable from main.');
+            }
+
+            const tag = `mbus-v${version}`;
+            let tagObject;
+            try {
+              const { data } = await github.rest.git.getRef({ ...repo, ref: `tags/${tag}` });
+              tagObject = data.object;
+            } catch (error) {
+              if (error.status !== 404 || tagCommit) throw error;
+            }
+            // Accept annotated tags as well as lightweight tags.
+            while (tagObject?.type === 'tag') {
+              const { data } = await github.rest.git.getTag({ ...repo, tag_sha: tagObject.sha });
+              tagObject = data.object;
+            }
+            if (tagObject && (tagObject.type !== 'commit' || tagObject.sha !== sha)) {
+              throw new Error('The version tag points at a different commit.');
+            }
+
+            const pulls = await github.paginate(github.rest.repos.listPullRequestsAssociatedWithCommit, {
+              ...repo, commit_sha: sha, per_page: 100
+            });
+            let mergedToMain = false;
+            for (const pr of pulls.filter(pr => pr.base.ref === 'main' && pr.state === 'closed')) {
+              const { data } = await github.rest.pulls.get({ ...repo, pull_number: pr.number });
+              if (data.merged && data.base.ref === 'main' && data.merge_commit_sha === sha) {
+                mergedToMain = true;
+                break;
+              }
+            }
+            if (!mergedToMain) {
+              throw new Error('The selected commit must be the merge result of a PR into main.');
+            }
+
+            const { data } = await github.rest.actions.listWorkflowRuns({
+              ...repo, workflow_id: 'build.yml', head_sha: sha,
+              branch: 'main', event: 'push', per_page: 1
+            });
+            const latest = data.workflow_runs[0];
+            if (latest?.head_sha !== sha || latest.status !== 'completed' || latest.conclusion !== 'success') {
+              throw new Error('The latest post-merge Build for the selected main commit must have succeeded.');
+            }
+            core.setOutput('sha', sha);
+            core.setOutput('version', version);
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ steps.eligible.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+      - name: Check version and pack
+        env:
+          VERSION: ${{ steps.eligible.outputs.version }}
+        run: |
+          set -euo pipefail
+          python3 eng/check-release-version.py "$VERSION"
+          dotnet pack MessageBus.Client.slnx -c Release -p:Version="$VERSION" -o artifacts/packages
+          bash eng/verify-packages.sh artifacts/packages "$VERSION"
+      - name: Check the complete runner image
+        run: docker build -f docker/runner/Dockerfile .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-packages
+          path: |
+            artifacts/packages/*.nupkg
+            artifacts/packages/*.snupkg
+          if-no-files-found: error
+
+  publish:
+    needs: prepare
+    runs-on: ubuntu-latest
+    environment: nuget
+    concurrency:
+      group: mbus-publish
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-packages
+          path: artifacts/packages
+      - name: Recheck the latest Build and package version after approval
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          NUGET_USER: ${{ secrets.NUGET_USER }}
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ needs.prepare.outputs.sha }}
+        run: |
+          set -euo pipefail
+          [[ -n "$NUGET_USER" ]] || { echo 'Configure NUGET_USER in the nuget environment.' >&2; exit 1; }
+          passed=$(gh api --method GET "repos/$GITHUB_REPOSITORY/actions/workflows/build.yml/runs" \
+            -f branch=main -f event=push -f head_sha="$SHA" -F per_page=1 \
+            --jq '.workflow_runs[0] | .status == "completed" and .conclusion == "success"')
+          [[ "$passed" == true ]] || { echo 'The latest post-merge Build is no longer green.' >&2; exit 1; }
+          python3 eng/check-release-version.py "$VERSION"
+          python3 eng/check-packages.py artifacts/packages "$VERSION"
+      - uses: NuGet/login@v1
+        id: login
+        with:
+          user: ${{ secrets.NUGET_USER }}
+      - name: Push packages and accompanying symbols
+        env:
+          NUGET_API_KEY: ${{ steps.login.outputs.NUGET_API_KEY }}
+        run: |
+          set -euo pipefail
+          # NuGet automatically sends the matching .snupkg beside each .nupkg.
+          for package in artifacts/packages/*.nupkg; do
+            dotnet nuget push "$package" --source https://api.nuget.org/v3/index.json \
+              --api-key "$NUGET_API_KEY" --skip-duplicate
+          done
+
+  github-release:
+    needs: [prepare, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-packages
+          path: artifacts/packages
+      - name: Create or verify the release tag
+        uses: actions/github-script@v8
+        env:
+          SHA: ${{ needs.prepare.outputs.sha }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        with:
+          script: |
+            const tag = `mbus-v${process.env.VERSION}`;
+            const sha = process.env.SHA;
+            let object;
+            try {
+              const { data } = await github.rest.git.getRef({ ...context.repo, ref: `tags/${tag}` });
+              object = data.object;
+            } catch (error) {
+              if (error.status !== 404) throw error;
+              await github.rest.git.createRef({ ...context.repo, ref: `refs/tags/${tag}`, sha });
+              return;
+            }
+            while (object.type === 'tag') {
+              const { data } = await github.rest.git.getTag({ ...context.repo, tag_sha: object.sha });
+              object = data.object;
+            }
+            if (object.type !== 'commit' || object.sha !== sha) {
+              throw new Error('The version tag points at a different commit.');
+            }
+      - name: Create release for the verified commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          args=()
+          if [[ "$VERSION" == *-* ]]; then
+            args+=(--prerelease)
+          fi
+          tag="mbus-v$VERSION"
+          gh release create "$tag" artifacts/packages/*.nupkg artifacts/packages/*.snupkg \
+            --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes "${args[@]}"

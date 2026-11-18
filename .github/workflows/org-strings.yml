@@ -1,0 +1,145 @@
+name: Organization strings
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: Pull request number targeting main
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  scan:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: org-strings
+    permissions:
+      contents: read
+      pull-requests: read
+      statuses: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      # Space-separated GitHub logins configured by repository administrators.
+      MAINTAINERS: ${{ vars.MBUS_MAINTAINERS }}
+    steps:
+      - id: target
+        name: Select immutable scan target
+        env:
+          PR: ${{ inputs.pr }}
+          BEFORE: ${{ github.event.before }}
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+        run: |
+          set -euo pipefail
+          [[ -n "${MAINTAINERS// /}" ]]
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+            for login in "$GITHUB_ACTOR" "$TRIGGERING_ACTOR"; do
+              case " ${MAINTAINERS,,} " in
+                *" ${login,,} "*) ;;
+                *) echo "Dispatch requires a configured maintainer." >&2; exit 1 ;;
+              esac
+            done
+            [[ "$PR" =~ ^[1-9][0-9]{0,9}$ ]]
+            fields=$(gh api "repos/$GH_REPO/pulls/$PR" \
+              --jq 'select(.state == "open" and .base.ref == "main") | [.head.sha, .base.sha] | @tsv' 2>/dev/null)
+            read -r sha base <<< "$fields"
+          else
+            sha=$GITHUB_SHA
+            base=$BEFORE
+          fi
+          [[ "$sha" =~ ^[a-f0-9]{40}$ && "$base" =~ ^[a-f0-9]{40}$ ]]
+          printf 'sha=%s\nbase=%s\n' "$sha" "$base" >> "$GITHUB_OUTPUT"
+          gh api --silent "repos/$GH_REPO/statuses/$sha" \
+            -f context=org-strings -f state=pending -f description='Scanning commit'
+      - name: Scan Git blobs as data
+        env:
+          SCAN_SHA: ${{ steps.target.outputs.sha }}
+          BASE_SHA: ${{ steps.target.outputs.base }}
+          ORG_STRINGS: ${{ secrets.ORG_STRINGS }}
+        run: |
+          set -euo pipefail
+          cd "$(mktemp -d)"
+          git init -q
+          # Fetch objects only. Never check out PR files or follow symlinks/submodules.
+          auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          echo "::add-mask::$auth"
+          git -c "http.extraHeader=Authorization: Basic $auth" fetch --quiet --no-tags --no-recurse-submodules \
+            "$GITHUB_SERVER_URL/$GH_REPO.git" "$SCAN_SHA"
+          if [[ "$BASE_SHA" != 0000000000000000000000000000000000000000 ]]; then
+            git -c "http.extraHeader=Authorization: Basic $auth" fetch --quiet --no-tags --no-recurse-submodules \
+              "$GITHUB_SERVER_URL/$GH_REPO.git" "$BASE_SHA"
+          fi
+          python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+          import sys
+
+          sha = os.environ["SCAN_SHA"]
+          base = os.environ["BASE_SHA"]
+          maintainer_logins = set(os.environ["MAINTAINERS"].lower().split())
+          patterns = os.environb.get(b"ORG_STRINGS", b"").splitlines()
+          patterns = tuple(pattern for pattern in patterns if pattern.strip())
+          if not patterns:
+              sys.exit("Configure ORG_STRINGS as one literal per line.")
+
+          def git(*args):
+              return subprocess.check_output(["git", *args])
+
+          def matches(data):
+              return any(pattern in data for pattern in patterns)
+
+          def display(path):
+              escaped = json.dumps(os.fsdecode(path), ensure_ascii=True)
+              escaped = escaped.replace("#", r"\u0023").replace(":", r"\u003a")
+              # Keep filename data on one line and hide filenames containing a restricted value.
+              return "[redacted filename]" if matches(path) or matches(escaped.encode()) else escaped
+
+          passed = True
+          for record in git("ls-tree", "-rz", sha).split(b"\0"):
+              if not record:
+                  continue
+              header, path = record.split(b"\t", 1)
+              _, kind, obj = header.split()
+              if matches(path):
+                  print(f"Restricted filename {display(path)}:1")
+                  passed = False
+              if kind == b"blob":
+                  for number, line in enumerate(git("cat-file", "blob", obj.decode()).split(b"\n"), 1):
+                      if matches(line):
+                          print(f"Restricted content {display(path)}:{number}")
+                          passed = False
+
+          revision = sha if base == "0" * 40 else f"{base}..{sha}"
+          for commit in git("rev-list", revision).decode().splitlines():
+              data = json.loads(subprocess.check_output(
+                  ["gh", "api", f"repos/{os.environ['GH_REPO']}/commits/{commit}",
+                   "--jq", "{author: .author.login, committer: .committer.login}"],
+                  stderr=subprocess.DEVNULL,
+              ))
+              author, committer = git("show", "-s", "--format=%ae%x00%ce", commit).rstrip(b"\n").split(b"\0")
+              for field, email in (("author", author), ("committer", committer)):
+                  login = (data.get(field) or "").lower()
+                  if login in maintainer_logins and not (
+                      email.lower() == b"noreply@unifinity.com"
+                      or email.lower().endswith(b"@users.noreply.github.com")
+                  ):
+                      print(f"Maintainer {field} must use a noreply address in commit {commit}.")
+                      passed = False
+          sys.exit(0 if passed else 1)
+          PY
+      - name: Set commit status
+        if: always() && steps.target.outputs.sha != ''
+        env:
+          SCAN_SHA: ${{ steps.target.outputs.sha }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          state=failure
+          if [[ "$JOB_STATUS" == success ]]; then
+            state=success
+          fi
+          gh api --silent "repos/$GH_REPO/statuses/$SCAN_SHA" \
+            -f context=org-strings -f state="$state" -f description='Organization strings and commit identity'

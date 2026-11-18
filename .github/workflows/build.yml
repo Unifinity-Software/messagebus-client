@@ -1,0 +1,58 @@
+name: Build
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      os:
+        description: Runner operating system
+        type: choice
+        options: [ubuntu-latest, windows-latest, macos-latest]
+        default: ubuntu-latest
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build
+    runs-on: ${{ inputs.os || 'ubuntu-latest' }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/*.csproj', 'Directory.Build.props', 'Directory.Packages.props', 'global.json') }}
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+          cache: false
+      - name: Scan for credentials
+        run: |
+          go install github.com/zricethezav/gitleaks/v8@v8.30.0
+          bin=$(go env GOPATH)
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            bin=$(cygpath -u "$bin")
+          fi
+          "$bin/bin/gitleaks" dir . --redact
+      - run: python eng/check-public-contracts.py
+      - run: dotnet build MessageBus.Client.slnx -c Release
+      - run: dotnet test --solution MessageBus.Client.slnx -c Release --no-build
+      - run: dotnet pack MessageBus.Client.slnx -c Release -p:Version=0.0.0-ci.1 -o artifacts/packages
+      - run: bash eng/verify-packages.sh artifacts/packages 0.0.0-ci.1
+      - run: python eng/test-check-packages.py
+      - name: Build the runner image build stage
+        if: runner.os == 'Linux'
+        run: docker build -f docker/runner/Dockerfile --target build .
