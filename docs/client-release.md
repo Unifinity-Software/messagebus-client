@@ -60,8 +60,9 @@ and verifies the packages and builds the complete runner image before
 publishing with GitHub OIDC and a short-lived nuget.org credential.
 
 The publish job rechecks Build and the disclosure status before publishing. It
-uploads packages in dependency order and the mbus tool last. GitHub stages
-a draft, verifies the eight `.nupkg` and seven `.snupkg` assets by SHA-256,
+submits the libraries in dependency order so NuGet can index them together.
+It verifies their signatures and payloads before uploading the mbus tool.
+GitHub stages a draft, verifies the eight `.nupkg` and seven `.snupkg` assets by SHA-256,
 and publishes the completed release. A prerelease version produces a GitHub
 prerelease.
 

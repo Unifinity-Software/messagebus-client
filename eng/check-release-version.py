@@ -55,6 +55,7 @@ PUBLISH_ORDER = tuple("MessageBus.Ai." + suffix for suffix in (
 ))
 FEED = "https://api.nuget.org"
 SIGNATURE = ".signature.p7s"
+INDEX_TIMEOUT_SECONDS = 40 * 60
 
 
 def check_versions(version, candidate, resume):
@@ -90,10 +91,10 @@ def compare_payload(candidate, published):
                         break
 
 
-def verify_published(package, version, path, download, wait=False):
+def verify_published(package, version, path, download, deadline=None):
     name = package.lower()
     url = f"{FEED}/v3-flatcontainer/{name}/{version}/{name}.{version}.nupkg"
-    for attempt in range(60 if wait else 1):
+    while True:
         try:
             with urlopen(Request(url, headers={"Cache-Control": "no-cache"}), timeout=30) as response:
                 with download.open("wb") as output:
@@ -103,10 +104,10 @@ def verify_published(package, version, path, download, wait=False):
         except HTTPError as error:
             if error.code != 404:
                 raise
-            if attempt < 59 and wait:
-                time.sleep(10)
-    else:
-        raise ValueError(f"Could not verify {path.name} on nuget.org. Retry this run after indexing.")
+            remaining = deadline - time.monotonic() if deadline is not None else 0
+            if remaining <= 0:
+                raise ValueError(f"Could not verify {path.name} on nuget.org. Retry this run after indexing.") from error
+            time.sleep(min(10, remaining))
 
     compare_payload(path, download)
     # Run on the Linux publishing runner with NuGet's signature verification.
@@ -122,16 +123,27 @@ def publish(folder, version, candidate, resume, download):
         if package in existing:
             verify_published(package, version, folder / f"{package}.{version}.nupkg", download)
 
-    for package in PUBLISH_ORDER:
+    libraries, tool = PUBLISH_ORDER[:-1], PUBLISH_ORDER[-1]
+    # Submit dependencies in order, then let NuGet index them in the same window.
+    for package in libraries:
+        if package not in existing:
+            push(folder / f"{package}.{version}.nupkg", "--no-symbols", require_upload=not resume)
+
+    deadline = time.monotonic() + INDEX_TIMEOUT_SECONDS
+    for package in libraries:
         path = folder / f"{package}.{version}.nupkg"
         if package not in existing:
-            push(path, "--no-symbols", require_upload=not resume)
-            # A duplicate response is not proof of a successful or matching upload.
-            verify_published(package, version, path, download, wait=True)
+            verify_published(package, version, path, download, deadline)
         symbols = path.with_suffix(".snupkg")
         if symbols.is_file():
             # Retry the same symbols even when NuGet already accepted the .nupkg.
             push(symbols)
+
+    # Only make the CLI available after all of its libraries are downloadable.
+    if tool not in existing:
+        path = folder / f"{tool}.{version}.nupkg"
+        push(path, "--no-symbols", require_upload=not resume)
+        verify_published(tool, version, path, download, time.monotonic() + INDEX_TIMEOUT_SECONDS)
 
 
 def push(path, *args, require_upload=False):
