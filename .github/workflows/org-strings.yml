@@ -1,0 +1,221 @@
+name: Organization strings
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: Pull request number targeting main
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  scan:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: org-strings
+    permissions:
+      contents: read
+      pull-requests: read
+      statuses: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      # Space-separated GitHub logins configured by repository administrators.
+      MAINTAINERS: ${{ vars.MBUS_MAINTAINERS }}
+    steps:
+      - id: target
+        name: Select immutable scan target
+        env:
+          PR: ${{ inputs.pr }}
+          BEFORE: ${{ github.event.before }}
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+        run: |
+          set -euo pipefail
+          [[ -n "${MAINTAINERS// /}" ]]
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+            for login in "$GITHUB_ACTOR" "$TRIGGERING_ACTOR"; do
+              case " ${MAINTAINERS,,} " in
+                *" ${login,,} "*) ;;
+                *) echo "Dispatch requires a configured maintainer." >&2; exit 1 ;;
+              esac
+            done
+            [[ "$PR" =~ ^[1-9][0-9]{0,9}$ ]]
+            fields=$(gh api "repos/$GH_REPO/pulls/$PR" \
+              --jq 'select(.state == "open" and .base.ref == "main") | [.head.sha, .base.sha] | @tsv' 2>/dev/null)
+            read -r sha base <<< "$fields"
+          else
+            sha=$GITHUB_SHA
+            base=$BEFORE
+          fi
+          [[ "$sha" =~ ^[a-f0-9]{40}$ && "$base" =~ ^[a-f0-9]{40}$ ]]
+          printf 'sha=%s\nbase=%s\n' "$sha" "$base" >> "$GITHUB_OUTPUT"
+          gh api --silent "repos/$GH_REPO/statuses/$sha" \
+            -f context=org-strings -f state=pending -f description='Scanning commit'
+      - name: Scan Git blobs as data
+        env:
+          SCAN_SHA: ${{ steps.target.outputs.sha }}
+          BASE_SHA: ${{ steps.target.outputs.base }}
+          ORG_STRINGS: ${{ secrets.ORG_STRINGS }}
+        run: |
+          set -euo pipefail
+          cd "$(mktemp -d)"
+          git init -q
+          # Fetch objects only. Never check out PR files or follow symlinks/submodules.
+          auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          echo "::add-mask::$auth"
+          git -c "http.extraHeader=Authorization: Basic $auth" fetch --quiet --no-tags --no-recurse-submodules \
+            "$GITHUB_SERVER_URL/$GH_REPO.git" "$SCAN_SHA"
+          if [[ "$BASE_SHA" != 0000000000000000000000000000000000000000 ]]; then
+            git -c "http.extraHeader=Authorization: Basic $auth" fetch --quiet --no-tags --no-recurse-submodules \
+              "$GITHUB_SERVER_URL/$GH_REPO.git" "$BASE_SHA"
+          fi
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+          import sys
+
+          OID = rb"[0-9a-f]{40}"
+          ZERO = "0" * 40
+
+
+          def git(*args, **kwargs):
+              return subprocess.check_output(["git", *args], stderr=subprocess.DEVNULL, **kwargs)
+
+
+          def scan():
+              sha = os.environ["SCAN_SHA"]
+              base = os.environ["BASE_SHA"]
+              if not all(re.fullmatch(OID, value.encode()) for value in (sha, base)):
+                  raise ValueError
+              for value in (sha, base):
+                  if value != ZERO and git("cat-file", "-t", value) != b"commit\n":
+                      raise ValueError
+
+              logins = set(os.environ["MAINTAINERS"].lower().split())
+              lines = (line.strip().lower() for line in os.environb.get(b"ORG_STRINGS", b"").splitlines())
+              patterns = tuple(line for line in lines if line and not line.startswith(b"#"))
+              if not patterns:
+                  sys.exit("Configure ORG_STRINGS with at least one literal.")
+
+              def matches(data):
+                  folded = data.lower()
+                  return any(pattern in folded for pattern in patterns)
+
+              def display(path):
+                  escaped = json.dumps(os.fsdecode(path), ensure_ascii=True)
+                  escaped = escaped.replace("#", r"\u0023").replace(":", r"\u003a")
+                  return "[redacted filename]" if matches(path) or matches(escaped.encode()) else escaped
+
+              passed = True
+
+              def report(message):
+                  nonlocal passed
+                  passed = False
+                  print(message)
+
+              tip_blobs = set()
+              blob_paths = {}
+              for record in git("ls-tree", "-rz", "-t", sha).split(b"\0"):
+                  if not record:
+                      continue
+                  header, path = record.split(b"\t", 1)
+                  _, kind, obj = header.split()
+                  if matches(path):
+                      report(f"Restricted filename in tree {sha} (object {obj.decode()}).")
+                  if kind == b"blob":
+                      tip_blobs.add(obj)
+                      blob_paths.setdefault(obj, set()).add(path)
+
+              revision = sha if base == ZERO else f"{base}..{sha}"
+              objects = set(git("rev-list", "--objects", "--no-object-names", revision).splitlines())
+              commits = git("rev-list", revision)
+              paths = git("diff-tree", "--stdin", "--root", "-m", "-r", "--no-renames",
+                          "--no-commit-id", "--name-only", "-z", input=commits)
+              if any(matches(path) for path in paths.split(b"\0")):
+                  report(f"Restricted historical filename in range ending at {sha}.")
+
+              with subprocess.Popen(["git", "cat-file", "--batch"], stdin=subprocess.PIPE,
+                                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) as batch:
+                  try:
+                      for obj in sorted(tip_blobs | objects):
+                          if not re.fullmatch(OID, obj):
+                              raise ValueError
+                          batch.stdin.write(obj + b"\n")
+                          batch.stdin.flush()
+                          returned, kind, length = batch.stdout.readline().split()
+                          if returned != obj:
+                              raise ValueError
+                          size = int(length)
+                          data = batch.stdout.read(size)
+                          if len(data) != size or batch.stdout.read(1) != b"\n":
+                              raise ValueError
+                          identity = obj.decode()
+                          if kind == b"blob" and matches(data):
+                              for number, line in enumerate(data.split(b"\n"), 1):
+                                  if matches(line):
+                                      paths = blob_paths.get(obj)
+                                      if paths:
+                                          for path in sorted(paths):
+                                              report(f"Restricted content {display(path)}:{number}")
+                                      else:
+                                          report(f"Restricted content in blob {identity}:{number}")
+                          if kind != b"commit":
+                              continue
+
+                          header, separator, message = data.partition(b"\n\n")
+                          if not separator:
+                              raise ValueError
+                          if matches(message):
+                              report(f"Restricted commit message in {identity}.")
+                          attributed = subprocess.check_output(
+                              ["gh", "api", f"repos/{os.environ['GH_REPO']}/commits/{identity}",
+                               "--jq", '[.author.login // "", .committer.login // ""] | @tsv'],
+                              stderr=subprocess.DEVNULL,
+                          ).removesuffix(b"\n").decode().split("\t")
+                          author_login, committer_login = attributed
+                          for field, login in ((b"author", author_login), (b"committer", committer_login)):
+                              field_name = field.decode()
+                              entries = [line for line in header.split(b"\n") if line.startswith(field + b" ")]
+                              if len(entries) != 1:
+                                  raise ValueError
+                              entry = re.fullmatch(field + rb" (.*) <([^<>]*)> -?[0-9]+ [+-][0-9]{4}", entries[0])
+                              if entry is None:
+                                  raise ValueError
+                              name, email = entry.groups()
+                              for label, value in (("name", name), ("email", email)):
+                                  if matches(value):
+                                      report(f"Restricted {field_name} {label} in commit {identity}.")
+                              noreply = re.fullmatch(rb"noreply@[a-z0-9.-]+\.[a-z0-9-]+", email.lower())
+                              github_noreply = re.fullmatch(rb"[^@]+@users\.noreply\.github\.com", email.lower())
+                              if login.lower() in logins and not (noreply or github_noreply):
+                                  report(f"Maintainer {field_name} must use a noreply address in commit {identity}.")
+                  finally:
+                      batch.stdin.close()
+                      batch.stdout.close()
+                  if batch.wait() != 0:
+                      raise ValueError
+              return passed
+
+
+          try:
+              sys.exit(0 if scan() else 1)
+          except (ValueError, OSError, subprocess.SubprocessError):
+              sys.exit("The organization scan could not verify the requested Git objects or commit metadata.")
+          PY
+      - name: Set commit status
+        if: always() && steps.target.outputs.sha != ''
+        env:
+          SCAN_SHA: ${{ steps.target.outputs.sha }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          state=failure
+          if [[ "$JOB_STATUS" == success ]]; then
+            state=success
+          fi
+          gh api --silent "repos/$GH_REPO/statuses/$SCAN_SHA" \
+            -f context=org-strings -f state="$state" -f description='Organization strings and commit identity'

@@ -20,18 +20,3 @@ public static class FrictionKinds
     public static IReadOnlyDictionary<string, long> Count(IEnumerable<string> kinds) =>
         kinds.GroupBy(k => k, StringComparer.Ordinal).ToDictionary(g => g.Key, g => g.LongCount(), StringComparer.Ordinal);
 }
-
-/// <summary>Plain metadata linking a friction report to its thread; notes are in encrypted replies.</summary>
-public sealed record FrictionTask
-{
-    /// <summary>The task thread to open.</summary>
-    public required string ThreadId { get; init; }
-    /// <summary>The project, when assigned.</summary>
-    public string? ProjectId { get; init; }
-    /// <summary>The delivery role, when assigned.</summary>
-    public string? Role { get; init; }
-    /// <summary>When this run settled.</summary>
-    public required DateTimeOffset At { get; init; }
-    /// <summary>One kind per reported note.</summary>
-    public IReadOnlyList<string> Kinds { get; set; } = [];
-}

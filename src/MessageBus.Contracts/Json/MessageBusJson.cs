@@ -135,7 +135,6 @@ public static class MessageBusJson
 [JsonSerializable(typeof(ProjectVisibility))]
 [JsonSerializable(typeof(SourceRef))]
 [JsonSerializable(typeof(ProjectTotals))]
-[JsonSerializable(typeof(FrictionTask))]
 [JsonSerializable(typeof(ProjectInfo))]
 [JsonSerializable(typeof(ProjectActivity))]
 // Roles

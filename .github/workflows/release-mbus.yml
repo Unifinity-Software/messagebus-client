@@ -1,0 +1,324 @@
+name: Release mbus
+on:
+  push:
+    tags: ['mbus-v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Normalized SemVer package version
+        type: string
+        required: true
+      tagged_commit:
+        description: Exact authorized merged main commit
+        type: string
+        required: true
+
+permissions: {}
+
+jobs:
+  dispatch-tag:
+    if: github.event_name == 'push' && !github.event.deleted && vars.MBUS_RELEASE_ENABLED == 'true' && !github.event.repository.private
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Dispatch release on protected main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version=${GITHUB_REF_NAME#mbus-v}
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-z0-9.-]+)?$ ]]
+          gh workflow run release-mbus.yml --repo "$GITHUB_REPOSITORY" --ref main \
+            -f version="$version" -f tagged_commit="$GITHUB_SHA"
+
+  prepare:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && vars.MBUS_RELEASE_ENABLED == 'true' && !github.event.repository.private
+    runs-on: ubuntu-latest
+    concurrency:
+      group: mbus-prepare-${{ inputs.version }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: read
+      statuses: read
+    outputs:
+      sha: ${{ steps.eligible.outputs.sha }}
+      version: ${{ steps.eligible.outputs.version }}
+      attempt: ${{ steps.eligible.outputs.attempt }}
+      artifact_id: ${{ steps.artifact.outputs.artifact-id }}
+    steps:
+      - name: Verify merged main commit, Build and disclosure status
+        id: eligible
+        uses: actions/github-script@v8
+        env:
+          VERSION: ${{ inputs.version }}
+          SHA: ${{ inputs.tagged_commit }}
+        with:
+          script: |
+            const repo = context.repo;
+            const { VERSION: version, SHA: sha } = process.env;
+            if (!/^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[a-z0-9-]+(\.[a-z0-9-]+)*)?$/.test(version)) {
+              throw new Error('Use a normalized SemVer version.');
+            }
+            if (!/^[a-f0-9]{40}$/.test(sha)) {
+              throw new Error('Supply the exact authorized commit.');
+            }
+            const { data: comparison } = await github.rest.repos.compareCommitsWithBasehead({
+              ...repo, basehead: `${sha}...${context.sha}`, per_page: 1
+            });
+            if (comparison.merge_base_commit.sha !== sha) {
+              throw new Error('The selected commit must be reachable from main.');
+            }
+
+            const tag = `mbus-v${version}`;
+            let tagObject;
+            try {
+              const { data } = await github.rest.git.getRef({ ...repo, ref: `tags/${tag}` });
+              tagObject = data.object;
+            } catch (error) {
+              if (error.status !== 404) throw error;
+            }
+            // Accept annotated tags as well as lightweight tags.
+            while (tagObject?.type === 'tag') {
+              const { data } = await github.rest.git.getTag({ ...repo, tag_sha: tagObject.sha });
+              tagObject = data.object;
+            }
+            if (tagObject && (tagObject.type !== 'commit' || tagObject.sha !== sha)) {
+              throw new Error('The version tag points at a different commit.');
+            }
+
+            const pulls = await github.paginate(github.rest.repos.listPullRequestsAssociatedWithCommit, {
+              ...repo, commit_sha: sha, per_page: 100
+            });
+            let mergedToMain = false;
+            for (const pr of pulls.filter(pr => pr.base.ref === 'main' && pr.state === 'closed')) {
+              const { data } = await github.rest.pulls.get({ ...repo, pull_number: pr.number });
+              if (data.merged && data.base.ref === 'main' && data.merge_commit_sha === sha) {
+                mergedToMain = true;
+                break;
+              }
+            }
+            if (!mergedToMain) {
+              throw new Error('The selected commit must be the merge result of a PR into main.');
+            }
+
+            const { data } = await github.rest.actions.listWorkflowRuns({
+              ...repo, workflow_id: 'build.yml', head_sha: sha,
+              branch: 'main', event: 'push', per_page: 1
+            });
+            const latest = data.workflow_runs[0];
+            if (latest?.head_sha !== sha || latest.status !== 'completed' || latest.conclusion !== 'success') {
+              throw new Error('The latest post-merge Build for the selected main commit must have succeeded.');
+            }
+            let disclosure;
+            for await (const page of github.paginate.iterator(github.rest.repos.listCommitStatusesForRef, {
+              ...repo, ref: sha, per_page: 100
+            })) {
+              disclosure = page.data.find(status => status.context === 'org-strings');
+              if (disclosure) break;
+            }
+            if (disclosure?.state !== 'success') {
+              throw new Error('The latest org-strings status must be successful for the selected commit.');
+            }
+            core.setOutput('attempt', process.env.GITHUB_RUN_ATTEMPT);
+            core.setOutput('sha', sha);
+            core.setOutput('version', version);
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ steps.eligible.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+      - name: Check version and pack
+        env:
+          VERSION: ${{ steps.eligible.outputs.version }}
+        run: |
+          set -euo pipefail
+          python3 eng/check-release-version.py "$VERSION"
+          dotnet pack MessageBus.Client.slnx -c Release -p:Version="$VERSION" \
+            -p:RepositoryCommit="$(git rev-parse HEAD)" -o artifacts/packages
+          bash eng/verify-packages.sh artifacts/packages "$VERSION"
+      - name: Check the complete runner image
+        run: docker build -f docker/runner/Dockerfile .
+      - uses: actions/upload-artifact@v4
+        id: artifact
+        with:
+          name: release-packages-${{ github.run_attempt }}
+          path: |
+            artifacts/packages/*.nupkg
+            artifacts/packages/*.snupkg
+          if-no-files-found: error
+
+  publish:
+    needs: prepare
+    runs-on: ubuntu-latest
+    environment: nuget
+    concurrency:
+      group: mbus-publish
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      actions: read
+      statuses: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+      - name: Require the immutable candidate artifact ID
+        env:
+          ARTIFACT_ID: ${{ needs.prepare.outputs.artifact_id }}
+        run: '[[ "$ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]'
+      - uses: actions/download-artifact@v4
+        with:
+          artifact-ids: ${{ needs.prepare.outputs.artifact_id }}
+          merge-multiple: true
+          path: artifacts/packages
+      - name: Recheck Build, disclosure status and candidate after approval
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          NUGET_USER: ${{ secrets.NUGET_USER }}
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ needs.prepare.outputs.sha }}
+        run: |
+          set -euo pipefail
+          [[ -n "$NUGET_USER" ]] || { echo 'Configure NUGET_USER in the nuget environment.' >&2; exit 1; }
+          passed=$(gh api --method GET "repos/$GITHUB_REPOSITORY/actions/workflows/build.yml/runs" \
+            -f branch=main -f event=push -f head_sha="$SHA" -F per_page=1 \
+            --jq '.workflow_runs[0] | .status == "completed" and .conclusion == "success"')
+          [[ "$passed" == true ]] || { echo 'The latest post-merge Build is no longer green.' >&2; exit 1; }
+          disclosure=$(gh api --paginate "repos/$GITHUB_REPOSITORY/commits/$SHA/statuses?per_page=100" \
+            --jq '.[] | select(.context == "org-strings") | .state')
+          [[ "${disclosure%%$'\n'*}" == success ]] || { echo 'The org-strings status is no longer green.' >&2; exit 1; }
+          python3 eng/check-packages.py artifacts/packages "$VERSION" "$SHA"
+      - uses: NuGet/login@v1
+        id: login
+        with:
+          user: ${{ secrets.NUGET_USER }}
+      - name: Push packages and accompanying symbols
+        env:
+          NUGET_API_KEY: ${{ steps.login.outputs.NUGET_API_KEY }}
+          NUGET_SYMBOL_API_KEY: ${{ steps.login.outputs.NUGET_API_KEY }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          PREPARED_ATTEMPT: ${{ needs.prepare.outputs.attempt }}
+        run: |
+          set -euo pipefail
+          [[ -n "$NUGET_API_KEY" ]]
+          python3 eng/check-release-version.py "$VERSION" artifacts/packages \
+            "$PREPARED_ATTEMPT" "$GITHUB_RUN_ATTEMPT" "$RUNNER_TEMP/published.nupkg"
+
+  github-release:
+    needs: [prepare, publish]
+    runs-on: ubuntu-latest
+    concurrency:
+      group: mbus-github-release-${{ needs.prepare.outputs.version }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    steps:
+      - name: Require the immutable candidate artifact ID
+        env:
+          ARTIFACT_ID: ${{ needs.prepare.outputs.artifact_id }}
+        run: '[[ "$ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]'
+      - uses: actions/download-artifact@v4
+        with:
+          artifact-ids: ${{ needs.prepare.outputs.artifact_id }}
+          merge-multiple: true
+          path: artifacts/packages
+      - name: Verify the tag, stage exact assets and publish the release
+        uses: actions/github-script@v8
+        env:
+          SHA: ${{ needs.prepare.outputs.sha }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        with:
+          script: |
+            const { createHash } = require('node:crypto');
+            const { createReadStream, readFileSync, readdirSync, statSync } = require('node:fs');
+            const { join } = require('node:path');
+            const repo = context.repo;
+            const { SHA: sha, VERSION: version } = process.env;
+            const tag = `mbus-v${version}`;
+            const prerelease = version.includes('-');
+            const directory = 'artifacts/packages';
+            const filenames = readdirSync(directory).sort();
+            if (filenames.filter(name => name.endsWith('.nupkg')).length !== 8 ||
+                filenames.filter(name => name.endsWith('.snupkg')).length !== 7 ||
+                filenames.length !== 15) {
+              throw new Error('The candidate must contain eight packages and seven symbol packages.');
+            }
+
+            const expected = new Map();
+            for (const name of filenames) {
+              const path = join(directory, name);
+              const { size } = statSync(path);
+              const hash = createHash('sha256');
+              for await (const chunk of createReadStream(path)) hash.update(chunk);
+              expected.set(name, { path, size, digest: `sha256:${hash.digest('hex')}` });
+            }
+
+            async function verifyTag(create) {
+              let object;
+              try {
+                const { data } = await github.rest.git.getRef({ ...repo, ref: `tags/${tag}` });
+                object = data.object;
+              } catch (error) {
+                if (!create || error.status !== 404) throw error;
+                await github.rest.git.createRef({ ...repo, ref: `refs/tags/${tag}`, sha });
+                return;
+              }
+              while (object.type === 'tag') {
+                const { data } = await github.rest.git.getTag({ ...repo, tag_sha: object.sha });
+                object = data.object;
+              }
+              if (object.type !== 'commit' || object.sha !== sha) {
+                throw new Error('The version tag points at a different commit.');
+              }
+            }
+
+            // Listing as a writer includes drafts, including drafts with a pre-existing tag.
+            const releases = await github.paginate(github.rest.repos.listReleases, { ...repo, per_page: 100 });
+            const matches = releases.filter(release => release.tag_name === tag);
+            if (matches.length > 1) throw new Error('Multiple releases exist for the selected tag.');
+            let release = matches[0];
+            await verifyTag(!release);
+            if (!release) {
+              ({ data: release } = await github.rest.repos.createRelease({
+                ...repo, tag_name: tag, target_commitish: sha, draft: true, prerelease, generate_release_notes: true
+              }));
+            }
+            if (release.prerelease !== prerelease || (release.draft && release.target_commitish !== sha)) {
+              throw new Error('The existing release has different candidate metadata.');
+            }
+
+            const params = { ...repo, release_id: release.id };
+            async function missingAssets() {
+              const assets = await github.paginate(github.rest.repos.listReleaseAssets, { ...params, per_page: 100 });
+              const remaining = new Map(expected);
+              for (const asset of assets) {
+                const file = remaining.get(asset.name);
+                if (!file || asset.state !== 'uploaded' || asset.size !== file.size || asset.digest !== file.digest) {
+                  throw new Error('Existing release assets differ from the verified candidate.');
+                }
+                remaining.delete(asset.name);
+              }
+              return remaining;
+            }
+
+            const missing = await missingAssets();
+            if (!release.draft && missing.size) throw new Error('The published release is missing verified assets.');
+            for (const [name, file] of missing) {
+              await github.rest.repos.uploadReleaseAsset({
+                ...params, name, data: readFileSync(file.path),
+                headers: { 'content-type': 'application/octet-stream', 'content-length': file.size }
+              });
+            }
+            if ((await missingAssets()).size) throw new Error('Release assets are incomplete.');
+            await verifyTag(false);
+            if (release.draft) await github.rest.repos.updateRelease({ ...params, draft: false });
