@@ -1,0 +1,2 @@
+# Secret files for compose.yaml; never commit them.
+secrets/

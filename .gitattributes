@@ -1,0 +1,8 @@
+# Normalize text to LF in the repository; Git picks the working-tree ending.
+* text=auto
+
+# Shell scripts run on macOS, Linux and in containers: keep LF on every checkout.
+*.sh text eol=lf
+
+*.png binary
+*.ico binary

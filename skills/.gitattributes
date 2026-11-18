@@ -1,0 +1,3 @@
+# The skill is embedded into mbus at build time and installed as is into Claude Code and Codex.
+# Codex reads the frontmatter as "---\n", so keep LF on every machine, whatever core.autocrlf says.
+mbus-orchestrate/** text eol=lf

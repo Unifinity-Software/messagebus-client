@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- End-to-end encryption for message bodies, attachments and role keys (issue the original issue). Used by the mbus
+       CLI, the local MCP server and the runner (which encrypt and decrypt on the machine) and by the API
+       (which only checks public keys and grant signatures). .NET's built-in crypto only; no
+       platform-specific key storage: keys import and export as PKCS#8 PEM and the CLI decides how
+       to protect them on disk. docs/security-model.md describes the scheme. -->
+  <PropertyGroup>
+    <PackageId>MessageBus.Ai.Crypto</PackageId>
+    <IsPackable>true</IsPackable>
+    <Description>Message body and attachment encryption for messagebus.ai.</Description>
+    <RootNamespace>MessageBus.Crypto</RootNamespace>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <WarningsAsErrors>$(WarningsAsErrors);CS1591;CS1573;CS1572;CS1574</WarningsAsErrors>
+    <IsAotCompatible>true</IsAotCompatible>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\MessageBus.Contracts\MessageBus.Contracts.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Known-answer tests reach the raw primitives (key wrap, KDF, content layout). -->
+    <InternalsVisibleTo Include="MessageBus.Crypto.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update="README.md" Pack="true" PackagePath="/README.md" />
+  </ItemGroup>
+
+</Project>

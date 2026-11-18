@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Code attachments on the machine side (the original issue): package a repository range as a git bundle (or a patch,
+       or take a plain file), seal it to the recipient's key, upload it and make the AttachmentRef; and the
+       reverse: fetch through a download link, check the hash, open it, verify the bundle and fetch it into
+       a repository. Shared by the mbus CLI and the local MCP server (the original issue). Uses the git command line, so it
+       works the same on Windows and macOS. Trim-safe: JSON through MessageBusJson's source-generated metadata. -->
+  <PropertyGroup>
+    <PackageId>MessageBus.Ai.Attachments.Client</PackageId>
+    <IsPackable>true</IsPackable>
+    <Description>Machine-side code attachment packaging and transfer for messagebus.ai.</Description>
+    <RootNamespace>MessageBus.Attachments.Client</RootNamespace>
+    <IsAotCompatible>true</IsAotCompatible>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\MessageBus.Contracts\MessageBus.Contracts.csproj" />
+    <ProjectReference Include="..\MessageBus.Crypto\MessageBus.Crypto.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update="README.md" Pack="true" PackagePath="/README.md" />
+  </ItemGroup>
+
+</Project>

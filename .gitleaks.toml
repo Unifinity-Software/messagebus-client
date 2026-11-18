@@ -1,0 +1,50 @@
+title = "Client secret scan with exact synthetic test vectors"
+
+[extend]
+useDefault = true
+
+# Only these exact scanner and redaction test vectors are allowed in the named test and this config.
+# Owner disclosure acceptance must be recorded in the private split record before this candidate is pushed.
+# No whole-file exceptions.
+
+[[allowlists]]
+description = "Synthetic jwt vector"
+targetRules = ["generic-api-key", "jwt"]
+condition = "AND"
+paths = ['''^(tests/MessageBus\.Cli\.Tests/Telemetry/RunnerLogBridgeTests\.cs|\.gitleaks\.toml)$''']
+regexes = ['''^\QeyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.c2lnbmF0dXJlLXZhbHVl\E$''']
+
+[[allowlists]]
+description = "Synthetic slack-bot-token vector"
+targetRules = ["generic-api-key", "slack-bot-token"]
+condition = "AND"
+paths = ['''^(tests/MessageBus\.Crypto\.Tests/SecretScannerTests\.cs|\.gitleaks\.toml)$''']
+regexes = ['''^\Qxoxb-123456789012-1234567890123-AbCdEfGhIjKlMnOpQrStUvWx\E$''']
+
+[[allowlists]]
+description = "Synthetic generic-api-key vector"
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['''^(tests/MessageBus\.Crypto\.Tests/SecretScannerTests\.cs|\.gitleaks\.toml)$''']
+regexes = ['''^\QEby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==\E$''']
+
+[[allowlists]]
+description = "Synthetic github-pat vector"
+targetRules = ["generic-api-key", "github-pat"]
+condition = "AND"
+paths = ['''^(tests/MessageBus\.Crypto\.Tests/SecretScannerTests\.cs|\.gitleaks\.toml)$''']
+regexes = ['''^\Qghp_16C7e42F292c6912E7710c838347Ae178B4a\E$''']
+
+[[allowlists]]
+description = "Synthetic jwt vector"
+targetRules = ["generic-api-key", "jwt"]
+condition = "AND"
+paths = ['''^(tests/MessageBus\.Crypto\.Tests/SecretScannerTests\.cs|\.gitleaks\.toml)$''']
+regexes = ['''^\QeyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U\E$''']
+
+[[allowlists]]
+description = "Synthetic private-key vector"
+targetRules = ["generic-api-key", "private-key"]
+condition = "AND"
+paths = ['''^(tests/MessageBus\.Crypto\.Tests/SecretScannerTests\.cs|\.gitleaks\.toml)$''']
+regexes = ['''^\Q-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\n-----END OPENSSH PRIVATE KEY-----")]\E\r?\n\Q    [InlineData("private-key", "-----BEGIN PRIVATE KEY-----\E$''']

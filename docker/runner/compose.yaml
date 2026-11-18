@@ -1,0 +1,39 @@
+# One messagebus.ai runner on any machine with Docker or Podman, its secrets read from files
+# (replace them with your secret store's mount, e.g. the Key Vault CSI driver on Kubernetes).
+# No ports are published: the runner only connects out to the server.
+#
+#   MBUS_SERVER=https://app.messagebus.ai docker compose -f docker/runner/compose.yaml up -d
+#
+# Put each secret in ./secrets/<name> next to this file (keep that folder out of source control).
+# mbus_api_key is a key created with "Sign in runners" (Security, New API key): on first start the
+# runner makes its own machine key, signs in with it as a shared runner, and keeps that identity in
+# the runner-home volume.
+name: messagebus-runner
+
+services:
+  runner:
+    build:
+      context: ../..
+      dockerfile: docker/runner/Dockerfile
+    image: messagebus-runner
+    restart: unless-stopped
+    environment:
+      MBUS_SERVER: ${MBUS_SERVER:?set MBUS_SERVER to the server URL}
+      MBUS_MACHINE_NAME: ${MBUS_MACHINE_NAME:-docker-runner}
+      MBUS_LOCATION: ${MBUS_LOCATION:-Docker}
+    # Each secret appears as /run/secrets/<name>; the entry point turns mbus_api_key into MBUS_API_KEY.
+    secrets:
+      - mbus_api_key
+      - anthropic_api_key
+    volumes:
+      # Agent sign-in state, mbus settings (the runner's machine key) and checked-out code survive a restart.
+      - runner-home:/home/runner
+
+secrets:
+  mbus_api_key:
+    file: ./secrets/mbus_api_key
+  anthropic_api_key:
+    file: ./secrets/anthropic_api_key
+
+volumes:
+  runner-home:

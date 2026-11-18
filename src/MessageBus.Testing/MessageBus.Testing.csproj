@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <PackageId>MessageBus.Ai.Testing</PackageId>
+    <IsPackable>true</IsPackable>
+    <Description>A fake coding agent for messagebus.ai runner and integration tests.</Description>
+    <RootNamespace>MessageBus.Testing</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <None Update="README.md" Pack="true" PackagePath="/README.md" />
+  </ItemGroup>
+
+</Project>

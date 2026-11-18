@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The MCP tools (the original issue). The tool catalog (names, descriptions, input schemas from MessageBus.Contracts) is
+       shared by the service's remote /mcp endpoint and the local `mbus mcp` stdio server; the local server
+       here is an encrypting proxy to the service endpoint: it seals bodies and attachments for their
+       recipients (the original issue, the original issue), opens what it receives with this machine's keys, and hands out role keys. -->
+  <PropertyGroup>
+    <PackageId>MessageBus.Ai.Mcp</PackageId>
+    <IsPackable>true</IsPackable>
+    <Description>The local encrypting MCP proxy for messagebus.ai.</Description>
+    <RootNamespace>MessageBus.Mcp</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="ModelContextProtocol.Core" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\MessageBus.Contracts\MessageBus.Contracts.csproj" />
+    <ProjectReference Include="..\MessageBus.Crypto\MessageBus.Crypto.csproj" />
+    <ProjectReference Include="..\MessageBus.Attachments.Client\MessageBus.Attachments.Client.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="MessageBus.Cli.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update="README.md" Pack="true" PackagePath="/README.md" />
+  </ItemGroup>
+
+</Project>

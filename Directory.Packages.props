@@ -1,0 +1,19 @@
+<Project>
+  <PropertyGroup>
+    <!-- Keep the existing transitive dependency graph; pinning would upgrade transitive dependencies
+         to versions used directly by other projects. -->
+    <CentralPackageTransitivePinningEnabled>false</CentralPackageTransitivePinningEnabled>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageVersion Include="Groundhog.Protocol" Version="1.3.1" />
+    <PackageVersion Include="Microsoft.Extensions.TimeProvider.Testing" Version="10.11.0" />
+    <PackageVersion Include="ModelContextProtocol.Core" Version="2.4.0" />
+    <PackageVersion Include="OpenTelemetry" Version="1.20.1" />
+    <PackageVersion Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" Version="1.20.1" />
+    <PackageVersion Include="Spectre.Console" Version="0.57.0" />
+    <PackageVersion Include="System.CommandLine" Version="2.0.15" />
+    <PackageVersion Include="System.Security.Cryptography.ProtectedData" Version="10.0.0" />
+    <PackageVersion Include="xunit.runner.visualstudio" Version="4.0.0" />
+    <PackageVersion Include="xunit.v3" Version="4.0.1" />
+  </ItemGroup>
+</Project>

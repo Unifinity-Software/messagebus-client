@@ -1,0 +1,17 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/MessageBus.Attachments.Client/MessageBus.Attachments.Client.csproj" />
+    <Project Path="src/MessageBus.Contracts/MessageBus.Contracts.csproj" />
+    <Project Path="src/MessageBus.Cli/MessageBus.Cli.csproj" />
+    <Project Path="src/MessageBus.Cli.Tool/MessageBus.Cli.Tool.csproj" />
+    <Project Path="src/MessageBus.Crypto/MessageBus.Crypto.csproj" />
+    <Project Path="src/MessageBus.Mcp/MessageBus.Mcp.csproj" />
+    <Project Path="src/MessageBus.Runner.Transport/MessageBus.Runner.Transport.csproj" />
+    <Project Path="src/MessageBus.Testing/MessageBus.Testing.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/MessageBus.Contracts.Tests/MessageBus.Contracts.Tests.csproj" />
+    <Project Path="tests/MessageBus.Cli.Tests/MessageBus.Cli.Tests.csproj" />
+    <Project Path="tests/MessageBus.Crypto.Tests/MessageBus.Crypto.Tests.csproj" />
+  </Folder>
+</Solution>

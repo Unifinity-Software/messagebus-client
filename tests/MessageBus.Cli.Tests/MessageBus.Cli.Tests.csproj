@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Tests for the mbus CLI (issues the original issue and the original issue). They run the real commands in-process against a
+       fake server (an HttpMessageHandler), temp folders for the home directory and fake agent
+       commands on a temp PATH. -->
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+    <OutputType>Exe</OutputType>
+    <UseMicrosoftTestingPlatformRunner>true</UseMicrosoftTestingPlatformRunner>
+    <TestingPlatformDotnetTestSupport>true</TestingPlatformDotnetTestSupport>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.TimeProvider.Testing" />
+    <PackageReference Include="xunit.v3" />
+    <PackageReference Include="xunit.runner.visualstudio" PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="xunit.runner.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- the original issue: which tests skip inside a task's run, and why. -->
+    <Compile Include="..\Shared\InsideRun.cs" Link="Shared\InsideRun.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\MessageBus.Cli\MessageBus.Cli.csproj" />
+  </ItemGroup>
+
+  <!-- the original issue: the fake agent the runner tests start instead of claude/codex. It is its own small
+       program, built and copied next to the tests, so its files stay out of this project. -->
+  <PropertyGroup>
+    <DefaultItemExcludes>$(DefaultItemExcludes);Runner/FakeAgent/**</DefaultItemExcludes>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="Runner\FakeAgent\FakeAgent.csproj" />
+  </ItemGroup>
+
+</Project>

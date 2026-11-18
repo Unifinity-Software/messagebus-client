@@ -1,0 +1,74 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The reusable mbus command implementation; MessageBus.Cli.Tool is the executable. -->
+  <PropertyGroup>
+    <PackageId>MessageBus.Ai.Cli.Core</PackageId>
+    <IsPackable>true</IsPackable>
+    <Description>The reusable implementation of the messagebus.ai mbus command.</Description>
+    <AssemblyName>MessageBus.Cli</AssemblyName>
+    <RootNamespace>MessageBus.Cli</RootNamespace>
+    <!-- the original issue: release-mbus.yml passes -p:Version=<release>, and that build reports exactly it. Every other build is a
+         development build of MbusSourceVersion and reports it with build metadata, e.g. 0.1.0+dev.1a2b3c4 (the commit
+         it was built from, read from .git by the SDK's built-in source control support, no git command needed), or
+         0.1.0+dev without a repository. Build metadata is ignored by every version comparison (ReleaseVersion, the
+         dashboard), so a development build compares equal to MbusSourceVersion, as before. -->
+    <!-- The SDK would add the full commit hash to every build, releases too; MbusBuildVersion below decides instead. -->
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="MessageBus.Cli.Tests" />
+  </ItemGroup>
+
+  <!-- the original issue: a development build's version (see MbusSourceVersion): +dev and the short commit, once the SDK has read it. -->
+  <Target Name="MbusBuildVersion" BeforeTargets="GetAssemblyAttributes"
+          DependsOnTargets="GetAssemblyVersion;InitializeSourceControlInformation"
+          Condition="'$(Version)' == '$(MbusSourceVersion)'">
+    <PropertyGroup>
+      <_MbusCommit Condition="'$(SourceRevisionId)' != ''">$(SourceRevisionId)</_MbusCommit>
+      <_MbusCommit Condition="'$(_MbusCommit)' != '' and $(_MbusCommit.Length) &gt; 7">$(_MbusCommit.Substring(0, 7))</_MbusCommit>
+      <InformationalVersion>$(Version)+dev</InformationalVersion>
+      <InformationalVersion Condition="'$(_MbusCommit)' != ''">$(Version)+dev.$(_MbusCommit)</InformationalVersion>
+    </PropertyGroup>
+  </Target>
+
+  <!-- the original issue: the public key releases are signed with (ECDSA P-256, SubjectPublicKeyInfo base64), built in
+       by the release build: -p:MbusReleasePublicKey=<base64>. Development builds have none (Update/README.md). -->
+  <ItemGroup Condition="'$(MbusReleasePublicKey)' != ''">
+    <AssemblyMetadata Include="MbusReleasePublicKey" Value="$(MbusReleasePublicKey)" />
+  </ItemGroup>
+
+  <!-- the original issue: the Apple team whose Developer ID signs macOS releases (-p:MbusAppleTeamId=<10 characters>). A build signed
+       by that team keeps the machine key where only mbus can read it (Security/MacKeychain.cs). -->
+  <ItemGroup Condition="'$(MbusAppleTeamId)' != ''">
+    <AssemblyMetadata Include="MbusAppleTeamId" Value="$(MbusAppleTeamId)" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="OpenTelemetry" />
+    <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" />
+    <PackageReference Include="Spectre.Console" />
+    <PackageReference Include="System.CommandLine" />
+    <!-- DPAPI for the machine key on Windows (the original issue). -->
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\MessageBus.Contracts\MessageBus.Contracts.csproj" />
+    <ProjectReference Include="..\MessageBus.Runner.Transport\MessageBus.Runner.Transport.csproj" />
+    <!-- The local MCP server behind `mbus mcp` (the original issue), and the runner's decrypted bundles. -->
+    <ProjectReference Include="..\MessageBus.Mcp\MessageBus.Mcp.csproj" />
+  </ItemGroup>
+
+  <!-- The orchestrate skill (the original issue) is built into mbus, so `mbus connect` installs it from the single
+       file. Until skills/mbus-orchestrate has files this matches nothing and connect says so. -->
+  <ItemGroup>
+    <EmbeddedResource Include="..\..\skills\mbus-orchestrate\**\*"
+                      LogicalName="skills/mbus-orchestrate/%(RecursiveDir)%(Filename)%(Extension)" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="$(MSBuildThisFileDirectory)PACKAGE.Core.md" Pack="true" PackagePath="/README.md" Visible="false" />
+  </ItemGroup>
+
+</Project>

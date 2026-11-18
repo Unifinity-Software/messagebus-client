@@ -1,0 +1,68 @@
+# The messagebus.ai runner image: mbus plus the coding agents it can start (Claude Code, Codex,
+# OpenCode, GitHub Copilot CLI). It needs no inbound port: the runner connects out to the server.
+# Secrets (the machine's API key, the agents' keys) come from the environment or from files the
+# container platform mounts from the customer's secret store; see docker/runner/README.md.
+#
+# Build from the repository root:
+#   podman build -f docker/runner/Dockerfile -t messagebus-runner .
+#   docker build -f docker/runner/Dockerfile -t messagebus-runner .
+
+ARG NODE_VERSION=24
+
+# ── mbus, self-contained for the image's architecture ─────────────────────────
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+ARG TARGETARCH
+WORKDIR /src
+COPY global.json Directory.Build.props Directory.Packages.props ./
+COPY src/ src/
+# The orchestrate skill under skills/ is embedded in mbus. The glob lets the build work before
+# that folder exists; global.json is listed only so the COPY always has a source, and is removed.
+COPY global.json skill[s] skills/
+# Build output copied from a developer checkout (Windows paths in obj/) would confuse restore.
+RUN rm -f skills/global.json \
+ && find src -type d \( -name bin -o -name obj -o -name node_modules \) -prune -exec rm -rf {} + \
+ && case "${TARGETARCH:-amd64}" in arm64) rid=linux-arm64 ;; *) rid=linux-x64 ;; esac \
+ && dotnet publish src/MessageBus.Cli.Tool/MessageBus.Cli.Tool.csproj -c Release -r "$rid" --self-contained \
+      -p:PublishSingleFile=true -p:DebugType=none -o /out
+
+# ── runtime: Node (the agent CLIs are npm packages) plus mbus ─────────────────
+FROM node:${NODE_VERSION}-bookworm-slim
+
+# Agent CLI versions. "latest" picks up the newest release at build time; pin them (for example
+# --build-arg CLAUDE_CODE_VERSION=2.1.0) for repeatable images.
+ARG CLAUDE_CODE_VERSION=latest
+ARG CODEX_VERSION=latest
+ARG OPENCODE_VERSION=latest
+ARG COPILOT_VERSION=latest
+
+# git and ssh for the code the agents work on, ICU for .NET, tini to pass signals to mbus.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates git openssh-client libicu72 tini \
+ && rm -rf /var/lib/apt/lists/*
+
+# npm 11 skips install scripts unless allowed; these two fetch each CLI's native binary.
+RUN npm install -g --no-fund --no-audit --allow-scripts=@anthropic-ai/claude-code,opencode-ai \
+      "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+      "@openai/codex@${CODEX_VERSION}" \
+      "opencode-ai@${OPENCODE_VERSION}" \
+      "@github/copilot@${COPILOT_VERSION}" \
+ && npm cache clean --force
+
+COPY --from=build /out/mbus /usr/local/bin/mbus
+COPY docker/runner/entrypoint.sh /usr/local/bin/mbus-entrypoint
+# Strip CRs in case the script was checked out with Windows line endings.
+RUN sed -i 's/\r$//' /usr/local/bin/mbus-entrypoint && chmod 755 /usr/local/bin/mbus-entrypoint /usr/local/bin/mbus
+
+# A non-root user owns the work: agent sign-in state and mbus settings live in its home, checked-out
+# code under ~/work. Mount a volume at /home/runner to keep them across restarts.
+RUN useradd --create-home --uid 10001 --shell /bin/bash runner \
+ && mkdir -p /home/runner/work && chown -R runner:runner /home/runner
+USER runner
+WORKDIR /home/runner/work
+
+# The image is updated by rebuilding it, so the agents don't update themselves inside it.
+ENV DISABLE_AUTOUPDATER=1 \
+    MBUS_SECRETS_DIR=/run/secrets
+
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/mbus-entrypoint"]
+CMD ["runner"]

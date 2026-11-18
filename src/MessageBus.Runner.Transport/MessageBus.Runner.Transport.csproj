@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The runner connection's transport (issue the original issue), both halves: the service accepts a runner's
+       outbound WebSocket and sends HTTP/2 requests back over it (ConnectionAcceptor), and the runner
+       dials out, reconnects with backoff and serves its routes over that socket (ReverseConnectionClient).
+       Nothing in here is specific to tunnels; Groundhog.Protocol supplies the WebSocket stream, the
+       ping/silence timing, the reconnect schedule and the close-code conventions. When
+       Groundhog's public packages ship a packaged connector/acceptor, this library is replaced by it. -->
+  <PropertyGroup>
+    <PackageId>MessageBus.Ai.Runner.Transport</PackageId>
+    <IsPackable>true</IsPackable>
+    <Description>Reverse runner connections for messagebus.ai.</Description>
+    <RootNamespace>MessageBus.Runner.Transport</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Kestrel hosts the runner's HTTP/2 routes over the socket; the service side uses HttpContext. -->
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Groundhog.Protocol" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Only for RunnerTransport (the mbus.v1 defaults: subprotocol, path, close codes). -->
+    <ProjectReference Include="..\MessageBus.Contracts\MessageBus.Contracts.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update="README.md" Pack="true" PackagePath="/README.md" />
+  </ItemGroup>
+
+</Project>

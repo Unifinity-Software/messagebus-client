@@ -1,0 +1,48 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The mbus command-line tool: login, connect, local MCP server (the original issue) and runner (the original issue).
+       One self-contained file per platform; ../MessageBus.Cli/README.md has the macOS steps:
+         dotnet publish src/MessageBus.Cli.Tool -c Release -r osx-arm64 -p:PublishSingleFile=true -p:DebugType=none -o out/osx-arm64
+         dotnet publish src/MessageBus.Cli.Tool -c Release -r win-x64   -p:PublishSingleFile=true -p:DebugType=none -o out/win-x64
+         dotnet publish src/MessageBus.Cli.Tool -c Release -r linux-x64 -p:PublishSingleFile=true -p:DebugType=none -o out/linux-x64 -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>mbus</AssemblyName>
+    <RootNamespace>MessageBus.Cli.Tool</RootNamespace>
+    <Version>$(MbusSourceVersion)</Version>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+    <!-- A runtime identifier on the command line makes the output self-contained. -->
+    <SelfContained Condition="'$(RuntimeIdentifier)' != ''">true</SelfContained>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- Referenced libraries' API documentation is not part of the standalone executable. -->
+    <PublishReferencesDocumentationFiles>false</PublishReferencesDocumentationFiles>
+  </PropertyGroup>
+
+  <!-- One framework-dependent .NET tool for Windows, macOS and Linux, matching Groundhog.Cli.
+       NuGet publishing is independent of the optional signed standalone release feed. -->
+  <PropertyGroup>
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>mbus</ToolCommandName>
+    <PackageId>MessageBus.Ai.Cli</PackageId>
+    <RollForward>Major</RollForward>
+    <Authors>Unifinity Software</Authors>
+    <Company>Unifinity Software</Company>
+    <Product>messagebus.ai</Product>
+    <Description>The mbus command for messagebus.ai: connect coding agents on different machines, run tasks on this one, and give agents the messagebus.ai MCP tools.</Description>
+    <PackageProjectUrl>https://messagebus.ai</PackageProjectUrl>
+    <PackageTags>messagebus.ai;mbus;mcp;coding-agents;cli</PackageTags>
+    <PackageIcon>icon.png</PackageIcon>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+  </PropertyGroup>
+
+  <!-- The nuget.org page: the brand icon and a short customer-facing readme (not this folder's developer README.md). -->
+  <ItemGroup>
+    <None Include="$(MSBuildThisFileDirectory)../../brand/icons/icon-128.png" Pack="true" PackagePath="/icon.png" Visible="false" />
+    <None Include="$(MSBuildThisFileDirectory)../MessageBus.Cli/PACKAGE.md" Pack="true" PackagePath="/README.md" Visible="false" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\MessageBus.Cli\MessageBus.Cli.csproj" />
+  </ItemGroup>
+
+</Project>

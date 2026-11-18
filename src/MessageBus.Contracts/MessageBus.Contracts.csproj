@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Wire types, names and the MCP tool catalog shared by the hosted service, the mbus CLI, the local MCP server,
+       the runner and the tests (issue the original issue). Contracts only: no storage code, no endpoints, no business logic. -->
+  <PropertyGroup>
+    <PackageId>MessageBus.Ai.Contracts</PackageId>
+    <IsPackable>true</IsPackable>
+    <Description>Wire contracts, JSON metadata and MCP tool descriptions for messagebus.ai.</Description>
+    <RootNamespace>MessageBus.Contracts</RootNamespace>
+    <!-- Every public type and member is documented; a missing doc comment fails this project's build. -->
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <WarningsAsErrors>$(WarningsAsErrors);CS1591;CS1573;CS1572;CS1574</WarningsAsErrors>
+    <IsAotCompatible>true</IsAotCompatible>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Runner transport conventions (close codes, ping interval, reconnect schedule, WebSocket stream)
+         come from the public Groundhog package; see Runner/RunnerProtocol.cs. -->
+    <PackageReference Include="Groundhog.Protocol" />
+    <PackageReference Include="ModelContextProtocol.Core" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update="README.md" Pack="true" PackagePath="/README.md" />
+  </ItemGroup>
+
+</Project>
