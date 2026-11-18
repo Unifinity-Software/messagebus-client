@@ -41,15 +41,20 @@ test('prepare requires the latest Build and the latest disclosure status on the 
     paginate: Object.assign((method, params) => method(params), { iterator: (method, params) => method(params) })
   };
   const outputs = {};
-  const execute = () => run[0](github, context, { setOutput: (key, value) => { outputs[key] = value; } }, { env });
-  await assert.rejects(execute, /org-strings/);
+  const execute = (selected = '', event = context) => run[0](github, event, { setOutput: (key, value) => { outputs[key] = value; } }, {
+    env: { ...env, SHA: selected }
+  });
+  await assert.rejects(() => execute('invalid'), /full Git SHA/);
+  await assert.rejects(() => execute(), /org-strings/);
   state.statuses = ['failure', 'success'].map(state => ({ context: 'org-strings', state }));
-  await assert.rejects(execute, /org-strings/);
+  await assert.rejects(() => execute(), /org-strings/);
   state.statuses.shift();
   state.build = 'failure';
-  await assert.rejects(execute, /Build/);
+  await assert.rejects(() => execute(), /Build/);
   state.build = 'success';
   await execute();
+  assert.deepEqual(outputs, { attempt: '1', sha, version });
+  await execute(sha, { ...context, sha: 'b'.repeat(40) });
   assert.deepEqual(outputs, { attempt: '1', sha, version });
   assert.ok(refs.every(ref => ref === sha));
 });
