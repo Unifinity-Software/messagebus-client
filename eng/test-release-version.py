@@ -77,9 +77,28 @@ class ReleaseVersionTests(unittest.TestCase):
               patch.object(release, "push") as push):
             release.publish(self.folder, VERSION, CANDIDATE, True, download)
             self.assertEqual([call.args[0] for call in verify.call_args_list], list(release.PUBLISH_ORDER))
+            libraries, tool = release.PUBLISH_ORDER[2:-1], release.PUBLISH_ORDER[-1]
             self.assertEqual([call.args[0].name for call in push.call_args_list],
-                             [f"{first}.{VERSION}.snupkg",
-                              *(f"{p}.{VERSION}.nupkg" for p in release.PUBLISH_ORDER[2:])])
+                             [*(f"{p}.{VERSION}.nupkg" for p in libraries),
+                              f"{first}.{VERSION}.snupkg", f"{tool}.{VERSION}.nupkg"])
+
+    def test_libraries_are_submitted_before_waiting_and_a_mismatch_keeps_cli_off_feed(self):
+        libraries = release.PUBLISH_ORDER[:-1]
+        events = []
+
+        def verify(package, *_):
+            events.append(("verify", package))
+            if package == libraries[-1]:
+                raise ValueError("different")
+
+        with (patch.object(release, "published_versions", return_value=[]),
+              patch.object(release, "verify_published", side_effect=verify),
+              patch.object(release, "push", side_effect=lambda path, *_, **kwargs: events.append(("push", path.name)))):
+            with self.assertRaisesRegex(ValueError, "different"):
+                release.publish(self.folder, VERSION, CANDIDATE, False, self.folder / "published.nupkg")
+
+        self.assertEqual(events, [*(("push", f"{p}.{VERSION}.nupkg") for p in libraries),
+                                  *(("verify", p) for p in libraries)])
 
 
 if __name__ == "__main__":

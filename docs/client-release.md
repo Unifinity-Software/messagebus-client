@@ -23,8 +23,7 @@ public Contracts surface and scans for credentials.
   filename in diagnostics. The scan covers the tip tree, newly reachable
   history and commit identities and messages.
 - Create the `nuget` environment with deployment restricted to the main
-  **branch** and add the release owner as a required reviewer. For a sole
-  owner, allow that reviewer to approve their own workflow dispatch. Store
+  **branch**. Publishing runs automatically after the release checks. Store
   `NUGET_USER` as a secret in that environment, with the nuget.org profile
   name that can publish all eight packages.
 - Protect `mbus-v*` tags against updates and deletion. Manual releases need
@@ -52,17 +51,18 @@ and whose precedence is newer than every published version of all eight
 packages. For example, `0.2.0-preview.1` is compatible with a `0.2.0` source
 baseline and sorts after `0.1.2-preview.2`.
 
-Obtain the release owner’s current authorization for that exact version and
-full merged commit SHA. Run **Release mbus** from main with the version and
-pass the SHA as `tagged_commit`. Alternatively, push `mbus-v<version>` at that
-commit. The tag trigger dispatches the release on main so the environment's branch
-restriction applies. The workflow packs and verifies the packages and builds
-the complete runner image before requesting approval. It uses GitHub OIDC
-and a short-lived nuget.org credential for publishing.
+Run **Release mbus** from main with the version. The workflow captures the
+main commit at dispatch, checks it, and releases that commit. To select an
+earlier merged commit, pass its full SHA as `tagged_commit` or push
+`mbus-v<version>` at that commit. The tag trigger dispatches the release on
+main so the environment's branch restriction applies. The workflow packs
+and verifies the packages and builds the complete runner image before
+publishing with GitHub OIDC and a short-lived nuget.org credential.
 
-The publish job rechecks Build and the disclosure status after review. It
-uploads packages in dependency order and the mbus tool last. GitHub stages
-a draft, verifies the eight `.nupkg` and seven `.snupkg` assets by SHA-256,
+The publish job rechecks Build and the disclosure status before publishing. It
+submits the libraries in dependency order so NuGet can index them together.
+It verifies their signatures and payloads before uploading the mbus tool.
+GitHub stages a draft, verifies the eight `.nupkg` and seven `.snupkg` assets by SHA-256,
 and publishes the completed release. A prerelease version produces a GitHub
 prerelease.
 
@@ -74,7 +74,6 @@ owner currently authorizes resuming that exact version and commit. Use
 immutable artifact ID from the successful prepare job. A fresh dispatch or
 **Re-run all jobs** applies the fresh version guard.
 
-If NuGet publication is retried, the protected `nuget` review still applies.
 For each already-published package, the job verifies its NuGet signature and
 compares every uncompressed archive entry against the original candidate,
 excluding only NuGet’s root `.signature.p7s` entry. It stops before any uploads
