@@ -3,7 +3,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
-from tempfile import mkdtemp
+from tempfile import TemporaryDirectory
 from textwrap import dedent
 import unittest
 
@@ -13,7 +13,9 @@ SCANNER = dedent(WORKFLOW.read_text().split("python3 - <<'PY'\n", 1)[1].split("\
 
 class OrgStringsTests(unittest.TestCase):
     def setUp(self):
-        self.root = Path(mkdtemp(prefix="org-strings-", dir=os.environ.get("RUNNER_TEMP")))
+        self.scratch = TemporaryDirectory(prefix="org-strings-", dir=os.environ.get("RUNNER_TEMP"))
+        self.addCleanup(self.scratch.cleanup)
+        self.root = Path(self.scratch.name)
         self.repo = self.root / "repo"
         self.repo.mkdir()
         self.git("init", "-q")
@@ -58,7 +60,14 @@ class OrgStringsTests(unittest.TestCase):
         result = self.scan(self.commit("Empty change"))
         self.assertEqual(result.returncode, 1)
         self.assertIn("Restricted filename in tree", result.stdout)
-        self.assertIn("Restricted content in blob", result.stdout)
+        self.assertIn("[redacted filename]:1", result.stdout)
+        self.assertNotIn("fixture-restricted", (result.stdout + result.stderr).lower())
+
+    def test_tip_content_reports_safe_filename_and_line_only(self):
+        (self.repo / "canary.txt").write_text("first line\nFixture-Restricted\nlast line\n")
+        result = self.scan(self.commit("Add canary"))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('"canary.txt":2', result.stdout)
         self.assertNotIn("fixture-restricted", (result.stdout + result.stderr).lower())
 
     def test_commit_names_emails_and_message_are_scanned(self):

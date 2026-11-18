@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 const { createHash } = require('node:crypto');
-const { mkdirSync, mkdtempSync, readFileSync, writeFileSync } = require('node:fs');
+const { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } = require('node:fs');
 const { tmpdir } = require('node:os');
 const { join } = require('node:path');
 const { test } = require('node:test');
@@ -54,8 +54,9 @@ test('prepare requires the latest Build and the latest disclosure status on the 
   assert.ok(refs.every(ref => ref === sha));
 });
 
-test('release resumes a partial draft and verifies a completed retry without writes', async () => {
+test('release resumes a partial draft and verifies a completed retry without writes', async (t) => {
   const root = mkdtempSync(join(process.env.RUNNER_TEMP || tmpdir(), 'release-assets-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
   const directory = join(root, 'artifacts/packages');
   mkdirSync(directory, { recursive: true });
   for (let i = 0; i < 15; i++) {

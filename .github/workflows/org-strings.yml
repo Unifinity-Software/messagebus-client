@@ -73,6 +73,7 @@ jobs:
               "$GITHUB_SERVER_URL/$GH_REPO.git" "$BASE_SHA"
           fi
           python3 - <<'PY'
+          import json
           import os
           import re
           import subprocess
@@ -105,6 +106,11 @@ jobs:
                   folded = data.lower()
                   return any(pattern in folded for pattern in patterns)
 
+              def display(path):
+                  escaped = json.dumps(os.fsdecode(path), ensure_ascii=True)
+                  escaped = escaped.replace("#", r"\u0023").replace(":", r"\u003a")
+                  return "[redacted filename]" if matches(path) or matches(escaped.encode()) else escaped
+
               passed = True
 
               def report(message):
@@ -113,6 +119,7 @@ jobs:
                   print(message)
 
               tip_blobs = set()
+              blob_paths = {}
               for record in git("ls-tree", "-rz", "-t", sha).split(b"\0"):
                   if not record:
                       continue
@@ -122,6 +129,7 @@ jobs:
                       report(f"Restricted filename in tree {sha} (object {obj.decode()}).")
                   if kind == b"blob":
                       tip_blobs.add(obj)
+                      blob_paths.setdefault(obj, set()).add(path)
 
               revision = sha if base == ZERO else f"{base}..{sha}"
               objects = set(git("rev-list", "--objects", "--no-object-names", revision).splitlines())
@@ -148,7 +156,14 @@ jobs:
                               raise ValueError
                           identity = obj.decode()
                           if kind == b"blob" and matches(data):
-                              report(f"Restricted content in blob {identity}.")
+                              for number, line in enumerate(data.split(b"\n"), 1):
+                                  if matches(line):
+                                      paths = blob_paths.get(obj)
+                                      if paths:
+                                          for path in sorted(paths):
+                                              report(f"Restricted content {display(path)}:{number}")
+                                      else:
+                                          report(f"Restricted content in blob {identity}:{number}")
                           if kind != b"commit":
                               continue
 

@@ -13,7 +13,7 @@ ARG NODE_VERSION=24
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 ARG TARGETARCH
 WORKDIR /src
-COPY global.json Directory.Build.props Directory.Packages.props ./
+COPY global.json Directory.Build.props Directory.Build.targets Directory.Packages.props ./
 COPY src/ src/
 # The orchestrate skill under skills/ is embedded in mbus. The glob lets the build work before
 # that folder exists; global.json is listed only so the COPY always has a source, and is removed.

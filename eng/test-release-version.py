@@ -5,7 +5,7 @@ from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
 from subprocess import CompletedProcess
-from tempfile import mkdtemp
+from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 from zipfile import ZipFile
@@ -17,7 +17,9 @@ CANDIDATE = release.release_version(VERSION, "0.2.0")
 
 class ReleaseVersionTests(unittest.TestCase):
     def setUp(self):
-        self.folder = Path(mkdtemp(prefix="release-fixture-", dir=os.environ.get("RUNNER_TEMP")))
+        self.scratch = TemporaryDirectory(prefix="release-fixture-", dir=os.environ.get("RUNNER_TEMP"))
+        self.addCleanup(self.scratch.cleanup)
+        self.folder = Path(self.scratch.name)
 
     def archive(self, filename, entries):
         path = self.folder / filename

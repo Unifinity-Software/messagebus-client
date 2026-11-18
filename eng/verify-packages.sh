@@ -9,9 +9,18 @@ fi
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 folder=$(cd -- "$1" && pwd)
 version=$2
-python=python3
-if [[ ${RUNNER_OS:-} == Windows ]]; then
-    python=python
+python=${PYTHON:-}
+if [[ -z "$python" ]]; then
+    for candidate in python python3; do
+        if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import sys; sys.exit(sys.version_info < (3, 9))' >/dev/null 2>&1; then
+            python=$candidate
+            break
+        fi
+    done
+fi
+if [[ -z "$python" ]]; then
+    echo 'Python 3.9 or newer is required to verify the packages.' >&2
+    exit 2
 fi
 "$python" "$script_dir/check-packages.py" "$folder" "$version"
 
