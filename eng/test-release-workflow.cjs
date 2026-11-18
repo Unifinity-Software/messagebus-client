@@ -5,7 +5,7 @@ const { tmpdir } = require('node:os');
 const { join } = require('node:path');
 const { test } = require('node:test');
 
-const workflow = readFileSync(join(__dirname, '../.github/workflows/release-mbus.yml'), 'utf8');
+const workflow = readFileSync(join(__dirname, '../.github/workflows/release-mbus.yml'), 'utf8').replace(/\r\n/g, '\n');
 const scripts = [...workflow.matchAll(/^          script: \|\n((?: {12}[^\n]*\n|\n)+)/gm)]
   .map(match => match[1].replace(/^ {12}/gm, ''));
 assert.equal(scripts.length, 2);
