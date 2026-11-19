@@ -106,6 +106,11 @@ worker, not the orchestrator: follow [reference/worker.md](reference/worker.md) 
    work. If the user wants another agent kind, name the role's **required capabilities** and
    **Preferred coding agents** settings and ask them to change those settings. Direct sends are
    reserved for a fix back to its author or a check on one machine; keep the original role label.
+   **Work that isn't code goes to a role made for it.** When the work needs something other than code
+   (images, audio, documents, data) and a role's `description` in the directory says it does that kind of
+   work, send that part to the role as its own task and bring its files back with `fetch_attachment`;
+   don't make it yourself or with your own tools. If no role covers it, do it as you otherwise would, or
+   ask the user.
    Show the plan to the user as the task checklist
    ([reference/terminal-output.md](reference/terminal-output.md)), then dispatch. If the work item
    or workflow asks for a person to sign off the design before code is written, send the design
