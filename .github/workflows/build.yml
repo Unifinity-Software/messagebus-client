@@ -18,6 +18,7 @@ jobs:
   build:
     name: Build
     runs-on: ${{ inputs.os || 'ubuntu-latest' }}
+    timeout-minutes: 20
     defaults:
       run:
         shell: bash
@@ -49,7 +50,18 @@ jobs:
           "$bin/bin/gitleaks" dir . --redact
       - run: python eng/check-public-contracts.py
       - run: dotnet build MessageBus.Client.slnx -c Release
-      - run: dotnet test --solution MessageBus.Client.slnx -c Release --no-build
+      - name: Test
+        run: >-
+          dotnet test --solution MessageBus.Client.slnx -c Release --no-build
+          --hangdump --hangdump-timeout 5m --hangdump-type Mini
+          --results-directory artifacts/test-results
+      - name: Upload failed test diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-diagnostics
+          path: artifacts/test-results
+          if-no-files-found: ignore
       - run: dotnet pack MessageBus.Client.slnx -c Release -p:Version=0.0.0-ci.1 -o artifacts/packages
       - run: bash eng/verify-packages.sh artifacts/packages 0.0.0-ci.1
       - run: python eng/test-check-packages.py
