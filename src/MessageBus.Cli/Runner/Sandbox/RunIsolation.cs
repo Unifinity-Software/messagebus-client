@@ -75,7 +75,7 @@ public sealed record RunIsolationOptions
     /// <summary>git, to read the owner's name and email for commits made in runs; null when git isn't installed.</summary>
     public string? Git { get; init; }
 
-    /// <summary>This machine's name (commit identity when the owner set none).</summary>
+    /// <summary>This machine's name, retained for callers of the isolation options.</summary>
     public string MachineName { get; init; } = "runner";
 
     /// <summary>The agent CLIs this runner starts; the macOS sandbox's start-up check runs <c>--version</c> of each inside it (the original issue).</summary>
@@ -556,8 +556,8 @@ public sealed class RunIsolation : IRunSandbox
                 return null;
             }
         }
-        // Commits made in runs are by the machine's owner, as they would be without isolation.
-        return new GitIdentity(Read("user.name") ?? $"mbus runner on {options.MachineName}", Read("user.email") ?? "runner@messagebus.invalid");
+        // Use the owner's configured identity, with neutral defaults for fields they haven't set.
+        return new GitIdentity(Read("user.name") ?? "mbus runner", Read("user.email") ?? "runner@messagebus.invalid");
     }
 
     private sealed class RunState(string tempDirectory, IReadOnlyDictionary<string, string?> variables, RunNetwork? network, string marker)

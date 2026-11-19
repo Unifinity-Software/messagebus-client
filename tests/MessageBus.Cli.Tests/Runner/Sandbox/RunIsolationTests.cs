@@ -19,6 +19,59 @@ public sealed class RunIsolationTests
     private static readonly string Home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
 
     [Fact]
+    public async Task A_run_without_configured_git_identity_commits_as_the_neutral_runner()
+    {
+        var git = CommandLocator.Find("git", Environment.GetEnvironmentVariable, []);
+        Assert.SkipWhen(git is null, "git isn't installed.");
+        var root = Directory.CreateTempSubdirectory("mbus-git-identity-").FullName;
+        try
+        {
+            using var workspace = RunWorkspace.Create(root, "dlv_git_identity", 1);
+            Directory.CreateDirectory(workspace.WorkTree);
+            var sandbox = RunIsolation.Create(new RunIsolationOptions
+            {
+                WorkRoot = root,
+                HomeDirectory = root,
+                MachineName = "example-workstation",
+                Requested = IsolationLevel.Basic,
+                // Leave Git unset so this test never reads the user's global configuration.
+            }, TextWriter.Null);
+            var profile = new PermissionProfile { Name = "worker" };
+
+            async Task<IReadOnlyList<string>> Git(params string[] arguments)
+            {
+                using var process = AgentProcess.Start(sandbox.Wrap(new ProcessLaunch
+                {
+                    FileName = git!,
+                    Arguments = arguments,
+                    WorkingDirectory = workspace.WorkTree,
+                }, workspace, profile));
+                var exitCode = await process.WaitForExitAsync();
+                var output = process.Tail();
+                Assert.True(exitCode == 0, $"git {string.Join(' ', arguments)} failed: {string.Join("\n", output)}");
+                return output;
+            }
+
+            try
+            {
+                await Git("init", "--quiet");
+                await Git("commit", "--quiet", "--allow-empty", "-m", "Test commit");
+                var identities = await Git("log", "-1", "--format=%an <%ae>%n%cn <%ce>");
+                const string expected = "mbus runner <runner@messagebus.invalid>";
+                Assert.Equal(new[] { expected, expected }, identities);
+            }
+            finally
+            {
+                sandbox.Ended(workspace);
+            }
+        }
+        finally
+        {
+            RunWorkspace.TryDelete(root);
+        }
+    }
+
+    [Fact]
     public void File_key_startup_explains_sandbox_protection_and_warns_with_isolation_off()
     {
         Assert.Contains("can't read mbus's settings folder", RunIsolation.MachineKeyLimit(true, "file"));
