@@ -2,6 +2,7 @@ using System.Text;
 using MessageBus.Cli.Connect;
 using MessageBus.Cli.Hosting;
 using MessageBus.Cli.Mcp;
+using MessageBus.Cli.Runner;
 using MessageBus.Cli.SignIn;
 using Microsoft.Extensions.Time.Testing;
 
@@ -156,13 +157,7 @@ public sealed class TestMachine : IDisposable
 
     public void Dispose()
     {
-        try
-        {
-            Directory.Delete(_root, recursive: true);
-        }
-        catch (IOException)
-        {
-        }
+        RunWorkspace.TryDelete(_root);
     }
 
     /// <summary>mbus disposes its HttpClients; the fake server outlives them.</summary>

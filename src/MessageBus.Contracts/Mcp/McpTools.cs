@@ -820,8 +820,8 @@ public sealed record RetryInput
     public string? Note { get; init; }
 
     /// <summary>
-    /// The repository the task's git bundles and patches were made from, to package their branches again
-    /// (default the current directory). File attachments are sent as they were.
+    /// The repository for repackaging a task's single bundle or patch (default the current directory).
+    /// File attachments are sent as they were. Use a fresh send with explicit repositories for multiple code attachments.
     /// </summary>
     public string? Repository { get; init; }
 }

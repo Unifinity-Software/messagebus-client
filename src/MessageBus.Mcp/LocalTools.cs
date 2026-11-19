@@ -52,6 +52,7 @@ internal sealed partial class LocalTools : IAsyncDisposable
     private bool _coordinationAcquired;
     private DateTimeOffset _nextSessionPrune;
     private readonly SemaphoreSlim _coordinationInboxGate = new(1, 1);
+    private readonly SemaphoreSlim _runnerSettleGate = new(1, 1);
     // the original issue: what this machine sent to each target, so the next bundle carries only new commits.
     private readonly SentCode _sentCode;
     // the original issue: attachment id to fetched commit, persisted beside sent-code.json.
@@ -355,8 +356,8 @@ internal sealed partial class LocalTools : IAsyncDisposable
     }
 
     /// <summary>
-    /// Checks for secrets, seals the body and packages the attachments for the target's key. A task's git bundles (the original issue) are
-    /// added to <paramref name="bundles"/>, and with no base start after what this machine last sent the target.
+    /// Checks for secrets, seals the body and packages attachments for the target's key. Tracks local Git bundles
+    /// in <paramref name="bundles"/>. Only the first Git bundle in the final list can use the last sent commit.
     /// </summary>
     private async Task<SendInput> PrepareAsync(SendInput input, string? at, CancellationToken ct, List<SentBundle>? bundles = null, Dictionary<string, StatusResult>? parents = null)
     {
@@ -370,8 +371,12 @@ internal sealed partial class LocalTools : IAsyncDisposable
         if (input.To is RoleTarget) await EnsureWorkspaceKeyAsync(ct);
 
         var attachments = new List<AttachmentRef>(input.Attachments ?? []);
+        var hasBundle = attachments.Any(a => a.Format == AttachmentFormat.GitBundle);
         foreach (var (spec, i) in (input.Attach ?? []).Select((s, i) => (s, i)))
-            attachments.Add(await PackageAsync(spec, input.To, key, input.ThreadId, $"{at}attach[{i}]", ct, bundles));
+        {
+            attachments.Add(await PackageAsync(spec, input.To, key, input.ThreadId, $"{at}attach[{i}]", ct, bundles, primary: !hasBundle));
+            hasBundle |= spec.Format == AttachmentFormat.GitBundle;
+        }
 
         if (input.ParentThreadId is { } parent && bundles is { Count: > 0 })
             await AddParentBundleNoticesAsync(parent, bundles, parents ?? new Dictionary<string, StatusResult>(StringComparer.Ordinal), ct);
@@ -450,12 +455,6 @@ internal sealed partial class LocalTools : IAsyncDisposable
                 message = "That folder isn't a git repository.";
                 field = attachment is null ? "repository" : attachment + ".path";
             }
-            else if (message.Contains("prerequisite", StringComparison.OrdinalIgnoreCase) || message.Contains("required commits", StringComparison.OrdinalIgnoreCase))
-            {
-                var commits = string.Join(", ", Regex.Matches(message, @"\b[0-9a-f]{40,64}\b").Select(m => m.Value).Distinct());
-                message = "The bundle needs commits this repository doesn't have" + (commits.Length > 0 ? $" ({commits})" : "") +
-                    ". Fetch into the repository that has the earlier work.";
-            }
             else if (message.Contains("unknown revision", StringComparison.OrdinalIgnoreCase) || message.Contains("Needed a single revision", StringComparison.OrdinalIgnoreCase) || message.Contains("bad revision", StringComparison.OrdinalIgnoreCase))
                 message = "The branch or commit wasn't found in this repository.";
             else if (message.Contains("empty bundle", StringComparison.OrdinalIgnoreCase))
@@ -468,8 +467,15 @@ internal sealed partial class LocalTools : IAsyncDisposable
     }
 
     private async Task<AttachmentRef> PackageAsync(AttachSpec spec, MessageTarget to, PublicKeyInfo key, string? threadId, string field, CancellationToken ct,
-        List<SentBundle>? bundles = null)
+        List<SentBundle>? bundles = null, bool primary = false)
     {
+        if (spec.ExpectedHead is { } expectedHead)
+        {
+            if (spec.Format != AttachmentFormat.GitBundle)
+                throw McpToolException.Invalid(field + ".expectedHead", "Only git bundles support expectedHead.");
+            if (expectedHead.Length is not (40 or 64) || !expectedHead.All(Uri.IsHexDigit))
+                throw McpToolException.Invalid(field + ".expectedHead", "Give a full 40- or 64-digit hex commit SHA.");
+        }
         var path = LocalPath(spec.Path, field + ".path");
         if (spec.Format != AttachmentFormat.File && _o.Scope?.RepositoryProblem(path) is { } problem)
             throw new McpToolException(new McpError { Code = McpErrorCodes.Forbidden, Field = field + ".path", Message = $"This repository can't be sent: {problem}." });
@@ -492,9 +498,9 @@ internal sealed partial class LocalTools : IAsyncDisposable
             switch (spec.Format)
             {
                 case AttachmentFormat.GitBundle when bundles is not null:
-                    return await PackageTaskBundleAsync(spec, path, to, key, threadId, bundles, ct);
+                    return await PackageTaskBundleAsync(spec, path, to, key, threadId, bundles, primary, ct);
                 case AttachmentFormat.GitBundle:
-                    return await _attachments.SendBundleAsync(path, to, key, spec.Branch, spec.Base, threadId, ct);
+                    return (await _attachments.SendGitBundleAsync(path, to, key, spec.Branch, spec.Base, threadId, spec.ExpectedHead, ct)).Attachment;
                 case AttachmentFormat.Patch:
                 {
                     if (spec.Base is not { Length: > 0 } baseCommit) throw McpToolException.Invalid(field + ".base", "A patch needs base: the commit it starts after.");
@@ -545,6 +551,8 @@ internal sealed partial class LocalTools : IAsyncDisposable
             });
         var task = (await ThreadMessagesAsync(input.ThreadId, ct)).FirstOrDefault(m => m.Id == thread.RootMessageId)
                    ?? throw McpToolException.NotFound($"Thread {input.ThreadId}'s task message wasn't found.");
+        if (task.Attachments.Count(a => a.Format is AttachmentFormat.GitBundle or AttachmentFormat.Patch) > 1)
+            throw McpToolException.Invalid("repository", "Retry cannot identify the original repositories for multiple code attachments. Use a fresh send with an explicit path and branch per code attachment and expectedHead for each Git bundle.");
         if (task.Body.Data is not { } data)
             throw new McpToolException(new McpError
             {
@@ -1074,6 +1082,27 @@ internal sealed partial class LocalTools : IAsyncDisposable
 
     private async Task<SettleOutput> SettleAsync(SettleInput input, CancellationToken ct)
     {
+        if (!IsRunnerTask(input.ThreadId, input.DeliveryId) || _o.SettleFile is null)
+            return await SettleCoreAsync(input, runnerTask: false, ct);
+
+        // A pinned settle must clear any fallback written by an earlier call.
+        await _runnerSettleGate.WaitAsync(ct);
+        try
+        {
+            return await SettleCoreAsync(input with { DeliveryId = RunnerDeliveryId(Delivery!) }, runnerTask: true, ct);
+        }
+        finally
+        {
+            _runnerSettleGate.Release();
+        }
+    }
+
+    private async Task<SettleOutput> SettleCoreAsync(SettleInput input, bool runnerTask, CancellationToken ct)
+    {
+        var pinned = input.Attach?.Any(spec => spec is { Format: AttachmentFormat.GitBundle, ExpectedHead: not null }) == true;
+        if (runnerTask && pinned)
+            File.Delete(KeptAnswer.KeptFile(_o.SettleFile!));
+
         if (input.Friction is { Count: > 0 } notes)
         {
             if (notes.Count > 12) throw McpToolException.Invalid("friction", "Give at most 12 friction notes.");
@@ -1097,9 +1126,6 @@ internal sealed partial class LocalTools : IAsyncDisposable
         else if (input.Reply is { Friction.Count: > 0 })
             throw McpToolException.Invalid("friction", "Give notes in settle.friction so their kinds can be counted.");
 
-        var runnerTask = IsRunnerTask(input.ThreadId, input.DeliveryId) && _o.SettleFile is not null;
-        if (runnerTask) input = input with { DeliveryId = RunnerDeliveryId(Delivery!) };
-
         if (input.Reply is not null || input.Attach is { Count: > 0 })
         {
             // Sealed for whoever reads the answer: the reply-to role's key, else the workspace key (the asker's machine holds it).
@@ -1121,7 +1147,8 @@ internal sealed partial class LocalTools : IAsyncDisposable
                     {
                         attachments.Add(await PackageAsync(await WithTaskBaseAsync(spec, asked, ct), to, key, input.ThreadId, $"attach[{i}]", ct));
                     }
-                    catch (Exception e) when (runnerTask && RefusedAttachment.Why(e) is { } why)
+                    catch (Exception e) when (runnerTask && !pinned && (e as McpToolException)?.Error.Field != $"attach[{i}].expectedHead"
+                        && RefusedAttachment.Why(e) is { } why)
                     {
                         // the original issue: the agent can fix this; the others are still packaged, for the answer kept meanwhile.
                         refused.Add(new RefusedAttachment(i, spec, why.Code, why.Reason));
@@ -1267,7 +1294,18 @@ internal sealed partial class LocalTools : IAsyncDisposable
         {
             var repository = LocalPath(input.Repository, "repository");
             var into = input.Into ?? $"refs/remotes/mbus/{attachment.Branch}";
-            var commit = await _keys.WithRingAsync(ring => _attachments.ReceiveBundleAsync(attachment, link, ring, repository, into, ct), ct);
+            string commit;
+            try
+            {
+                commit = await _keys.WithRingAsync(ring => _attachments.ReceiveBundleAsync(attachment, link, ring, repository, into, ct), ct);
+            }
+            catch (GitException e) when (e.StandardError is { } stderr
+                && Regex.IsMatch(stderr, @"(?m)^error: Repository lacks these prerequisite commits:\r?$"))
+            {
+                var commits = Regex.Matches(e.StandardError, @"(?m)^error: ([0-9a-f]{40}|[0-9a-f]{64})(?=\s|$)")
+                    .Select(m => m.Groups[1].Value).Distinct();
+                throw McpToolException.Invalid("repository", $"The bundle needs commits this repository doesn't have: {string.Join(", ", commits)}. Fetch into a repository that has them, or ask the sender to resend with base: \"\" for the whole history.");
+            }
             _fetchedCode.Record(_ws, "attachment", attachment.Id, commit);
             return new FetchAttachmentResult { AttachmentId = attachment.Id, Format = attachment.Format, Commit = commit, Ref = into };
         }
@@ -1330,5 +1368,6 @@ internal sealed partial class LocalTools : IAsyncDisposable
         _keys.Dispose();
         _connect.Dispose();
         _coordinationInboxGate.Dispose();
+        _runnerSettleGate.Dispose();
     }
 }

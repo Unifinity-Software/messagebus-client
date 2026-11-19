@@ -4,8 +4,12 @@ namespace MessageBus.Attachments.Client;
 /// <param name="Path">The bundle file.</param>
 /// <param name="Branch">The branch it carries (<c>refs/heads/{Branch}</c> inside the bundle).</param>
 /// <param name="HeadCommit">The branch's commit when bundled.</param>
-/// <param name="BaseCommit">The commit it starts after (the receiver must have it); null for the whole history.</param>
-public sealed record GitBundle(string Path, string Branch, string HeadCommit, string? BaseCommit);
+/// <param name="BaseCommit">The resolved exclusion revision; null when no base was requested.</param>
+public sealed record GitBundle(string Path, string Branch, string HeadCommit, string? BaseCommit)
+{
+    /// <summary>The prerequisite commit IDs advertised by a Git bundle.</summary>
+    public IReadOnlyList<string> Prerequisites { get; init; } = [];
+}
 
 /// <summary>A bundle's header (<see cref="GitBundles.ReadHeader"/>).</summary>
 /// <param name="Prerequisites">Commits the receiver must already have; empty for a bundle of the whole history.</param>
@@ -46,35 +50,36 @@ public static class GitBundles
         List<string> args = ["bundle", "create", "--quiet", Path.GetFullPath(outputPath), source];
         if (@base is not null) args.Add($"^{@base}");
         await Git.RunAsync(repository, args, ct);
-        if (source != $"refs/heads/{branch}")
+        var target = $"refs/heads/{branch}";
+        var header = ReadHeader(outputPath, source, out var refStart, out var refEnd);
+        if (!header.Refs.TryGetValue(source, out var advertisedHead))
+            throw new GitException("The bundle did not contain the branch to send.");
+
+        if (source != target)
         {
-            // Only the advertised ref changes; the pack remains byte-for-byte intact.
+            // Copy the header and pack as bytes, changing only the advertised ref line.
             var renamed = outputPath + ".renamed";
             try
             {
                 await using (var input = File.OpenRead(outputPath))
                 await using (var output = File.Create(renamed))
                 {
-                    var header = new List<byte>();
-                    int b;
-                    while ((b = input.ReadByte()) >= 0)
+                    var buffer = new byte[8192];
+                    while (input.Position < refStart)
                     {
-                        header.Add((byte)b);
-                        if (header.Count >= 2 && header[^1] == '\n' && header[^2] == '\n') break;
+                        var count = (int)Math.Min(buffer.Length, refStart - input.Position);
+                        await input.ReadExactlyAsync(buffer.AsMemory(0, count), ct);
+                        await output.WriteAsync(buffer.AsMemory(0, count), ct);
                     }
-                    var original = System.Text.Encoding.Latin1.GetString(header.ToArray());
-                    var text = original.Replace(
-                        System.Text.Encoding.Latin1.GetString(System.Text.Encoding.UTF8.GetBytes($"\n{head} {source}\n")),
-                        System.Text.Encoding.Latin1.GetString(System.Text.Encoding.UTF8.GetBytes($"\n{head} refs/heads/{branch}\n")), StringComparison.Ordinal);
-                    if (text == original) throw new GitException("The bundle did not contain the branch to send.");
-                    await output.WriteAsync(System.Text.Encoding.Latin1.GetBytes(text), ct);
+                    await output.WriteAsync(System.Text.Encoding.UTF8.GetBytes($"{advertisedHead} {target}\n"), ct);
+                    input.Position = refEnd;
                     await input.CopyToAsync(output, ct);
                 }
                 File.Move(renamed, outputPath, overwrite: true);
             }
             finally { File.Delete(renamed); }
         }
-        return new GitBundle(outputPath, branch, head, @base);
+        return new GitBundle(outputPath, branch, advertisedHead, @base) { Prerequisites = header.Prerequisites };
     }
 
     /// <summary>
@@ -281,42 +286,66 @@ public static class GitBundles
     /// </summary>
     /// <param name="bundlePath">The bundle.</param>
     /// <exception cref="GitException">It isn't a git bundle.</exception>
-    public static BundleHeader ReadHeader(string bundlePath)
+    public static BundleHeader ReadHeader(string bundlePath) => ReadHeader(bundlePath, null, out _, out _);
+
+    private static BundleHeader ReadHeader(string bundlePath, string? source, out long refStart, out long refEnd)
     {
         using var file = File.OpenRead(bundlePath);
+        refStart = refEnd = 0;
+        if (ReadLine(file) is not ("# v2 git bundle" or "# v3 git bundle"))
+            throw new GitException("That isn't a git bundle.");
+
         var prerequisites = new List<string>();
         var refs = new Dictionary<string, string>(StringComparer.Ordinal);
-        var first = true;
+        var start = file.Position;
         while (ReadLine(file) is { } line)
         {
-            if (first)
-            {
-                if (line is not ("# v2 git bundle" or "# v3 git bundle")) throw new GitException("That isn't a git bundle.");
-                first = false;
-                continue;
-            }
             if (line.Length == 0) return new BundleHeader(prerequisites, refs);
-            if (line[0] == '@') continue; // a v3 capability
             if (line[0] == '-')
             {
-                prerequisites.Add(line[1..].Split(' ', 2)[0]);
-                continue;
+                if (!IsObjectId(line.AsSpan(1))) throw MalformedHeader();
+                prerequisites.Add(line[1..]);
             }
-            var parts = line.Split(' ', 2);
-            if (parts.Length == 2) refs[parts[1]] = parts[0];
+            else if (line[0] != '@') // a v3 capability
+            {
+                var separator = line.IndexOf(' ');
+                if (separator < 0 || separator == line.Length - 1 || !IsObjectId(line.AsSpan(0, separator)))
+                    throw MalformedHeader();
+                var name = line[(separator + 1)..];
+                refs[name] = line[..separator];
+                if (name == source)
+                {
+                    refStart = start;
+                    refEnd = file.Position;
+                }
+            }
+            start = file.Position;
         }
         throw new GitException("That git bundle's header is cut short.");
+
+        static bool IsObjectId(ReadOnlySpan<char> id) =>
+            id.Length is 40 or 64 && id.IndexOfAnyExcept("0123456789abcdefABCDEF") < 0;
+
+        static GitException MalformedHeader() => new("That git bundle's header is malformed.");
 
         static string? ReadLine(Stream stream)
         {
             var bytes = new List<byte>();
+            // Git may include a long commit subject after a prerequisite ID.
+            var skipSubject = false;
             int b;
             while ((b = stream.ReadByte()) >= 0 && b != '\n')
             {
+                if (skipSubject) continue;
+                if (b == ' ' && bytes.Count > 0 && bytes[0] == '-')
+                {
+                    skipSubject = true;
+                    continue;
+                }
                 bytes.Add((byte)b);
-                if (bytes.Count > 4096) throw new GitException("That git bundle's header is malformed.");
+                if (bytes.Count > 4096) throw MalformedHeader();
             }
-            return b < 0 && bytes.Count == 0 ? null : System.Text.Encoding.UTF8.GetString([.. bytes]);
+            return b < 0 ? null : System.Text.Encoding.UTF8.GetString([.. bytes]);
         }
     }
 

@@ -233,7 +233,11 @@ internal static class ContractSamples
     public static readonly RunCostCap CostCap = new() { MaxUsd = 2m, Prices = new Dictionary<string, TokenPrice> { ["claude-sonnet-4-5"] = Price } };
     public static readonly DownloadLink Link = new() { Id = Att, Url = "https://127.0.0.1:10000/devstoreaccount1/attachments/w101/att?sig=x", ExpiresAt = T.AddMinutes(30) };
     public static readonly SealedBody Sealed = new() { Body = Body, Encryption = Enc };
-    public static readonly AttachSpec AttachSpec = new() { Format = AttachmentFormat.GitBundle, Path = ".", Branch = "feature/due-dates", Base = "main" };
+    public static readonly AttachSpec AttachSpec = new()
+    {
+        Format = AttachmentFormat.GitBundle, Path = ".", Branch = "feature/due-dates", Base = "main",
+        ExpectedHead = "0123456789abcdef0123456789abcdef01234567",
+    };
 
     public static readonly SendInput Send = new()
     {
