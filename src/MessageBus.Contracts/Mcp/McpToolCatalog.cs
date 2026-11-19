@@ -2,6 +2,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Schema;
 using System.Text.Json.Serialization.Metadata;
+using MessageBus.Contracts.Attachments;
 using MessageBus.Contracts.Json;
 using MessageBus.Contracts.Messaging;
 using ModelContextProtocol.Protocol;
@@ -44,7 +45,7 @@ public static class McpToolCatalog
             "Give `type` (e.g. task.implement, task.review, question.design), a short plain `title` for the dashboard and `body` {summary, details?, data?}: " +
             "it is encrypted here for the recipient, so put the real content in it, never secrets (a body that looks like one is refused). " +
             "`projectId` defaults to the project this session last ensured (or its assigned runner task’s project); without either, new tasks sent outside an inbox have no project and a notice says so; `expect: reply` for a question; `parentThreadId` for a sub-task of a task you hold. With a git bundle, a notice warns if its tip lacks the parent’s returned commits; fetch the parent’s result and send that branch or mbus/<branch>. " +
-            "Code: `attach` [{format: git-bundle, path: <repo>, branch?, base?}] (or patch, or file with a path); with no base only the commits since this machine last sent that target the repository go, and a runner missing the rest gets it from mbus. Set base: \"\" to send the whole history. Branch accepts mbus/<branch> or refs/remotes/<remote>/<branch>; a notice warns when the local branch is behind its fetched mbus copy. " +
+            "Local code packaging: `attach` [{format: git-bundle, path: <repo>, branch?, base?}] (or patch, or file with a path). The first git bundle can start after the last sent commit and a runner missing the rest gets it from mbus. Later bundles default to whole history. Set base: \"\" to send the whole history. Branch accepts mbus/<branch> or refs/remotes/<remote>/<branch>; a notice warns when the local branch is behind its fetched mbus copy. " +
             "Reviews: `excludeAuthors: true` skips agents that succeeded or genuinely failed on the project's (or parent's) non-review tasks (refusals and setup failures do not count), `excludeAgents` [agt_…] skips others; " +
             "with every holder excluded it fails not-found, and `notice` says when fewer copies go out than the role asks for. " +
             "Direct task sends with labels.role return a notice if the agent lacks that role’s required capabilities (except follow-ups to an agent that held the referenced task); prefer role targets. " +
@@ -114,10 +115,10 @@ public static class McpToolCatalog
         new(McpToolNames.FetchAttachment, typeof(FetchAttachmentInput), typeof(FetchAttachmentResult), "Fetch an attachment",
             "Bring an attachment here, decrypted: a git bundle is fetched into `repository` (default the current directory) as refs/remotes/mbus/<branch> (or `into`) and its commit returned; " +
             "a patch or file is saved to `path` (default a new temp folder), creating missing parent folders. A folder creation failure returns invalid-input with field path. " +
-            "Give threadId and attachment id, plus deliveryId for a task you hold."),
+            "Give threadId and attachment id, plus deliveryId for a task you hold. If the repository lacks prerequisite commits, fetch into a repository that has them or ask for a resend with an empty base."),
         new(McpToolNames.Retry, typeof(RetryInput), typeof(SendResult), "Send a finished task again",
             "Send a finished (failed, cancelled, dead-lettered or done) thread's task again as a new thread: same target, type, body, refs and exclusions, the next round of its dedupe key, " +
-            "and `note` (what changed) at the top of the details. Its bundles and patches are packaged again from their branches in `repository` (default the current directory). " +
+            "and `note` (what changed) at the top of the details. A single bundle or patch is packaged again from its branch in `repository` (default the current directory). For multiple code attachments use a fresh send with explicit repositories and expectedHead pins for bundles. " +
             "Retry keeps an existing local branch and warns if it is behind the fetched copy; only a missing local branch falls back to refs/remotes/mbus/<branch>, with a notice. A bundle with an empty base sends the whole history. Retrying a thread twice returns the first retry (deduplicated: true). Returns a new thread like send."),
         new(McpToolNames.RequestApproval, typeof(RequestApprovalInput), typeof(ApprovalResult), "Ask a person to approve a step",
             "Before a risky step (deleting data, a migration, anything hard to undo) or when a person must sign off (a design), ask for approval: " +
@@ -162,7 +163,9 @@ public static class McpToolCatalog
             Title = s.Title,
             Description = !local && s.Name == McpToolNames.Settle
                 ? "Finish a task with result {status, summary, refs, frictionKinds?}. Give only fixed kind names in result.frictionKinds; plaintext friction notes are accepted only by the local mbus tool. Put an answer in reply or sealedReply. Never claim success you didn't verify."
-                : s.Description,
+                : local && s.Name is McpToolNames.Send or McpToolNames.SendMany or McpToolNames.Settle
+                    ? s.Description + " Each Git bundle can set expectedHead to check its advertised branch against a full commit SHA before upload."
+                    : s.Description,
             InputSchema = Schema(s.Input, local),
             Annotations = new ToolAnnotations { Title = s.Title, ReadOnlyHint = s.ReadOnly, DestructiveHint = s.Name == McpToolNames.Cancel, OpenWorldHint = false },
         }),
@@ -183,6 +186,15 @@ public static class McpToolCatalog
             {
                 if (ctx.TypeInfo.Type == typeof(MessageTarget) && ctx.PropertyInfo is not null)
                     return new JsonObject { ["type"] = "string", ["description"] = "role:<name>, agent:<agt_id>, capabilities:<cap>,<cap> or inbox:<inb_id>" };
+                if (ctx.TypeInfo.Type == typeof(AttachSpec) && schema["properties"] is JsonObject attachment)
+                {
+                    if (!local) attachment.Remove("expectedHead");
+                    else if (attachment["expectedHead"] is JsonObject head)
+                    {
+                        head["pattern"] = "^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$";
+                        head["description"] = "Git bundles only. The full commit SHA the advertised branch must point to.";
+                    }
+                }
                 if (ctx.TypeInfo.Type == typeof(MessageBody) && schema["properties"] is JsonObject body)
                     body.Remove("friction");
                 return schema;

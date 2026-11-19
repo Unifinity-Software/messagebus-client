@@ -63,6 +63,10 @@ public sealed record AttachSpec
     /// <summary>For a bundle or patch: the branch to package (default: the current one).</summary>
     public string? Branch { get; init; }
 
-    /// <summary>For a bundle or patch: the commit to package from (default: the merge base with the default branch).</summary>
+    /// <summary>For a patch: the required starting commit. For a bundle: the receiver's prerequisite commit, or empty for whole history.
+    /// When omitted, a primary task bundle can use the last sent commit and a reply can use the task's received tip.</summary>
     public string? Base { get; init; }
+
+    /// <summary>Local packaging only. For a git bundle, the full 40- or 64-digit hex commit its advertised branch must point to.</summary>
+    public string? ExpectedHead { get; init; }
 }

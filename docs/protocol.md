@@ -117,6 +117,25 @@ to the recipient's key, asks the service for an upload link, uploads the ciphert
 message. The receiver asks for a download
 link, downloads, checks the hash, opens it and, for a bundle, verifies it before fetching it into the repository.
 
+For local `send` and per message in `send_many`, attachment order is existing `attachments` followed by the
+results of packaging `attach`. Only the first Git bundle in that order is eligible for automatic incremental
+packaging, send history bookkeeping, and runner checkout history recovery. Files and patches do not take that
+position. Later bundles default to whole history. An explicit nonempty companion `base` is honored and the
+send notice lists any prerequisite commits advertised by the bundle. An empty `base` requests whole history. If
+`fetch_attachment` reports missing prerequisite commits, fetch into a repository that has them or request a
+resend with `base: ""`.
+
+The local attachment spec accepts optional `expectedHead` for Git bundles in `send`, `send_many`, and `settle`.
+It is a full 40- or 64-digit hex commit SHA checked against the branch advertised in the finished bundle before
+its upload. A mismatch reports the attachment field and both commits. A send or batch with a mismatch is never
+published. A runner settle with any pinned bundle fails if packaging any attachment fails and discards an earlier
+kept reply. Staged uploads from earlier attachments can expire. The local server consumes `attach` and sends only
+the packaged attachment references to the hosted MCP endpoint.
+
+Local `retry` can repackage a single bundle or patch from the supplied repository. To resend a task with
+multiple code attachments, use a fresh `send` with an explicit repository and branch per bundle or patch and
+set `expectedHead` on each bundle to pin the intended tip.
+
 ## Updates
 
 Defined in `src/MessageBus.Contracts/Releases`. `mbus` installs updates two ways:

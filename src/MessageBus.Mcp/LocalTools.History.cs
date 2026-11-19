@@ -38,29 +38,36 @@ internal sealed partial class LocalTools
     private static bool IsCodeForRunner(ReceivedMessage message) => message.Envelope.Type == ProgressRequestKinds.GitHistoryMessageType;
 
     /// <summary>
-    /// Packages a task's bundle, recorded for <see cref="Remember"/>: with no base, after what this target was sent last; an empty
-    /// base (a retry of a task that went with the whole history) sends the whole history again.
+    /// Packages the primary bundle with its explicit base or the last commit sent to the target.
+    /// A companion uses whole history unless given a nonempty base. An empty base always requests whole history.
     /// </summary>
     private async Task<AttachmentRef> PackageTaskBundleAsync(AttachSpec spec, string path, MessageTarget to, PublicKeyInfo key, string? threadId,
-        List<SentBundle> bundles, CancellationToken ct)
+        List<SentBundle> bundles, bool primary, CancellationToken ct)
     {
         var branch = spec.Branch!;
         var notice = await GitBundles.BehindFetchedNoticeAsync(path, branch, ct);
         string? root = null;
-        try
+        if (primary)
         {
-            root = await GitBundles.RootCommitAsync(path, branch, ct);
-        }
-        catch (GitException)
-        {
-            // No such branch: CreateAsync below says so.
+            try
+            {
+                root = await GitBundles.RootCommitAsync(path, branch, ct);
+            }
+            catch (GitException)
+            {
+                // No such branch: CreateAsync below says so.
+            }
         }
         var baseCommit = spec.Base;
         if (baseCommit is null && _o.IncrementalBundles && root is { Length: > 0 }
             && _sentCode.LastSent(_ws, to.ToString(), root) is { } last)
             baseCommit = await GitBundles.SuggestBaseAsync(path, branch, last, ct);
-        var (attachment, bundle) = await _attachments.SendGitBundleAsync(path, to, key, branch, baseCommit is { Length: > 0 } ? baseCommit : null, threadId, ct);
-        bundles.Add(new SentBundle(attachment.Id, path, bundle.Branch, branch, bundle.HeadCommit, root is { Length: > 0 } ? root : null, to, key, bundle.BaseCommit is not null, notice));
+        var (attachment, bundle) = await _attachments.SendGitBundleAsync(path, to, key, branch, baseCommit, threadId, spec.ExpectedHead, ct);
+        if (!primary && bundle.Prerequisites.Count > 0)
+            notice = (notice is null ? "" : notice + " ") +
+                $"Companion bundle {bundle.Branch} requires the following commits: {string.Join(", ", bundle.Prerequisites)} in the receiver's repository. Use an empty base to send its whole history.";
+        bundles.Add(new SentBundle(attachment.Id, path, bundle.Branch, branch, bundle.HeadCommit,
+            root is { Length: > 0 } ? root : null, to, key, primary && bundle.Prerequisites.Count > 0, notice));
         return attachment;
     }
 

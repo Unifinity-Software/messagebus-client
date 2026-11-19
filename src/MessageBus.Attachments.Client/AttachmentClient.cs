@@ -123,13 +123,21 @@ public sealed class AttachmentClient(HttpClient api, HttpClient links, string wo
         (await SendGitBundleAsync(repository, target, recipient, branch, baseCommit, threadId, ct)).Attachment;
 
     /// <summary><see cref="SendBundleAsync"/>, also returning what was bundled (its branch and head commit).</summary>
+    public Task<(AttachmentRef Attachment, GitBundle Bundle)> SendGitBundleAsync(string repository, MessageTarget target, PublicKeyInfo recipient,
+        string? branch = null, string? baseCommit = null, string? threadId = null, CancellationToken ct = default) =>
+        SendGitBundleAsync(repository, target, recipient, branch, baseCommit, threadId, expectedHead: null, ct);
+
+    /// <summary>Packages and uploads a bundle, checking its advertised branch against <paramref name="expectedHead"/> before upload when supplied.</summary>
     public async Task<(AttachmentRef Attachment, GitBundle Bundle)> SendGitBundleAsync(string repository, MessageTarget target, PublicKeyInfo recipient,
-        string? branch = null, string? baseCommit = null, string? threadId = null, CancellationToken ct = default)
+        string? branch, string? baseCommit, string? threadId, string? expectedHead, CancellationToken ct)
     {
         var dir = TempFolders.Create(tempDirectory, "mbus-bundle-");
         try
         {
             var bundle = await GitBundles.CreateAsync(repository, Path.Combine(dir.FullName, "branch.bundle"), branch, baseCommit, ct);
+            if (expectedHead is not null && !string.Equals(expectedHead, bundle.HeadCommit, StringComparison.OrdinalIgnoreCase))
+                throw new GitException($"Expected bundle head {expectedHead}, but {bundle.Branch} advertises {bundle.HeadCommit}.", input: "expectedHead");
+
             await using var file = new FileStream(bundle.Path, FileMode.Open, FileAccess.Read, FileShare.Read, CopyBuffer, useAsync: true);
             var attachment = await UploadAsync(file, new AttachmentUpload(target, FileName(bundle.Branch) + ".bundle", AttachmentFormat.GitBundle, threadId,
                 GitBundles.BundleContentType, bundle.Branch, bundle.BaseCommit), recipient, ct);
