@@ -262,40 +262,6 @@ public sealed class RunNetworkTests
     }
 
     [Fact]
-    public void The_runners_proxy_keeps_its_port_across_restarts_and_moves_only_when_it_is_taken()
-    {
-        var settings = Directory.CreateTempSubdirectory("mbus-net-").FullName;
-        try
-        {
-            // A range of its own, so tests running alongside don't take its ports.
-            var range = 20000 + Random.Shared.Next(0, 400) * 100;
-            int port;
-            using (var proxy = RunNetworkProxy.StartStable(settings, TextWriter.Null, rangeStart: range)!)
-            {
-                port = proxy.Port;
-            }
-            Assert.Equal(port, RunNetworkProxy.StoredPort(settings));
-            using (var again = RunNetworkProxy.StartStable(settings, TextWriter.Null, rangeStart: range + 50)!)
-            {
-                Assert.Equal(port, again.Port);
-            }
-
-            using var squatter = new TcpListener(IPAddress.Loopback, port);
-            squatter.Start();
-            Assert.Null(RunNetworkProxy.StartStable(settings, TextWriter.Null, moveIfTaken: false, rangeStart: range)); // mbus doctor --smoke
-            var log = new StringWriter();
-            using var moved = RunNetworkProxy.StartStable(settings, log, rangeStart: range)!;
-            Assert.NotEqual(port, moved.Port);
-            Assert.Equal(moved.Port, RunNetworkProxy.StoredPort(settings));
-            Assert.Contains($"port {port} for runs' network proxy is taken", log.ToString());
-        }
-        finally
-        {
-            Directory.Delete(settings, recursive: true);
-        }
-    }
-
-    [Fact]
     public async Task A_run_whose_preparation_fails_gives_its_place_on_the_runners_proxy_back()
     {
         using var shared = RunNetworkProxy.Start(0, TextWriter.Null);
@@ -403,5 +369,50 @@ public sealed class RunNetworkTests
         var buffer = new byte[4];
         await stream.ReadExactlyAsync(buffer);
         await stream.WriteAsync(buffer);
+    }
+}
+
+
+// On macOS, a concurrent process launch can hold the listener's descriptor between fork and exec.
+// Run the immediate rebind check without concurrent process launches from other tests.
+[CollectionDefinition(nameof(StableRunNetworkPortTests), DisableParallelization = true)]
+public sealed class StableRunNetworkPortCollection;
+
+[Collection(nameof(StableRunNetworkPortTests))]
+public sealed class StableRunNetworkPortTests
+{
+    [Fact]
+    public void The_runners_proxy_keeps_its_port_across_restarts_and_moves_only_when_it_is_taken()
+    {
+        var settings = Directory.CreateTempSubdirectory("mbus-net-").FullName;
+        try
+        {
+            // Keep both scan ranges below the default ephemeral ranges so parallel tests' port-zero
+            // listeners cannot take the stored port while the proxy is stopped.
+            var range = 20000 + Random.Shared.Next(0, 50) * 2 * RunNetworkProxy.PortRangeSize;
+            int port;
+            using (var proxy = RunNetworkProxy.StartStable(settings, TextWriter.Null, rangeStart: range)!)
+            {
+                port = proxy.Port;
+            }
+            Assert.Equal(port, RunNetworkProxy.StoredPort(settings));
+            using (var again = RunNetworkProxy.StartStable(settings, TextWriter.Null, rangeStart: range + RunNetworkProxy.PortRangeSize)!)
+            {
+                Assert.Equal(port, again.Port);
+            }
+
+            using var squatter = new TcpListener(IPAddress.Loopback, port);
+            squatter.Start();
+            Assert.Null(RunNetworkProxy.StartStable(settings, TextWriter.Null, moveIfTaken: false, rangeStart: range)); // mbus doctor --smoke
+            var log = new StringWriter();
+            using var moved = RunNetworkProxy.StartStable(settings, log, rangeStart: range)!;
+            Assert.NotEqual(port, moved.Port);
+            Assert.Equal(moved.Port, RunNetworkProxy.StoredPort(settings));
+            Assert.Contains($"port {port} for runs' network proxy is taken", log.ToString());
+        }
+        finally
+        {
+            Directory.Delete(settings, recursive: true);
+        }
     }
 }
