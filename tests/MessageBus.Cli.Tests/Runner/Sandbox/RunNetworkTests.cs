@@ -267,15 +267,16 @@ public sealed class RunNetworkTests
         var settings = Directory.CreateTempSubdirectory("mbus-net-").FullName;
         try
         {
-            // A range of its own, so tests running alongside don't take its ports.
-            var range = 20000 + Random.Shared.Next(0, 400) * 100;
+            // Keep both scan ranges below the default ephemeral ranges so parallel tests' port-zero
+            // listeners cannot take the stored port while the proxy is stopped.
+            var range = 20000 + Random.Shared.Next(0, 50) * 2 * RunNetworkProxy.PortRangeSize;
             int port;
             using (var proxy = RunNetworkProxy.StartStable(settings, TextWriter.Null, rangeStart: range)!)
             {
                 port = proxy.Port;
             }
             Assert.Equal(port, RunNetworkProxy.StoredPort(settings));
-            using (var again = RunNetworkProxy.StartStable(settings, TextWriter.Null, rangeStart: range + 50)!)
+            using (var again = RunNetworkProxy.StartStable(settings, TextWriter.Null, rangeStart: range + RunNetworkProxy.PortRangeSize)!)
             {
                 Assert.Equal(port, again.Port);
             }
