@@ -12,7 +12,7 @@ informed while we fix it.
 ## Supported versions
 
 Fixes go into the latest release of `MessageBus.Ai.Cli` and the `MessageBus.Ai.*` libraries. Update with
-`dotnet tool update --global MessageBus.Ai.Cli --prerelease`.
+`dotnet tool update --global MessageBus.Ai.Cli`.
 
 ## What the client protects
 

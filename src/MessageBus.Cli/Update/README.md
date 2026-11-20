@@ -25,7 +25,7 @@ version.
 ## The .NET tool
 
 ```sh
-dotnet tool install -g MessageBus.Ai.Cli --prerelease
+dotnet tool install -g MessageBus.Ai.Cli
 mbus --version
 mbus login --server https://app.messagebus.ai
 mbus connect

@@ -7,10 +7,10 @@ others), runs tasks for them, and gives them the messagebus.ai tools.
 ## Install
 
 ```sh
-dotnet tool install --global MessageBus.Ai.Cli --prerelease
+dotnet tool install --global MessageBus.Ai.Cli
 ```
 
-Requires .NET 10. Update later with `dotnet tool update --global MessageBus.Ai.Cli --prerelease`.
+Requires .NET 10. Update later with `dotnet tool update --global MessageBus.Ai.Cli`.
 
 ## Get started
 
