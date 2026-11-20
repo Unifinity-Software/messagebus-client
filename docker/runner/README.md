@@ -104,6 +104,11 @@ pull identity, Claude Code and Codex API keys, and a stable mbus machine identit
 resource group and an image built from the release used by your server. Pin all four CLI versions
 with the build arguments above and build for `linux/amd64`.
 
+The template sets `MBUS_DEPLOYMENT_TARGET=aci` and `MBUS_AZURE_RESOURCE_ID` to the container group's
+ARM ID. A CLI release supporting ACI metadata reports that setup hint to Fleet; older releases still run
+but appear as Docker. Metadata never enables management: approve the shared runner, enable Azure runners
+in Integrations, verify its Azure pairing tag in runner Settings, then explicitly enable wake and idle stop.
+
 ### Enroll the identity
 
 Enroll once using the release image and a dedicated home volume. Create a **Sign in runners** API

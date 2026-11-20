@@ -99,6 +99,8 @@ resource runner 'Microsoft.ContainerInstance/containerGroups@2023-05-01' = {
         environmentVariables: [
           { name: 'MBUS_HOME', value: '/home/runner/.mbus' }
           { name: 'MBUS_LOCATION', value: 'Azure Container Instances' }
+          { name: 'MBUS_DEPLOYMENT_TARGET', value: 'aci' }
+          { name: 'MBUS_AZURE_RESOURCE_ID', value: resourceId('Microsoft.ContainerInstance/containerGroups', runnerName) }
           { name: 'MBUS_KEY_STORE', value: 'file' }
           { name: 'ANTHROPIC_API_KEY', secureValue: anthropicApiKey }
           { name: 'OPENAI_API_KEY', secureValue: openaiApiKey }

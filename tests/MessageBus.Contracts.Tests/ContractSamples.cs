@@ -119,10 +119,12 @@ internal static class ContractSamples
         Summary = "OS sandbox: runs can't reach your personal files or other runs.", Credentials = "A token for the task's repository only.",
         Limitations = ["Network: not limited by run isolation."], Level = "os-sandbox", Network = "enforced",
     };
+    public static readonly MachineDeployment Deployment = new() { Target = DeploymentTarget.AzureContainerInstances,
+        AzureResourceId = "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/prototype/providers/Microsoft.ContainerInstance/containerGroups/runner" };
     public static readonly MachineInventory Inventory = new()
     {
         MachineId = Mch, HostName = "mac-mini", Os = MachineOs.MacOs, OsVersion = "15.1", Architecture = CpuArchitecture.Arm64, Target = DeploymentTarget.Pc,
-        Location = "Mac mini", CliVersion = "0.1.0", Slots = 2, SlotCeiling = 4, SlotMachineMax = 10, CpuCount = 10, MemoryBytes = 16L << 30,
+        Deployment = Deployment, Location = "Mac mini", CliVersion = "0.1.0", Slots = 2, SlotCeiling = 4, SlotMachineMax = 10, CpuCount = 10, MemoryBytes = 16L << 30,
         RoleKeysReadable = new Dictionary<string, bool> { ["developer"] = true },
         Capabilities = ["os:macos", "tool:dotnet"], Agents = [Detected], Isolation = Isolation, LastUpdate = UpdateReportSample, Updates = UpdateAbilitySample, ScannedAt = T,
     };
@@ -131,7 +133,7 @@ internal static class ContractSamples
     {
         MachineId = Mch, WorkspaceId = Ws, OwnerSubjectId = Subject, Kind = MachineKind.Personal, Name = "mac-mini", Location = "Mac mini",
         Os = MachineOs.MacOs, Architecture = CpuArchitecture.Arm64, Target = DeploymentTarget.Docker, CliVersion = "0.1.0", Slots = 2, SlotsBusy = 1,
-        SlotSetting = 2, SlotCeiling = 4, SlotMachineMax = 10, CpuCount = 10, MemoryBytes = 16L << 30,
+        Deployment = Deployment, SlotSetting = 2, SlotCeiling = 4, SlotMachineMax = 10, CpuCount = 10, MemoryBytes = 16L << 30,
         Capabilities = ["os:macos"], CustomCapabilities = ["tier:gpu"], Agents = [Detected], Isolation = Isolation, LastUpdate = UpdateReportSample, Updates = UpdateAbilitySample, Update = UpdateStatusSample, AcceptsWorkFrom = Accepts, RepoCredentialMode = RepoCredentialMode.KeychainToken,
         DailySpendCeilingUsd = 20m, KeyFingerprint = Sha, Online = true, PendingApproval = true, EnrolledAt = T, LastSeenAt = T, RunnerSeenAt = T,
     };
@@ -300,6 +302,7 @@ internal static class ContractSamples
         Accepts,
         Detected,
         Isolation,
+        Deployment,
         Inventory,
         Machine,
         AgentRecord,

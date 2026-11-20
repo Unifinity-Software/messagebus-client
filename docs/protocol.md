@@ -7,6 +7,15 @@ that keep old and new versions working together.
 
 ## Compatibility rules
 
+ACI inventories optionally include `deployment: { target: "azure-container-instances", azureResourceId: "..." }`.
+The original `target` stays `docker`, so existing services can still enroll and run the machine. Services that
+understand `deployment` preserve it and use its detailed target in Fleet. `MBUS_DEPLOYMENT_TARGET=aci` enables
+these details; `MBUS_AZURE_RESOURCE_ID` supplies the ARM resource hint. Neither field authorizes Azure actions:
+a workspace administrator must verify an Azure-side tag challenge and explicitly enable the stored binding.
+An ordinary scan on another deployment clears the detailed metadata; an older inventory with no target leaves
+existing deployment information intact. Azure action and managed drain behavior starts only after the service
+has a verified binding and has read the runner's `supportsManagedDrain` capability.
+
 - **JSON** is camelCase, written and read through the source-generated context in
   `src/MessageBus.Contracts/Json/MessageBusJson.cs`, which ignores fields it doesn't know. A new field is optional
   for both sides; an absent field means the old behaviour.

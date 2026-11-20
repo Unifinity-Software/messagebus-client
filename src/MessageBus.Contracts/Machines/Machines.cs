@@ -48,6 +48,17 @@ public enum DeploymentTarget
     [JsonStringEnumMemberName("azure-container-apps")] AzureContainerApps,
     /// <summary>A Kubernetes pod.</summary>
     [JsonStringEnumMemberName("kubernetes")] Kubernetes,
+    /// <summary>An Azure Container Instance.</summary>
+    [JsonStringEnumMemberName("azure-container-instances")] AzureContainerInstances,
+}
+
+/// <summary>Optional, self-reported deployment details. These are setup hints, never authorization for cloud actions.</summary>
+public sealed record MachineDeployment
+{
+    /// <summary>The detailed deployment target; the inventory's original target remains a compatible coarse category.</summary>
+    public required DeploymentTarget Target { get; init; }
+    /// <summary>The reported Azure ARM resource ID. An administrator must separately verify any lifecycle binding.</summary>
+    public string? AzureResourceId { get; init; }
 }
 
 /// <summary>Whose machine it is, which decides how it enrolled and its defaults.</summary>
@@ -213,6 +224,9 @@ public sealed record MachineInventory
     /// <summary>Where it runs (the original issue); null from an <c>mbus</c> older than that.</summary>
     public DeploymentTarget? Target { get; init; }
 
+    /// <summary>Optional deployment details, reported by the runner and untrusted.</summary>
+    public MachineDeployment? Deployment { get; init; }
+
     /// <summary>Free-text location label, for example <c>Mac mini</c>.</summary>
     public string? Location { get; init; }
 
@@ -313,6 +327,9 @@ public sealed record MachineInfo
 
     /// <summary>Where it runs, as its <c>mbus</c> last reported (the original issue); null until one that knows has reported.</summary>
     public DeploymentTarget? Target { get; init; }
+
+    /// <summary>Optional deployment details from the last inventory; never an authorized cloud binding.</summary>
+    public MachineDeployment? Deployment { get; init; }
 
     /// <summary>Version of <c>mbus</c> last reported.</summary>
     public string? CliVersion { get; init; }

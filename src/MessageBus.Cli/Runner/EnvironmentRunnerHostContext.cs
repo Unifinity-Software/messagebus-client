@@ -155,6 +155,7 @@ public static class RunnerEnvironment
             OsVersion = RuntimeInformation.OSDescription,
             Architecture = RuntimeInformation.OSArchitecture == Architecture.Arm64 ? CpuArchitecture.Arm64 : CpuArchitecture.X64,
             Target = global::MessageBus.Cli.Agents.DeploymentTargets.Current(Environment.GetEnvironmentVariable),
+            Deployment = global::MessageBus.Cli.Agents.DeploymentTargets.Details(Environment.GetEnvironmentVariable),
             Location = host.Location,
             CliVersion = Version,
             Slots = slots,
