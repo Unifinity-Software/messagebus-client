@@ -468,6 +468,12 @@ public sealed record CancelDelivery
 /// <summary>Take no new work (<see cref="RunnerRoutes.Drain"/>).</summary>
 public sealed record DrainRequest
 {
+    /// <summary>Owner of a reversible drain, for example an ACI idle-stop operation. Sent only when the runner reports SupportsManagedDrain.</summary>
+    public string? ManagedDrainId { get; init; }
+
+    /// <summary>Resumes only the managed drain with the matching ManagedDrainId. Other drains and running tasks are preserved.</summary>
+    public bool Resume { get; init; }
+
     /// <summary>Why (for example an update).</summary>
     public string? Reason { get; init; }
 
@@ -547,6 +553,12 @@ public sealed record UpdateRequest
 /// <summary>What the runner is doing (<see cref="RunnerRoutes.Status"/>).</summary>
 public sealed record RunnerStatus
 {
+    /// <summary>Whether this runner supports reversible drains identified by ManagedDrainId. Absent means false.</summary>
+    public bool SupportsManagedDrain { get; init; }
+
+    /// <summary>The current managed drain's owner, or null. A resume request must name this value.</summary>
+    public string? ManagedDrainId { get; init; }
+
     /// <summary><c>mbus</c> version.</summary>
     public required string Version { get; init; }
 

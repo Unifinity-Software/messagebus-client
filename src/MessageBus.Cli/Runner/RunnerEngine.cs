@@ -112,6 +112,8 @@ public sealed class RunnerEngine : IAsyncDisposable
     private ITimer? _drainTimer;
     private int _beating;
     private bool _draining;
+    private string? _managedDrainId;
+    private bool IsDraining => _draining || _managedDrainId is not null;
     private bool _userDraining;
     private bool _offlineForUpdate;
     private bool _waitingForSessions;
@@ -191,7 +193,7 @@ public sealed class RunnerEngine : IAsyncDisposable
             {
                 return new DeliveryDecision { Accepted = true, Detail = "Already running." };
             }
-            if (_draining || _settingUp || _ext.ToolSetup?.BlocksWork == true)
+            if (IsDraining || _settingUp || _ext.ToolSetup?.BlocksWork == true)
             {
                 return Decline(DeclineReason.Draining, "This machine is taking no new work.");
             }
@@ -266,6 +268,21 @@ public sealed class RunnerEngine : IAsyncDisposable
     {
         lock (_gate)
         {
+            if (request.ManagedDrainId is { } operation)
+            {
+                if (string.IsNullOrWhiteSpace(operation)) return;
+                if (request.Resume)
+                {
+                    if (_managedDrainId == operation) _managedDrainId = null;
+                }
+                else if (_managedDrainId is null || _managedDrainId == operation)
+                {
+                    _managedDrainId = operation;
+                }
+                // Managed drains never cancel active work, even if the request contains a deadline.
+                return;
+            }
+            if (request.Resume) return;
             _userDraining = true;
             _draining = true;
             if (request.Deadline is { } deadline)
@@ -595,7 +612,7 @@ public sealed class RunnerEngine : IAsyncDisposable
     {
         lock (_gate)
         {
-            if (_runs.Count != 0 || _draining || _settingUp || _ext.ToolSetup?.BlocksWork == true || _stopping.IsCancellationRequested) return null;
+            if (_runs.Count != 0 || IsDraining || _settingUp || _ext.ToolSetup?.BlocksWork == true || _stopping.IsCancellationRequested) return null;
             _settingUp = true;
             return new SetupPause(this);
         }
@@ -621,7 +638,9 @@ public sealed class RunnerEngine : IAsyncDisposable
                 Version = RunnerEnvironment.Version,
                 Slots = _slots,
                 ActiveDeliveryIds = [.. _runs.Keys],
-                Draining = _draining || _settingUp || _ext.ToolSetup?.BlocksWork == true,
+                Draining = IsDraining || _settingUp || _ext.ToolSetup?.BlocksWork == true,
+                SupportsManagedDrain = true,
+                ManagedDrainId = _managedDrainId,
                 SlotCeiling = _ceiling,
                 SlotMachineMax = _machineMax,
             };
@@ -802,7 +821,7 @@ public sealed class RunnerEngine : IAsyncDisposable
                     ActiveDeliveryIds = [.. _runs.Keys],
                     Slots = _slots,
                     SlotsBusy = _runs.Count,
-                    Draining = _draining || _settingUp || _ext.ToolSetup?.BlocksWork == true,
+                    Draining = IsDraining || _settingUp || _ext.ToolSetup?.BlocksWork == true,
                     SessionId = SessionId,
                 };
             }

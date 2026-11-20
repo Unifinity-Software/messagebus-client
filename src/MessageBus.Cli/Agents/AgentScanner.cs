@@ -114,6 +114,7 @@ internal static partial class AgentScanner
             OsVersion = RuntimeInformation.OSDescription,
             Architecture = RuntimeInformation.OSArchitecture == Architecture.Arm64 ? CpuArchitecture.Arm64 : CpuArchitecture.X64,
             Target = DeploymentTargets.Current(host.GetEnvironmentVariable),
+            Deployment = DeploymentTargets.Details(host.GetEnvironmentVariable),
             Location = location,
             CliVersion = CliHost.Version,
             Capabilities = capabilities,

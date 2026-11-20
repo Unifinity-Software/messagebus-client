@@ -436,6 +436,42 @@ public sealed class RunnerTaskTests
     }
 
     [Fact]
+    public async Task A_managed_drain_preserves_active_work_and_only_its_owner_can_resume_it()
+    {
+        await using var h = new RunnerHarness();
+        Assert.True((await h.DeliverAsync(h.Task("dlv_active", directives: d => d["mode"] = "hang"))).Accepted);
+        await h.Service.AgentProgressAsync("dlv_active");
+        var drain = MessageBusJson.Serialize(new DrainRequest
+        {
+            ManagedDrainId = "aci-operation-one", Deadline = h.Time.GetUtcNow()
+        });
+        Assert.Equal(202, (await h.Routes.HandleAsync("POST", RunnerRoutes.Drain, drain, TestContext.Current.CancellationToken)).StatusCode);
+        Assert.True(h.Engine.GetStatus().SupportsManagedDrain);
+        Assert.Contains("dlv_active", h.Engine.GetStatus().ActiveDeliveryIds);
+        Assert.Equal(DeclineReason.Draining, (await h.DeliverAsync(h.Task("dlv_held"))).Reason);
+        h.Engine.Drain(new DrainRequest { ManagedDrainId = "aci-operation-two" });
+        h.Engine.Drain(new DrainRequest { ManagedDrainId = "aci-operation-two", Resume = true });
+        Assert.Equal("aci-operation-one", h.Engine.GetStatus().ManagedDrainId);
+        var resume = MessageBusJson.Serialize(new DrainRequest { ManagedDrainId = "aci-operation-one", Resume = true });
+        await h.Routes.HandleAsync("POST", RunnerRoutes.Drain, resume, TestContext.Current.CancellationToken);
+        Assert.False(h.Engine.GetStatus().Draining);
+        Assert.True((await h.DeliverAsync(h.Task("dlv_resumed"))).Accepted);
+        await h.Service.SettledAsync("dlv_resumed");
+        Assert.Contains("dlv_active", h.Engine.GetStatus().ActiveDeliveryIds);
+    }
+
+    [Fact]
+    public async Task Resuming_a_managed_drain_preserves_a_manual_drain()
+    {
+        await using var h = new RunnerHarness();
+        h.Engine.Drain(new DrainRequest { ManagedDrainId = "aci-idle-stop" });
+        h.Engine.Drain(new DrainRequest { Reason = "owner paused work" });
+        h.Engine.Drain(new DrainRequest { ManagedDrainId = "aci-idle-stop", Resume = true });
+        Assert.Null(h.Engine.GetStatus().ManagedDrainId);
+        Assert.Equal(DeclineReason.Draining, (await h.DeliverAsync(h.Task("dlv_still_paused"))).Reason);
+    }
+
+    [Fact]
     public async Task Draining_refuses_new_work_and_stops_what_is_left_at_the_deadline()
     {
         await using var h = new RunnerHarness();

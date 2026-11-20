@@ -12,6 +12,21 @@ namespace MessageBus.Cli.Tests;
 public sealed class ConnectTests
 {
     [Fact]
+    public async Task Aci_scan_reports_a_resource_hint_without_claiming_cloud_authorization()
+    {
+        using var machine = new TestMachine();
+        machine.Env["MBUS_DEPLOYMENT_TARGET"] = "aci";
+        const string resource = "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/prototype/providers/Microsoft.ContainerInstance/containerGroups/runner";
+        machine.Env["MBUS_AZURE_RESOURCE_ID"] = resource;
+        var run = await machine.RunAsync("connect", "--rescan", "--json");
+        Assert.Equal(0, run.ExitCode);
+        var inventory = MessageBusJson.Deserialize<MachineInventory>(run.Output)!;
+        Assert.Equal(DeploymentTarget.Docker, inventory.Target);
+        Assert.Equal(DeploymentTarget.AzureContainerInstances, inventory.Deployment?.Target);
+        Assert.Equal(resource, inventory.Deployment?.AzureResourceId);
+    }
+
+    [Fact]
     public async Task Rescan_reports_found_missing_unconfigured_and_signed_out_agents()
     {
         using var machine = new TestMachine();
