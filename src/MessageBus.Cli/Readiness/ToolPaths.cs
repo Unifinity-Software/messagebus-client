@@ -13,7 +13,7 @@ public static class ToolPaths
 {
     /// <summary>The folders checked, whether or not they exist, in the order they are added.</summary>
     /// <param name="home">The user's home folder.</param>
-    /// <param name="env">Environment lookup (for <c>APPDATA</c> on Windows).</param>
+    /// <param name="env">Environment lookup (for <c>APPDATA</c> and <c>ProgramFiles</c> on Windows).</param>
     public static IReadOnlyList<string> Candidates(string home, Func<string, string?> env)
     {
         var dirs = new List<string>
@@ -31,16 +31,47 @@ public static class ToolPaths
         if (OperatingSystem.IsMacOS())
         {
             dirs.AddRange(["/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin"]);
+            dirs.Add("/Applications/Blender.app/Contents/MacOS");
         }
         else if (OperatingSystem.IsLinux())
         {
             dirs.AddRange(["/home/linuxbrew/.linuxbrew/bin", "/usr/local/bin"]);
         }
-        else if (OperatingSystem.IsWindows() && env("APPDATA") is { Length: > 0 } appData)
+        else if (OperatingSystem.IsWindows())
         {
-            dirs.Add(Path.Combine(appData, "npm"));
+            if (env("APPDATA") is { Length: > 0 } appData)
+            {
+                dirs.Add(Path.Combine(appData, "npm"));
+            }
+            dirs.AddRange(WindowsBlenderDirectories(env));
         }
         return dirs;
+    }
+
+    internal static IReadOnlyList<string> WindowsBlenderDirectories(Func<string, string?> env)
+    {
+        if (env("ProgramFiles") is not { Length: > 0 } programFiles)
+        {
+            return [];
+        }
+
+        const string prefix = "Blender ";
+        try
+        {
+            var root = Path.Combine(programFiles, "Blender Foundation");
+            return [.. Directory.EnumerateDirectories(root, prefix + "*")
+                .Select(dir => (Directory: dir, Name: Path.GetFileName(dir)))
+                .Where(entry => entry.Name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
+                    && File.Exists(Path.Combine(entry.Directory, "blender.exe")))
+                .Select(entry => (entry.Directory, Version: Version.TryParse(entry.Name.AsSpan(prefix.Length), out var version) ? version : null))
+                .Where(entry => entry.Version is not null)
+                .OrderByDescending(entry => entry.Version)
+                .Select(entry => entry.Directory)];
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return [];
+        }
     }
 
     /// <summary>The candidates that exist on this machine.</summary>

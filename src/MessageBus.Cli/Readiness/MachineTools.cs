@@ -54,6 +54,9 @@ internal static partial class MachineTools
         // java -version writes to stderr; macOS has a placeholder java too, which exits 1.
         new("java", "Java", "java", ["-version"], r => Version(r, r.AllOutput)),
         new("docker", "Docker", "docker", ["--version"], r => Version(r, r.Output)),
+        new("podman", "Podman", "podman", ["--version"], r => Version(r, r.Output)),
+        // Blender exits during argument parsing, before starting its UI.
+        new("blender", "Blender", "blender", ["--version"], r => Version(r, new StringReader(r.Output).ReadLine() ?? "")),
     ];
 
     [GeneratedRegex(@"git version (\S+)")]
@@ -69,9 +72,11 @@ internal static partial class MachineTools
     /// <param name="env">The environment the tools are looked up in (PATH, PATHEXT).</param>
     /// <param name="home">The user's home folder (per-user installs, <see cref="ToolPaths"/>).</param>
     /// <param name="cancellationToken">Stops the checks.</param>
-    public static async Task<IReadOnlyList<ToolStatus>> CheckAsync(Func<string, string?> env, string home, CancellationToken cancellationToken)
+    public static Task<IReadOnlyList<ToolStatus>> CheckAsync(Func<string, string?> env, string home, CancellationToken cancellationToken) =>
+        CheckAsync(env, ToolPaths.Existing(home, env), cancellationToken);
+
+    internal static async Task<IReadOnlyList<ToolStatus>> CheckAsync(Func<string, string?> env, IReadOnlyList<string> extra, CancellationToken cancellationToken)
     {
-        var extra = ToolPaths.Existing(home, env);
         var placeholders = await MacPlaceholdersAsync(cancellationToken).ConfigureAwait(false);
         return await Task.WhenAll(Probes().Select(p => CheckOneAsync(p, env, extra, placeholders, cancellationToken))).ConfigureAwait(false);
     }
@@ -110,6 +115,10 @@ internal static partial class MachineTools
         CancellationToken cancellationToken)
     {
         var path = CommandLocator.Find(probe.Command, env, extra);
+        if (path is null && probe.Name == "blender" && OperatingSystem.IsMacOS())
+        {
+            path = CommandLocator.Find("Blender", env, extra);
+        }
         if (path is null)
         {
             return new ToolStatus(probe.Name, probe.DisplayName, null, null, false,
