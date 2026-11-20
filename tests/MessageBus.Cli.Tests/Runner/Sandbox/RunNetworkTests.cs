@@ -140,6 +140,20 @@ public sealed class RunNetworkTests
     }
 
     [Fact]
+    public async Task The_proxy_keeps_taking_connections_after_an_error_taking_one()
+    {
+        // A failed accept (on Windows: a connection its client reset before it was taken) once ended the loop for good:
+        // the port stayed taken, every later connection was refused, and each agent run failed to reach its model.
+        var log = new StringWriter();
+        var calls = 0;
+        using var proxy = RunNetworkProxy.StartWithAccept(log, (listener, ct) =>
+            Interlocked.Increment(ref calls) == 1 ? throw new SocketException((int)SocketError.ConnectionReset) : listener.AcceptTcpClientAsync(ct));
+
+        Assert.StartsWith("HTTP/1.1 407", await ConnectThroughAsync(proxy.Port, "github.com:443", authorization: null));
+        Assert.Contains("couldn't take a connection (ConnectionReset", log.ToString());
+    }
+
+    [Fact]
     public async Task On_the_runners_one_proxy_each_run_gets_its_own_list_by_its_credential_and_no_credential_gets_407()
     {
         // the original issue: one port for every run; the credential in each run's proxy address says whose list applies.
