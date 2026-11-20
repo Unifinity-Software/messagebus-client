@@ -1,6 +1,6 @@
 <Project>
   <PropertyGroup>
-    <MbusSourceVersion>0.2.0</MbusSourceVersion>
+    <MbusSourceVersion>1.0.0</MbusSourceVersion>
     <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>

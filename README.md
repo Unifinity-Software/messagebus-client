@@ -10,7 +10,7 @@ not in this repository.
 `mbus` is published on nuget.org as the .NET tool `MessageBus.Ai.Cli`. It needs .NET 10.
 
 ```sh
-dotnet tool install --global MessageBus.Ai.Cli --prerelease
+dotnet tool install --global MessageBus.Ai.Cli
 mbus login --server https://app.messagebus.ai
 mbus connect
 mbus runner install
@@ -18,7 +18,7 @@ mbus runner install
 
 `mbus login` asks you to approve this machine in the dashboard. `mbus connect` sets up the coding agents it finds and
 shows each file it changes first. `mbus runner install` keeps the machine available for tasks. Update later with
-`dotnet tool update --global MessageBus.Ai.Cli --prerelease`, or with **Update now** on the dashboard's Runners page.
+`dotnet tool update --global MessageBus.Ai.Cli`, or with **Update now** on the dashboard's Runners page.
 
 Help center: [messagebus.ai/docs](https://messagebus.ai/docs).
 
@@ -42,7 +42,7 @@ Help center: [messagebus.ai/docs](https://messagebus.ai/docs).
 
 All packages share one version. The `mbus` command is the supported product.
 
-**The libraries have no compatibility promise.** While the version is 0.x, any public type in the
+**The libraries have no compatibility promise.** The version number describes the `mbus` tool: any public type in the
 `MessageBus.Ai.*` libraries may change or disappear in any release. They are published so the `mbus` tool and the
 service can share code and tests; depend on them only if you can follow those changes.
 
@@ -59,7 +59,7 @@ Run your build of `mbus` with `dotnet run --project src/MessageBus.Cli.Tool -- <
 
 ```sh
 dotnet pack src/MessageBus.Cli.Tool -c Release -o out/nuget
-dotnet tool install --tool-path out/tools --add-source out/nuget MessageBus.Ai.Cli --prerelease
+dotnet tool install --tool-path out/tools --add-source out/nuget MessageBus.Ai.Cli
 out/tools/mbus --version
 ```
 
