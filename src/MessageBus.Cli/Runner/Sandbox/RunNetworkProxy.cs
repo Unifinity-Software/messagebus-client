@@ -36,13 +36,16 @@ public sealed class RunNetworkProxy : IDisposable
     // Each open client connection, with the run it turned out to be for once its request was read (the original issue: withdrawn with it).
     private readonly ConcurrentDictionary<TcpClient, RunNetwork?> _open = new();
     private readonly UpstreamProxy? _upstream;
+    private readonly Func<CancellationToken, ValueTask<TcpClient>> _accept;
 
-    private RunNetworkProxy(TcpListener listener, TextWriter log, Func<string, int, CancellationToken, Task<Stream>>? connect, UpstreamProxy? upstream)
+    private RunNetworkProxy(TcpListener listener, TextWriter log, Func<string, int, CancellationToken, Task<Stream>>? connect, UpstreamProxy? upstream,
+        Func<TcpListener, CancellationToken, ValueTask<TcpClient>>? accept = null)
     {
         _listener = listener;
         _log = log;
         _upstream = upstream;
         _connect = connect ?? ConnectAsync;
+        _accept = accept is null ? listener.AcceptTcpClientAsync : ct => accept(listener, ct);
         Port = ((IPEndPoint)_listener.LocalEndpoint).Port;
         _ = Task.Run(AcceptAsync);
     }
@@ -64,6 +67,10 @@ public sealed class RunNetworkProxy : IDisposable
     /// <exception cref="SocketException">The port is taken.</exception>
     public static RunNetworkProxy Start(int port, TextWriter log, Func<string, int, CancellationToken, Task<Stream>>? connect = null, UpstreamProxy? upstream = null) =>
         new(Listen(port), log, connect, upstream);
+
+    /// <summary>A proxy on any free port whose listener takes connections through <paramref name="accept"/> (tests: a failing accept).</summary>
+    internal static RunNetworkProxy StartWithAccept(TextWriter log, Func<TcpListener, CancellationToken, ValueTask<TcpClient>> accept) =>
+        new(Listen(0), log, connect: null, upstream: null, accept);
 
     /// <summary>
     /// The runner's one proxy, on the port kept in <see cref="FileName"/> in <paramref name="settingsDirectory"/>. With none kept
@@ -228,18 +235,47 @@ public sealed class RunNetworkProxy : IDisposable
         return null;
     }
 
+    /// <summary>
+    /// Takes connections until the proxy is disposed. An error taking one (Windows reports a connection its client reset
+    /// before it was taken, or a brief lack of buffers, as a failed accept) never ends the loop: the listener would keep
+    /// its port while nothing took its connections, so every run's requests would be refused until the runner restarted.
+    /// </summary>
     private async Task AcceptAsync()
     {
+        var failures = 0;
         while (!_stop.IsCancellationRequested)
         {
             TcpClient client;
             try
             {
-                client = await _listener.AcceptTcpClientAsync(_stop.Token).ConfigureAwait(false);
+                client = await _accept(_stop.Token).ConfigureAwait(false);
+                failures = 0;
             }
-            catch (Exception ex) when (ex is OperationCanceledException or ObjectDisposedException or SocketException)
+            catch (Exception ex) when (ex is OperationCanceledException or ObjectDisposedException)
             {
                 return;
+            }
+            catch (SocketException ex)
+            {
+                if (_stop.IsCancellationRequested)
+                {
+                    return;
+                }
+                if (failures++ == 0)
+                {
+                    _log.WriteLine($"Network: runs' network proxy couldn't take a connection ({ex.SocketErrorCode}: {ex.Message}); it keeps taking connections.");
+                    continue;
+                }
+                // Failing again straight away: wait a little longer each time (up to 2 s) rather than spin.
+                try
+                {
+                    await Task.Delay(TimeSpan.FromMilliseconds(Math.Min(100 * failures, 2000)), _stop.Token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    return;
+                }
+                continue;
             }
             _open[client] = null;
             _ = Task.Run(async () =>
