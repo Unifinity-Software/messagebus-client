@@ -371,7 +371,7 @@ internal static class ContractSamples
         },
         new DeliveryDecision { Accepted = false, Reason = DeclineReason.NotAccepted, Detail = "own projects only" },
         new CancelDelivery { DeliveryId = Dlv, ThreadId = Thr, Reason = "project cancelled" },
-        new DrainRequest { Reason = "update", Deadline = T.AddHours(1) },
+        new DrainRequest { Reason = "update", Deadline = T.AddHours(1), ManagedDrainId = "aci-operation", Resume = true },
         new RescanRequest { RequestedBy = Subject },
         new ConnectAgentRequest { Agent = AgentKind.Codex, RequestedBy = "Ada Lovelace" },
         new ConnectAgentResult { Status = ConnectAgentStatus.NeedsTerminal, Message = "Run mbus connect codex on build-01." },
@@ -383,7 +383,7 @@ internal static class ContractSamples
         UpdateWaitingTaskSample,
         new RunnerUpdateBlockedBy { Count = 3 },
         new RunnerUpdateProgress { BlockedBy = new RunnerUpdateBlockedBy { Count = 3 }, Stage = RunnerUpdateStage.Ended, Version = "0.2.0", Report = UpdateReportSample },
-        new RunnerStatus { Version = "0.1.0", Slots = 2, ActiveDeliveryIds = [Dlv], Draining = true, SlotCeiling = 4, SlotMachineMax = 10 },
+        new RunnerStatus { Version = "0.1.0", Slots = 2, ActiveDeliveryIds = [Dlv], Draining = true, SlotCeiling = 4, SlotMachineMax = 10, SupportsManagedDrain = true, ManagedDrainId = "aci-operation" },
         new SlotsRequest { Slots = 2 },
         new RunnerWorkPolicy
         {

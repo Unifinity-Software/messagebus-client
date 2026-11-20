@@ -33,7 +33,9 @@ Defined in `src/MessageBus.Contracts/Security/MachineAuth.cs` and `src/MessageBu
 | `MbusDelivery <token>` | A cloud agent sent one task | Heartbeat, progress and settle of that task only |
 
 `mbus login` creates the machine's device key (ECDSA P-256) on the machine and registers its public half when it
-enrolls (`POST /api/machines/enroll`). The private key never leaves the machine. A machine request is signed with it:
+enrolls (`POST /api/machines/enroll`). The private key lives in the device's key store. Customer-managed ACI
+deployments can provision that identity through their secret store and restore it into owner-only local storage
+on startup, as described in `docker/runner/README.md`. A machine request is signed with it:
 
 - headers `X-Mbus-Timestamp` (Unix seconds), `X-Mbus-Nonce` (random, single use) and `X-Mbus-Signature`;
 - the signature is ES256 in IEEE P1363 form, base64url without padding, over
@@ -72,6 +74,15 @@ Adding a tool, or a field to a tool's input or result, follows the compatibility
 must keep working against a newer service, and the reverse.
 
 ## The runner connection
+
+`RunnerStatus.supportsManagedDrain` enables reversible idle-stop drains. When true, the service
+can send `DrainRequest.managedDrainId` with an operation ID. The runner keeps active tasks running
+and refuses new work until it receives `resume: true` with the same ID. Another operation cannot
+replace or resume that drain. Manual drains and update/shutdown restrictions remain in force.
+`RunnerStatus.managedDrainId` identifies the current managed drain. These fields are optional.
+The service must read `supportsManagedDrain` before sending either operation, because an older
+runner interprets every drain request as a manual drain. A managed request ignores `deadline`.
+
 
 Defined in `src/MessageBus.Contracts/Runner/RunnerProtocol.cs`; the transport is `src/MessageBus.Runner.Transport`.
 
