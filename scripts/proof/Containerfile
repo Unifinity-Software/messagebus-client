@@ -1,0 +1,17 @@
+# Supply cached image references and a complete offline .deb dependency set.
+# No image pulls or package downloads are performed by the documented build.
+ARG NODE_IMAGE
+ARG SDK_IMAGE
+FROM ${NODE_IMAGE} AS node
+FROM ${SDK_IMAGE}
+USER root
+COPY offline-debs/ /tmp/offline-debs/
+RUN dpkg -i /tmp/offline-debs/*.deb
+COPY --from=node /usr/local/bin/node /usr/bin/node
+COPY --from=node /usr/local/lib/node_modules/npm /usr/lib/node_modules/npm
+RUN ln -sf /usr/lib/node_modules/npm/bin/npm-cli.js /usr/bin/npm \
+    && test -x /usr/bin/bwrap \
+    && python3 --version \
+    && /usr/bin/node --version \
+    && /usr/bin/npm --version \
+    && dotnet --version
