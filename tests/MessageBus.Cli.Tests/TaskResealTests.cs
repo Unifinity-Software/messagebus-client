@@ -114,6 +114,7 @@ public sealed class TaskResealTests
         var old = Key(oldPair, "ek_file", "old-role");
         var destination = Key(newPair, "ek_body", "new-role");
         using var http = Configure(machine, destination);
+        using var links = AttachmentTransfers.CreateTestHttpClient(machine.Server, disposeHandler: false);
         using var keys = new MachineKeys(http, "ws_test", null, machine.Home, TextWriter.Null, machine.Time);
         keys.Ring.Add(old.KeyId, KeyPair.FromPem(oldPair.ExportPem()));
         var file = await SealFile("independent file"u8.ToArray(), old);
@@ -125,7 +126,7 @@ public sealed class TaskResealTests
         { Content = new StringContent("{\"product\":\"messagebus.ai\",\"capabilities\":[\"approvalAffectedV1\",\"replayIndependentInputsV1\",\"settleAttemptV1\"]}") });
         var target = new RoleTarget { Role = "new-role" };
         var recipient = await TaskReseal.PrepareReplayAsync(keys, http, envelope, target, Ct);
-        var result = await TaskReseal.ResealAsync(keys, http, new AttachmentClient(http, http, "ws_test"), envelope, target, Ct,
+        var result = await TaskReseal.ResealAsync(keys, http, new AttachmentClient(http, links, "ws_test"), envelope, target, Ct,
             tempDirectory: machine.Home, recipientKey: recipient);
         Assert.Null(result.Body);
         var replacement = Assert.Single(result.Attachments!);
@@ -174,9 +175,10 @@ public sealed class TaskResealTests
         var oldKey = Key(oldPair, "ek_old", "old-role");
         var newKey = Key(newPair, "ek_new", "new-role");
         using var http = Configure(machine, newKey);
+        using var links = AttachmentTransfers.CreateTestHttpClient(machine.Server, disposeHandler: false);
         using var keys = new MachineKeys(http, "ws_test", null, machine.Home, TextWriter.Null, machine.Time);
         keys.Ring.Add(oldKey.KeyId, KeyPair.FromPem(oldPair.ExportPem()));
-        var attachments = new AttachmentClient(http, http, "ws_test", machine.Home);
+        var attachments = new AttachmentClient(http, links, "ws_test", machine.Home);
         var plain = FileRef("att_plain", "plain file"u8.ToArray());
         var payload = "the encrypted attachment"u8.ToArray();
         var sealedFile = await SealFile(payload, oldKey);
@@ -236,6 +238,7 @@ public sealed class TaskResealTests
         var oldKey = Key(oldPair, "ek_old", "old-role");
         var newKey = Key(newPair, "ek_new", "new-role");
         using var http = Configure(machine, newKey);
+        using var links = AttachmentTransfers.CreateTestHttpClient(machine.Server, disposeHandler: false);
         using var keys = new MachineKeys(http, "ws_test", null, machine.Home, TextWriter.Null, machine.Time);
         keys.Ring.Add(oldKey.KeyId, KeyPair.FromPem(oldPair.ExportPem()));
         var sealedFile = await SealFile("private task input"u8.ToArray(), oldKey);
@@ -253,7 +256,7 @@ public sealed class TaskResealTests
         else file = file with { Sha256 = new string('0', 64) };
 
         await Assert.ThrowsAsync<AttachmentTransferException>(() => TaskReseal.ResealAsync(keys, http,
-            new AttachmentClient(http, http, "ws_test"), Envelope(null, [file]),
+            new AttachmentClient(http, links, "ws_test"), Envelope(null, [file]),
             new RoleTarget { Role = "new-role" }, Ct, tempDirectory: machine.Home));
 
         Assert.Empty(Directory.EnumerateFiles(machine.Home, "mbus-reseal-*"));
@@ -269,13 +272,14 @@ public sealed class TaskResealTests
         using var pair = KeyPair.GenerateP256();
         var key = Key(pair, "ek_shared", null);
         using var http = Configure(machine, key);
+        using var links = AttachmentTransfers.CreateTestHttpClient(machine.Server, disposeHandler: false);
         using var keys = new MachineKeys(http, "ws_test", null, machine.Home, TextWriter.Null, machine.Time);
         // This machine doesn't need the private key when all inputs already use the destination key.
         var sealedFile = MessageCrypto.Seal("payload"u8, key);
         var file = FileRef("att_shared", sealedFile.Ciphertext) with { Encryption = sealedFile.Encryption };
         var envelope = Envelope(BodyCrypto.Seal(new MessageBody { Summary = "Do the work" }, key).ToSealedBody(), [file]);
 
-        var result = await TaskReseal.ResealAsync(keys, http, new AttachmentClient(http, http, "ws_test"), envelope,
+        var result = await TaskReseal.ResealAsync(keys, http, new AttachmentClient(http, links, "ws_test"), envelope,
             new AgentTarget { AgentId = "agt_new" }, Ct);
 
         Assert.Null(result.Body);
@@ -294,6 +298,7 @@ public sealed class TaskResealTests
         var missingKey = Key(missingPair, "ek_missing", "missing");
         var destinationKey = Key(destinationPair, "ek_destination", "new-role");
         using var http = Configure(machine, destinationKey);
+        using var links = AttachmentTransfers.CreateTestHttpClient(machine.Server, disposeHandler: false);
         using var keys = new MachineKeys(http, "ws_test", null, machine.Home, TextWriter.Null, machine.Time);
         keys.Ring.Add(firstKey.KeyId, KeyPair.FromPem(firstPair.ExportPem()));
         var first = MessageCrypto.Seal("first"u8, firstKey);
@@ -304,7 +309,7 @@ public sealed class TaskResealTests
             FileRef("att_second", second.Ciphertext) with { Encryption = second.Encryption },
         ]);
         var error = await Assert.ThrowsAsync<MissingKeyException>(() => TaskReseal.ResealAsync(keys, http,
-            new AttachmentClient(http, http, "ws_test"), envelope, new RoleTarget { Role = "new-role" }, Ct));
+            new AttachmentClient(http, links, "ws_test"), envelope, new RoleTarget { Role = "new-role" }, Ct));
         Assert.Equal("ek_missing", error.KeyId);
         Assert.DoesNotContain(machine.Server.Requests, r => r.Uri.AbsolutePath.Contains("attachments"));
     }
@@ -316,11 +321,12 @@ public sealed class TaskResealTests
         using var pair = KeyPair.GenerateP256();
         var key = Key(pair, "ek_current", "new-role");
         using var http = Configure(machine, key);
+        using var links = AttachmentTransfers.CreateTestHttpClient(machine.Server, disposeHandler: false);
         using var keys = new MachineKeys(http, "ws_test", null, machine.Home, TextWriter.Null, machine.Time);
         var envelope = Envelope(BodyCrypto.Seal(new MessageBody { Summary = "Do the work" }, key).ToSealedBody(), []);
 
         var error = await Assert.ThrowsAsync<McpToolException>(() => TaskReseal.ResealAsync(keys, http,
-            new AttachmentClient(http, http, "ws_test"), envelope, new RoleTarget { Role = "new-role" }, Ct, "ek_preview"));
+            new AttachmentClient(http, links, "ws_test"), envelope, new RoleTarget { Role = "new-role" }, Ct, "ek_preview"));
 
         Assert.Equal(McpErrorCodes.Conflict, error.Error.Code);
         Assert.DoesNotContain(machine.Server.Requests, r => r.Uri.AbsolutePath.Contains("attachments") || r.Uri.AbsolutePath.Contains("/body"));
@@ -335,13 +341,14 @@ public sealed class TaskResealTests
         var oldKey = Key(oldPair, "ek_old", "old-role");
         var newKey = Key(newPair, "ek_new", "new-role");
         using var http = Configure(machine, newKey);
+        using var links = AttachmentTransfers.CreateTestHttpClient(machine.Server, disposeHandler: false);
         using var keys = new MachineKeys(http, "ws_test", null, machine.Home, TextWriter.Null, machine.Time);
         keys.Ring.Add(oldKey.KeyId, KeyPair.FromPem(oldPair.ExportPem()));
         var original = new MessageBody { Summary = "Large body", Details = new string('x', 70000) };
         var ciphertext = BodyCrypto.Seal(original, oldKey);
         var body = new SealedBody { Body = new BodyRef { SizeBytes = ciphertext.Ciphertext.Length, Sha256 = ciphertext.Sha256, BlobName = "body/example" }, Encryption = ciphertext.Encryption };
         machine.Server.On(HttpMethod.Get, "/api/w/ws_test/threads/thr_task/messages/msg_old/body", _ => new(HttpStatusCode.OK) { Content = new ByteArrayContent(ciphertext.Ciphertext) });
-        var result = await TaskReseal.ResealAsync(keys, http, new AttachmentClient(http, http, "ws_test"), Envelope(body, []), new RoleTarget { Role = "new-role" }, Ct);
+        var result = await TaskReseal.ResealAsync(keys, http, new AttachmentClient(http, links, "ws_test"), Envelope(body, []), new RoleTarget { Role = "new-role" }, Ct);
         using var destination = new KeyRing().Add(newKey.KeyId, KeyPair.FromPem(newPair.ExportPem()));
         Assert.Equal(original.Details, BodyCrypto.Open(Convert.FromBase64String(result.Body!.Body.Data!), result.Body.Encryption, destination).Details);
         Assert.DoesNotContain(machine.Server.Requests, r => r.Uri.AbsolutePath.Contains("attachments"));
