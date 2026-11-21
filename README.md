@@ -58,9 +58,11 @@ service-compatible IDs of at most 100 characters. Repository, managed/system, re
 are not inventory sources. They are not copied into the confined local runtime. Personal settings stay unchanged.
 
 The implementation is based on [exact pinned upstream source and package integrity](docs/opencode-local-runtime.md).
-That page contains executable native acceptance commands. Package execution, full suites, actual LM Studio inference,
-two-model trials and the cross-machine handoff still require coordinator verification; source analysis and compilation
-alone do not establish those acceptance results.
+Native Windows verification passed the full client build and suite, public-contract checks, and the real pinned
+package's production launch/isolation proof against fake local and cloud providers. The proof observed nine local
+inferences and no cloud requests or cloud inference after its hostile-settings positive-control baseline.
+Actual LM Studio inference, Mac two-model trials and the Windows/macOS three-family handoff remain pending;
+the [native proof packet](eng/opencode-proof/README.md) records the results and remaining acceptance steps.
 
 `mbus doctor` and scans make only read-only model-list GETs under **one five-second budget for all candidates**, at
 most two requests per candidate, 1 MiB per response, without redirects. Native `/api/v1/models` must confirm a loaded

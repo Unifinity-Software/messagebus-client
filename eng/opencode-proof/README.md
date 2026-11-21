@@ -1,7 +1,8 @@
 # Native OpenCode proof packet (#332)
 
-This packet is authored and compiled, **not executed** by the task worker. The fake-provider
-proof is separate from LM Studio model quality/acceptance and the three-family Windows/Mac demo.
+The native Windows coordinator executed this packet successfully at client commit
+`2ac7c1a13cdb6a21f42151fe9bcf2bfa869b61bb`; the task worker did not execute tests or the package.
+The fake-provider proof is separate from LM Studio model quality/acceptance and the three-family Windows/Mac demo.
 Run only in a native coordinator context with test execution authorized. Current Mac worker
 tester/backend roles have `canRunTests=false`; that is an execution gate, not a reason to clear
 `MBUS_RUN_TOOLS`, rename a test, invoke its DLL, change permissions, or suppress `InsideRun`.
@@ -10,6 +11,26 @@ Baseline: server `3621746ce2c2cdd794443ed6174b1fa901e0d14e` stays unchanged; cli
 `cbd04253ba567b1044920a50112bf9317a0ae745`. Run on this packet's committed client head.
 No global install, personal home/config/auth writes, machine enrollment, rekey, role changes,
 service changes, model download/load/unload, release, push, PR, approval or merge is part of this packet.
+
+## Recorded Windows result (2026-11-21)
+
+The native coordinator reported the full client build and suite, public-contract check and diff
+check passing at the client commit above: **1,229 total, 1,197 passed, 32 platform/environment
+skips, zero failures**. The opt-in fake-provider proof executed and passed using the SRI-verified
+`opencode-windows-x64` 1.19.5 binary and the real production launch/isolation path.
+
+Hostile global/home/project/account/auth/plugin positive controls passed, including two
+fake-cloud inferences before taking the counter baseline. The confined phase recorded **nine
+local inferences, zero cloud requests and zero cloud inferences after that baseline**, covering
+primary, auxiliary, subtask and compaction inference plus primary-failure and unknown-model
+negative controls. These local inferences used the fixture's fake endpoint, not a real LM Studio
+model. The zero-cloud result is scoped to those fixture counters and the confined phase.
+
+Actual LM Studio inference, native Mac execution, the two-model/four-trial suitability comparison
+and the Windows/macOS three-family production handoff remain pending. Issue #332 stays open.
+The client source PR should use `Refs #332`; this work changes no version and awaits the future
+batch release. Customer-facing help-center changes belong in the hosted-service repository and
+must follow the released client pin; that follow-up remains to be tracked separately.
 
 ## Verified artifact setup (no package execution)
 
@@ -108,8 +129,9 @@ Source evidence at the pinned commit: [config install fibers](https://github.com
 [config directory identities](https://github.com/anomalyco/opencode/blob/810c0eba1a7348036f8bdf61e6632d0c36c6876c/packages/opencode/src/config/paths.ts#L20),
 and [npm environment configuration](https://github.com/anomalyco/opencode/blob/810c0eba1a7348036f8bdf61e6632d0c36c6876c/packages/core/src/npm-config.ts).
 The wellknown and account response envelopes both correctly contain `config`; they are not
-changed to work around the timeout. This source-backed timeout explanation still needs the
-native coordinator's runtime confirmation; compilation alone does not establish a fix.
+changed to work around the timeout. The native Windows coordinator's passing proof at the
+recorded client commit confirms this fixture setup runs within its unchanged deadlines on Windows;
+Mac execution remains pending.
 
 The confined launch comes from **AgentRun.AgentProcessLaunch + actual RunIsolation.Wrap**, including
 environment scrubbing and the platform's sandbox wrapper. It retains the final wrapped executable,

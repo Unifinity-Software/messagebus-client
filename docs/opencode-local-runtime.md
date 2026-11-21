@@ -2,9 +2,13 @@
 
 The supported implementation targets npm **opencode-ai 1.19.5**, upstream commit
 `810c0eba1a7348036f8bdf61e6632d0c36c6876c`. It does not use the OpenCode 2 shared server.
-Source inspection and compilation have been performed. The native acceptance below must still be run by the
-coordinator before claiming package execution or actual local inference has passed. No OpenCode package, model call, service
-or test was executed by the implementation worker.
+Source inspection is backed by native coordinator verification on Windows at client commit
+`2ac7c1a13cdb6a21f42151fe9bcf2bfa869b61bb`: the full client build and suite, public-contract and diff
+checks passed (1,229 tests: 1,197 passed, 32 platform/environment skips, zero failures). The SRI-verified
+Windows x64 1.19.5 package passed the production launch/isolation proof with fake providers: nine local
+inferences and zero cloud requests or cloud inference after the positive-control baseline. These are
+coordinator results; the implementation worker did not execute the package or tests. Actual LM Studio
+inference, Mac two-model trials and the Windows/macOS three-family demo remain pending.
 
 ## Why the config confines model resolution
 
@@ -47,7 +51,7 @@ opencode-ai-1.19.5.tgz
 SHA256: 1f97e49381f8a42a629482eff8be98aa96d62e2e94410a8ec98e738f9c787680
 SRI: sha512-tEqMvQahfhdDj8vceYpXtoIrvjPXm5XRfetWnPN5YISueU7adNx9JcUA3zZ+2GKuDVgDpGdQe1ZLtCZDjqodvA==
 
-opencode-windows-x64-1.19.5.tgz (registry metadata; worker did not download or execute)
+opencode-windows-x64-1.19.5.tgz (SRI verified and executed by the native Windows coordinator)
 SRI: sha512-xCVbrA8A/qQTAdBIKyhK5tx3/mcq18yF82Mi8phry0MJb2631nnnpxF9m6FFfWAVHyer4qFGrO7hbWXesHQ1Gg==
 ```
 
@@ -62,7 +66,11 @@ fake-cloud HTTP endpoints. It requires hostile global/home/project/auth/account/
 controls, all seven expected agents, explicit summary/subtask/compaction calls, observed API model
 IDs, and no cloud requests on primary failure or unknown model. Its confined commands reuse the
 production `AgentProcessLaunch` and `RunIsolation` result. A compiled fixture is not runtime proof;
-the coordinator must execute it outside a task with permission and verify it did not skip.
+the coordinator must execute it outside a task with permission and verify it did not skip. The native
+Windows coordinator did so at the commit above: hostile global/home/project/account/auth/plugin
+controls included two fake-cloud inferences before the baseline; confined primary, auxiliary,
+subtask and compaction inference and failure/unknown-model negative controls passed with no
+subsequent cloud traffic. See the packet for the recorded result and pending Mac execution.
 
 `OpenCodeLocalHostTests` remains a separate opt-in loaded-LM-Studio smoke. It now requires the
 verified binary digest, all seven expected agents and saves command output even on failure.
