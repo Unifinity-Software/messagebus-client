@@ -266,7 +266,7 @@ public sealed class ServerSendGateTests
             .CreateHeaders(escaped!, later, []));
     }
 
-    [Fact]
+    [Fact(Timeout = 30_000)]
     public async Task Explicit_consumption_reserves_transaction_against_concurrent_pin_and_waits_before_lock_release()
     {
         using var fixture = new Fixture();
@@ -276,8 +276,10 @@ public sealed class ServerSendGateTests
         var checkedOperations = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         Task<bool>? sending = null;
+        ConfigStore.ProfileSecurityTransaction? escaped = null;
         var outer = fixture.Store.WithSessionLockAsync(async transaction =>
         {
+            escaped = transaction;
             var prepared = await gate.PrepareSendAsync(target, TestContext.Current.CancellationToken, transaction);
             sending = prepared.ConsumeAsync(target, async _ =>
             {
@@ -286,18 +288,33 @@ public sealed class ServerSendGateTests
                 return true;
             }, TestContext.Current.CancellationToken, transaction);
             await entered.Task.WaitAsync(TestContext.Current.CancellationToken);
-            Assert.Throws<InvalidOperationException>(() => transaction.PrepareBinding(
-                ServerEndpoint.Parse(Origin + "/gateway"), ServerDiscoveryParser.Parse(Isolated)));
-            Assert.Throws<InvalidOperationException>(() => transaction.LoadBindingFloor());
-            checkedOperations.SetResult();
+            try
+            {
+                Assert.Throws<InvalidOperationException>(() => transaction.PrepareBinding(
+                    ServerEndpoint.Parse(Origin + "/gateway"), ServerDiscoveryParser.Parse(Isolated)));
+                Assert.Throws<InvalidOperationException>(() => transaction.LoadBindingFloor());
+                Assert.Throws<InvalidOperationException>(() => transaction.Load());
+                Assert.Throws<InvalidOperationException>(() => transaction.Save(new CliConfig()));
+                Assert.Throws<InvalidOperationException>(() => transaction.LoadSession());
+                Assert.Throws<InvalidOperationException>(() => transaction.DeleteSession());
+            }
+            finally { checkedOperations.TrySetResult(); }
             // Even an accidentally unawaited send cannot let outer completion release its lock early.
             return true;
         }, TestContext.Current.CancellationToken);
         await checkedOperations.Task.WaitAsync(TestContext.Current.CancellationToken);
-        try { Assert.False(outer.IsCompleted); }
+        var waiting = fixture.Store.WithProfileSecurityLockAsync(transaction =>
+            Task.FromResult(transaction.Load()), TestContext.Current.CancellationToken);
+        try
+        {
+            Assert.False(outer.IsCompleted);
+            Assert.False(waiting.IsCompleted);
+        }
         finally { release.TrySetResult(); }
         await outer;
+        Assert.Equal(Machine, (await waiting).MachineId);
         Assert.True(await sending!);
+        Assert.Throws<InvalidOperationException>(() => escaped!.Load());
         Assert.Null(fixture.Store.Load().ServerBinding);
     }
 

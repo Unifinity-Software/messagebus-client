@@ -347,6 +347,156 @@ public sealed class ServerBindingTests
         Assert.Empty(Directory.GetFileSystemEntries(target));
     }
 
+    [Fact(Timeout = 30_000)]
+    public async Task Published_session_callback_can_await_read_rotate_and_save_without_losing_the_floor()
+    {
+        using var machine = new TestMachine();
+        var store = new ConfigStore(machine.MbusFolder, "file");
+        store.Save(new CliConfig { Server = Origin + "/gateway" });
+        store.SaveSession(Session(Origin + "/gateway"));
+        var pin = await Prepare(store);
+        // This zero-argument delegate is the published source/CLR shape used by package consumers.
+        Func<Task<string>> callback = async () =>
+        {
+            await Task.Yield();
+            var config = store.Load();
+            var previous = await Task.Run(() => store.LoadSession(), TestContext.Current.CancellationToken);
+            store.Save(config with { WorkspaceName = "Updated under session lock" });
+            await Task.Run(() => store.SaveSession(previous! with
+            {
+                AccessToken = "fixture-rotated-access", RefreshToken = "fixture-rotated-refresh",
+            }), TestContext.Current.CancellationToken);
+            Assert.Equal(pin, store.Load().ServerBinding);
+            return store.LoadSession()!.RefreshToken;
+        };
+#pragma warning disable CS0618 // Exercise the exact published overload, retained for existing consumers.
+        var refresh = await store.WithSessionLockAsync(callback, TestContext.Current.CancellationToken);
+#pragma warning restore CS0618
+        Assert.Equal("fixture-rotated-refresh", refresh);
+        Assert.Equal(refresh, store.LoadSession()!.RefreshToken);
+        Assert.Equal(pin, store.LoadSession()!.ServerBinding);
+        store.DeleteSession();
+        Assert.Null(store.LoadSession());
+        await AssertLegacyRefused(store);
+    }
+
+    [Fact(Timeout = 30_000)]
+    public async Task Published_callback_children_share_the_guard_and_unrelated_callers_wait_for_release()
+    {
+        using var machine = new TestMachine();
+        var store = new ConfigStore(machine.MbusFolder, "file");
+        store.Save(new CliConfig { Server = Origin + "/gateway" });
+        store.SaveSession(Session(Origin + "/gateway"));
+        var pin = await Prepare(store);
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var callbackChecked = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var finishCallback = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var writes = 0;
+        store.BindingWriteBoundary = boundary =>
+        {
+            if (boundary != "before-config-save") return;
+            Interlocked.Increment(ref writes);
+            Assert.Throws<InvalidOperationException>(() => store.Load()); // Same-thread recursion also refuses.
+            entered.TrySetResult();
+            release.Task.GetAwaiter().GetResult();
+        };
+#pragma warning disable CS0618
+        var outer = store.WithSessionLockAsync(async () =>
+        {
+            var first = Task.Run(() => store.Save(new CliConfig
+            { Server = Origin + "/gateway", WorkspaceName = "Winning child" }), TestContext.Current.CancellationToken);
+            await entered.Task.WaitAsync(TestContext.Current.CancellationToken);
+            try
+            {
+                await Task.Run(() =>
+                {
+                    Assert.Throws<InvalidOperationException>(() => store.Load());
+                    Assert.Throws<InvalidOperationException>(() => store.LoadSession());
+                    Assert.Throws<InvalidOperationException>(() => store.Save(new CliConfig()));
+                    Assert.Throws<InvalidOperationException>(() => store.SaveSession(Session(Origin + "/gateway")));
+                    Assert.Throws<InvalidOperationException>(() => store.DeleteSession());
+                }, TestContext.Current.CancellationToken);
+            }
+            finally { release.TrySetResult(); }
+            await first;
+            Assert.Equal(1, Volatile.Read(ref writes));
+            Assert.Equal("Winning child", store.Load().WorkspaceName);
+            Assert.Equal("fixture-refresh", store.LoadSession()!.RefreshToken);
+            await Assert.ThrowsAsync<InvalidOperationException>(() => store.WithProfileSecurityLockAsync(
+                context => Task.FromResult(context.Load()), TestContext.Current.CancellationToken));
+            callbackChecked.TrySetResult();
+            await finishCallback.Task.WaitAsync(TestContext.Current.CancellationToken);
+            return true;
+        }, TestContext.Current.CancellationToken);
+#pragma warning restore CS0618
+        try
+        {
+            await Task.WhenAny(callbackChecked.Task, outer).WaitAsync(TestContext.Current.CancellationToken);
+            if (outer.IsCompleted) await outer; // Surface a failed callback instead of waiting on its signal forever.
+            Assert.True(callbackChecked.Task.IsCompletedSuccessfully);
+            // This call originates outside the compatibility scope on the SAME store, so it reaches
+            // the normal semaphore wait synchronously and cannot read state until the callback exits.
+            var waiting = store.WithProfileSecurityLockAsync(context =>
+            {
+                Assert.Equal(pin, context.Load().ServerBinding);
+                context.SaveSession(Session(Origin + "/gateway") with { RefreshToken = "fixture-after-release" });
+                return Task.FromResult(true);
+            }, TestContext.Current.CancellationToken);
+            Assert.False(waiting.IsCompleted);
+            finishCallback.TrySetResult();
+            await outer;
+            await waiting;
+        }
+        finally
+        {
+            release.TrySetResult();
+            finishCallback.TrySetResult();
+            store.BindingWriteBoundary = null;
+        }
+        Assert.Equal(pin, store.Load().ServerBinding);
+        Assert.Equal(pin, store.LoadSession()!.ServerBinding);
+        Assert.Equal("fixture-after-release", store.LoadSession()!.RefreshToken);
+    }
+
+    [Theory(Timeout = 30_000)]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Published_callback_scope_cannot_escape_completion_or_poison_later_operations(bool failCallback)
+    {
+        using var machine = new TestMachine();
+        var store = new ConfigStore(machine.MbusFolder, "file");
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        Task? child = null;
+#pragma warning disable CS0618
+        var outer = store.WithSessionLockAsync(async () =>
+        {
+            child = Task.Run(async () =>
+            {
+                await release.Task.WaitAsync(TestContext.Current.CancellationToken);
+                Assert.Throws<InvalidOperationException>(() => store.Load());
+                Assert.Throws<InvalidOperationException>(() => store.Save(new CliConfig { WorkspaceName = "Escaped child" }));
+                Assert.Throws<InvalidOperationException>(() => store.LoadSession());
+                Assert.Throws<InvalidOperationException>(() => store.SaveSession(Session(Origin)));
+                Assert.Throws<InvalidOperationException>(() => store.DeleteSession());
+            }, TestContext.Current.CancellationToken);
+            await Task.Yield();
+            if (failCallback) throw new IOException("fixture callback failure");
+            return true;
+        }, TestContext.Current.CancellationToken);
+#pragma warning restore CS0618
+        try
+        {
+            if (failCallback) await Assert.ThrowsAsync<IOException>(() => outer);
+            else await outer;
+            store.Save(new CliConfig { WorkspaceName = "After callback" });
+        }
+        finally { release.TrySetResult(); }
+        await child!;
+        Assert.Equal("After callback", store.Load().WorkspaceName);
+        Assert.Null(store.LoadSession());
+    }
+
     [Fact]
     public async Task Explicit_context_supports_nested_session_writers_and_refuses_use_after_release()
     {

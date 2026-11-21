@@ -57,7 +57,7 @@ public sealed record CliRefreshResponse
 /// <summary>
 /// The person's mbus sign-in on one server (the original issue), saved in <see cref="ConfigStore.SessionPath"/>. It
 /// follows the Groundhog CLI: refresh before a call when fewer than <see cref="RefreshMargin"/> remain,
-/// refresh and retry once on a 401, and take the sign-in lock (<see cref="ConfigStore.WithSessionLockAsync{T}"/>)
+/// refresh and retry once on a 401, and take the sign-in lock (<see cref="ConfigStore.WithProfileSecurityLockAsync{T}"/>)
 /// around every refresh so concurrent mbus processes use each other's new tokens instead of replaying
 /// an old refresh token (which the service treats as stolen and answers by ending the sign-in).
 /// </summary>

@@ -227,7 +227,7 @@ public sealed partial class ConfigStore
 
     /// <summary>The stored settings, or empty settings when there are none.</summary>
     public CliConfig Load()
-        => InSecurityTransaction(_ => ReadBindingState().Config);
+        => InSecurityTransaction(context => context.Load());
 
     private CliConfig ReadConfig()
     {
@@ -249,12 +249,13 @@ public sealed partial class ConfigStore
 
     /// <summary>Saves the settings.</summary>
     public void Save(CliConfig config)
-        => InSecurityTransaction(context => { SaveConfigLocked(config); return true; });
+        => InSecurityTransaction(context => { context.Save(config); return true; });
 
     private void SaveConfigLocked(CliConfig config)
     {
         var state = ReadBindingState();
         config = config with { ServerBinding = MergeSnapshot(state.Config.ServerBinding, config.ServerBinding, config.Server, state.Ledger) };
+        BindingWriteBoundary?.Invoke("before-config-save");
         var previousServer = state.Config.Server;
         if (previousServer != config.Server)
             MessageBus.Mcp.KeyTrust.BindLegacy(Directory, previousServer ?? config.Server ?? "");
@@ -419,7 +420,7 @@ public sealed partial class ConfigStore
 
     /// <summary>The saved sign-in, or null when absent. Unreadable state refuses rather than erasing a possible floor.</summary>
     public CliSessionFile? LoadSession()
-        => InSecurityTransaction(_ => { var state = ReadBindingState(); return state.Session; });
+        => InSecurityTransaction(context => context.LoadSession());
 
     private CliSessionFile? ReadSession()
     {
@@ -441,8 +442,8 @@ public sealed partial class ConfigStore
     }
 
     /// <summary>Saves the sign-in (owner-only, replaced in one step).</summary>
-    public void SaveSession(CliSessionFile session) => InSecurityTransaction(_ =>
-    { SaveSessionLocked(session); return true; });
+    public void SaveSession(CliSessionFile session) => InSecurityTransaction(context =>
+    { context.SaveSession(session); return true; });
 
     private void SaveSessionLocked(CliSessionFile session)
     {
@@ -453,7 +454,7 @@ public sealed partial class ConfigStore
 
     /// <summary>Forgets the sign-in.</summary>
     public void DeleteSession()
-        => InSecurityTransaction(_ => { DeleteSessionLocked(); return true; });
+        => InSecurityTransaction(context => { context.DeleteSession(); return true; });
 
     private void DeleteSessionLocked()
     {
@@ -478,9 +479,30 @@ public sealed partial class ConfigStore
     public Task<T> WithSessionLockAsync<T>(Func<ProfileSecurityTransaction, Task<T>> body, CancellationToken ct) =>
         WithProfileSecurityLockAsync(body, ct);
 
-    /// <summary>Runs a serialized profile transaction. Pass its context to nested helpers; ordinary store methods acquire a new lock.</summary>
+    /// <summary>
+    /// Runs a legacy sign-in callback under the profile lock. Ordinary Load/Save and session operations on
+    /// this store use the held transaction's operation guard, including after awaits. Overlapping operations
+    /// refuse before state access; inherited callbacks cannot use the transaction after its completion.
+    /// Use the explicit-context overload for new code and helpers that prepare or consume sends.
+    /// </summary>
+    [Obsolete("Use the overload receiving ProfileSecurityTransaction for new code.")]
+    public Task<T> WithSessionLockAsync<T>(Func<Task<T>> body, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(body);
+        return WithProfileSecurityLockAsync(async context =>
+        {
+            var previous = _compatibilitySession.Value;
+            _compatibilitySession.Value = context;
+            try { return await body().ConfigureAwait(false); }
+            finally { _compatibilitySession.Value = previous; }
+        }, ct);
+    }
+
+    /// <summary>Runs a serialized profile transaction. Pass its context to nested helpers.</summary>
     public async Task<T> WithProfileSecurityLockAsync<T>(Func<ProfileSecurityTransaction, Task<T>> body, CancellationToken ct)
     {
+        if (_compatibilitySession.Value is not null)
+            throw new InvalidOperationException("A legacy session callback cannot acquire another profile transaction. Use the explicit-context overload and pass its context to helpers.");
         EnsureDirectory();
         var lockPath = Path.GetFullPath(Path.Combine(Directory, CliSessionFile.LockFileName));
         var gate = SessionGates.GetOrAdd(lockPath, _ => new SemaphoreSlim(1, 1));

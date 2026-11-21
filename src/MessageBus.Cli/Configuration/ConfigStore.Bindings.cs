@@ -125,9 +125,19 @@ public sealed partial class ConfigStore
         });
     }
 
+    // Only the published zero-argument session callback installs this routing scope. It does not grant
+    // ownership: every routed operation MUST call a guarded transaction method, never a *Locked helper.
+    // AsyncLocal children inherit the same context and therefore the same busy/active checks.
+    private readonly AsyncLocal<ProfileSecurityTransaction?> _compatibilitySession = new();
+
     private T InSecurityTransaction<T>(Func<ProfileSecurityTransaction, T> body)
     {
-        return WithProfileSecurityLockAsync(context => Task.FromResult(body(context)), CancellationToken.None).GetAwaiter().GetResult();
+        if (_compatibilitySession.Value is { } context)
+        {
+            context.DemandStore(this);
+            return body(context);
+        }
+        return WithProfileSecurityLockAsync(transaction => Task.FromResult(body(transaction)), CancellationToken.None).GetAwaiter().GetResult();
     }
 
     private sealed record BindingState(CliConfig Config, CliSessionFile? Session, ServerBindingLedger Ledger, ServerBindingFloor Floor);

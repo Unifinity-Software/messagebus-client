@@ -132,10 +132,16 @@ session credentials, then returns an immutable `ServerBindingSnapshot` for new c
 is storage evidence, not permission to send; callers still need current discovery for each actual send. Existing
 session-lock callbacks receive that explicit context and use its `Load`, `Save`, `LoadSession`, `SaveSession`
 and `DeleteSession` operations, including through awaited helpers. Concurrent operations through the same
-context are rejected before reading or writing state. Ordinary store methods always acquire the profile lock;
-inherited async execution state never grants ownership. Pass the context to nested helpers rather than calling
-ordinary store methods or acquiring a second transaction while holding the lock. Context use after release
-refuses, and the HTTP send gate rejects a context belonging to another store.
+context are rejected before reading or writing state. Ordinary store methods acquire the profile lock. The
+published `WithSessionLockAsync<T>(Func<Task<T>>, CancellationToken)` signature remains as an obsolete
+compatibility overload: within its callback, ordinary `Load`, `Save`, `LoadSession`, `SaveSession` and
+`DeleteSession` on that exact store route to the held context's guarded operations, including after awaits.
+Inherited children share its operation guard; overlapping or completed-context operations refuse before
+state access. This routing never grants unguarded ownership. Outside that compatibility scope, ordinary
+operations always acquire the lock. New callbacks pass the explicit context to nested helpers, including
+send preparation and consumption. Acquiring another transaction inside a compatibility callback refuses
+with migration guidance. Context use after release refuses, and the HTTP send gate rejects a context
+belonging to another store.
 
 The ledger root is `{schemaVersion:1,bindings:{"<normalized transport origin>":<snapshot>}}`. Each snapshot has
 exactly `version:1`, `selectedEndpoint`, `stampId`, `authorityVersion:1`, `issuer`, `audience`,
