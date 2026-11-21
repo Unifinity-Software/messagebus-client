@@ -52,7 +52,8 @@ public sealed partial class ConfigStore
 
         // Keep the explicit transaction reserved across the actual send. A sibling operation must not
         // strengthen the floor between its reread and transmission, even on this same transaction.
-        internal async Task<T> WithSendAsync<T>(ConfigStore store, Func<ServerBindingFloor, Task<T>> send)
+        internal async Task<T> WithSendAsync<T>(ConfigStore store, Func<ServerBindingFloor, Task<T>> send,
+            bool requireEnrollmentTrust = false)
         {
             if (!Monitor.TryEnter(_operation))
                 throw new InvalidOperationException("Concurrent profile transaction operations are not supported.");
@@ -67,7 +68,14 @@ public sealed partial class ConfigStore
                 completion = _asyncOperation = new(TaskCreationOptions.RunContinuationsAsynchronously);
             }
             finally { Monitor.Exit(_operation); }
-            try { return await send(_store.ReadBindingState().Floor).ConfigureAwait(false); }
+            try
+            {
+                var state = _store.ReadBindingState();
+                // This check belongs inside the reserved operation, after discovery/content awaits.
+                // Calling Execute/DemandEnrollmentTrust here would recursively enter the busy transaction.
+                if (requireEnrollmentTrust) _store.ValidateEnrollmentTrust(state.Config);
+                return await send(state.Floor).ConfigureAwait(false);
+            }
             finally
             {
                 lock (_operation) { _busy = false; _asyncOperation = null; }

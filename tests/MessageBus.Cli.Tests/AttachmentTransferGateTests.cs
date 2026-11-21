@@ -184,7 +184,7 @@ public sealed class AttachmentTransferGateTests
     {
         using var api = new HttpClient { BaseAddress = new Uri(Origin + "/gateway/") };
         var contacted = false;
-        using var links = new HttpClient(new AsyncHandler((_, _) =>
+        using var links = AttachmentTransfers.CreateTestHttpClient(new AsyncHandler((_, _) =>
         {
             contacted = true;
             throw new HttpRequestException("secret query sig=fixture must not appear");
@@ -227,7 +227,7 @@ public sealed class AttachmentTransferGateTests
         using var f = new Fixture(false);
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        using var links = new HttpClient(new AsyncHandler(async (_, ct) =>
+        using var links = AttachmentTransfers.CreateTestHttpClient(new AsyncHandler(async (_, ct) =>
         {
             entered.SetResult();
             await release.Task.WaitAsync(ct);
@@ -243,16 +243,18 @@ public sealed class AttachmentTransferGateTests
         Assert.NotEmpty((await competing).Bindings);
     }
 
-    public static TheoryData<int, bool, bool, bool> RedirectCases => new(
+    public static TheoryData<int, bool, bool, bool, string> RedirectCases => new(
         from status in new[] { 301, 302, 303, 307, 308 }
         from upload in new[] { false, true }
         from sameOrigin in new[] { false, true }
         from environment in new[] { false, true }
-        select (status, upload, sameOrigin, environment));
+        from transport in new[] { "safe", "default", "cookies", "credentials", "delegating-auth" }
+        where transport == "safe" || status is 307 or 308
+        select (status, upload, sameOrigin, environment, transport));
 
     [Theory]
     [MemberData(nameof(RedirectCases))]
-    public async Task Real_transfer_client_never_replays_signed_query_or_upload_body(int status, bool upload, bool sameOrigin, bool environment)
+    public async Task Real_transfer_client_never_replays_signed_query_or_upload_body(int status, bool upload, bool sameOrigin, bool environment, string transport)
     {
         using var source = new TcpListener(IPAddress.Loopback, 0);
         using var target = new TcpListener(IPAddress.Loopback, 0);
@@ -283,14 +285,28 @@ public sealed class AttachmentTransferGateTests
             ? new EnvironmentRunnerHostContext(name => machine.Env.GetValueOrDefault(name), machine.Home, Handler).CreateServiceClient()
             : ServerConnection.CreateAuthenticatedClient(Host(machine.CreateHost(), Handler), new CliSettings
             { Stored = store.Load(), Server = new Uri(origin), ApiKey = "fixture-key", MachineName = "fixture" }, store, "cli");
-        using var links = AttachmentTransfers.CreateHttpClient();
+        using var cookieHandler = new HttpClientHandler();
+        cookieHandler.CookieContainer.Add(new Uri(origin), new Cookie("fixture-cookie", "private"));
+        var credentials = new NetworkCredential("fixture", "private");
+        using var credentialHandler = new HttpClientHandler { Credentials = credentials, PreAuthenticate = true };
+        using var links = transport switch
+        {
+            "safe" => AttachmentTransfers.CreateHttpClient(),
+            "default" => new HttpClient(),
+            "cookies" => new HttpClient(cookieHandler),
+            "credentials" => new HttpClient(credentialHandler),
+            _ => new HttpClient(new InjectingAuthHandler(new HttpClientHandler())),
+        };
+        using var servingCancellation = CancellationTokenSource.CreateLinkedTokenSource(Ct);
+        var sourceContacted = false;
         links.Timeout = TimeSpan.FromSeconds(5);
         using var pair = KeyPair.GenerateP256();
         using var ring = new KeyRing();
         var attachments = new AttachmentClient(api, links, "ws_test");
         var serving = Task.Run(async () =>
         {
-            using var socket = await source.AcceptTcpClientAsync(Ct);
+            using var socket = await source.AcceptTcpClientAsync(servingCancellation.Token);
+            sourceContacted = true;
             using var stream = socket.GetStream();
             // Read through headers without consuming buffered upload bytes.
             var bytes = new List<byte>();
@@ -315,11 +331,58 @@ public sealed class AttachmentTransferGateTests
             ? (Task)attachments.UploadAsync(new MemoryStream("fixture"u8.ToArray()), new(new AgentTarget { AgentId = "agt_fixture" }, "fixture", AttachmentFormat.File), Recipient(pair), Ct)
             : attachments.DownloadAsync(Reference([]), new DownloadLink { Id = "att_fixture", Url = origin + "/blob?sig=fixture", ExpiresAt = DateTimeOffset.MaxValue }, new MemoryStream(), ring, Ct);
         var error = await Assert.ThrowsAsync<AttachmentTransferException>(() => operation);
-        Assert.Equal((HttpStatusCode)status, error.Status);
-        await serving;
+        if (transport == "safe")
+        {
+            Assert.Equal((HttpStatusCode)status, error.Status);
+            await serving;
+        }
+        else
+        {
+            servingCancellation.Cancel();
+            try { await serving; } catch (OperationCanceledException) { }
+            Assert.False(sourceContacted);
+            Assert.Empty(links.DefaultRequestHeaders);
+            if (transport == "cookies")
+            {
+                Assert.True(cookieHandler.AllowAutoRedirect);
+                Assert.True(cookieHandler.UseCookies);
+                Assert.Equal("private", cookieHandler.CookieContainer.GetCookies(new Uri(origin))["fixture-cookie"]!.Value);
+            }
+            if (transport == "credentials")
+            {
+                Assert.Same(credentials, credentialHandler.Credentials);
+                Assert.True(credentialHandler.PreAuthenticate);
+                Assert.True(credentialHandler.AllowAutoRedirect);
+            }
+        }
         Assert.False(source.Pending());
         Assert.False(target.Pending());
-        Assert.Equal(upload ? 2 : 1, discoveries);
+        Assert.Equal(transport == "safe" ? upload ? 2 : 1 : upload ? 1 : 0, discoveries);
+    }
+
+    [Fact]
+    public async Task Public_binding_callback_cannot_bless_an_unknown_authentication_pipeline()
+    {
+        using var api = new HttpClient { BaseAddress = new Uri(Origin + "/gateway/") };
+        var policyInvoked = false;
+        AttachmentTransfers.Bind(api, (_, send, ct) => { policyInvoked = true; return send(ct); });
+        using var links = new HttpClient(new InjectingAuthHandler(new AsyncHandler((_, _) =>
+            throw new InvalidOperationException("An unknown transport must never be contacted."))));
+        using var output = new MemoryStream();
+        using var ring = new KeyRing();
+        await Assert.ThrowsAsync<AttachmentTransferException>(() => new AttachmentClient(api, links, "ws_test")
+            .DownloadAsync(Reference([]), new DownloadLink { Id = "att_fixture", Url = "api/blob?sig=fixture",
+                ExpiresAt = DateTimeOffset.MaxValue }, output, ring, Ct));
+        Assert.False(policyInvoked);
+    }
+
+    private sealed class InjectingAuthHandler(HttpMessageHandler inner) : DelegatingHandler(inner)
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", "fixture-private");
+            return base.SendAsync(request, ct);
+        }
     }
 
     private static AttachmentRef Reference(byte[] bytes) => new()
@@ -356,7 +419,7 @@ public sealed class AttachmentTransferGateTests
             Store = new ConfigStore(Machine.MbusFolder, "file");
             Store.Save(new CliConfig { Server = Origin + "/gateway", WorkspaceId = "ws_test" });
             Ring.Add(Recipient.KeyId, KeyPair.FromPem(_pair.ExportPem()));
-            Links = new HttpClient(new AsyncHandler(async (request, ct) =>
+            Links = AttachmentTransfers.CreateTestHttpClient(new AsyncHandler(async (request, ct) =>
             {
                 var recorded = await Record(request, ct); Transfers.Add(recorded);
                 if (request.Method == HttpMethod.Put) _ciphertext = recorded.Body;

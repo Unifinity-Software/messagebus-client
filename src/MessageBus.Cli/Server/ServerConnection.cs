@@ -133,7 +133,12 @@ public static class ServerConnection
         // No enrollment content or credential is attached until current anonymous validation succeeds.
         request.Content = Json(await body());
         using var client = CreateAnonymousClient(host, server);
-        using var response = await prepared.ConsumeAsync(destination, async _ =>
+        using var response = transaction is null
+            ? await store.WithProfileSecurityLockAsync(tx => prepared.ConsumeEnrollmentAsync(destination, Send, ct, tx), ct)
+            : await prepared.ConsumeEnrollmentAsync(destination, Send, ct, transaction);
+        return (await ReadEnrollAsync(response, ct), prepared.Binding);
+
+        async Task<HttpResponseMessage> Send(ServerSendAuthorization _)
         {
             request.Headers.Authorization = credential;
             try
@@ -147,8 +152,7 @@ public static class ServerConnection
                 return result;
             }
             finally { request.Headers.Authorization = null; }
-        }, ct, transaction);
-        return (await ReadEnrollAsync(response, ct), prepared.Binding);
+        }
     }
 
     /// <summary>An enrollment request with no credential yet (the caller adds the person's sign-in).</summary>
@@ -169,7 +173,7 @@ public static class ServerConnection
         var bytes = await request.Content.ReadAsByteArrayAsync(ct);
         using var client = CreateAnonymousClient(host, server);
         var signer = new MachineRequestSigner(key, machineId, host.Time);
-        using var response = await prepared.ConsumeAsync(destination, async authorization =>
+        using var response = await prepared.ConsumeEnrollmentAsync(destination, async authorization =>
         {
             request.Headers.TryAddWithoutValidation(MbusHeaders.Workspace, workspaceId);
             foreach (var (name, value) in signer.CreateHeaders(authorization, request, bytes))
@@ -192,6 +196,38 @@ public static class ServerConnection
             }
         }, ct, transaction);
         await EnsureSuccessAsync(response, "prove the enrolled machine key", ct);
+    }
+
+    // API-key login has no saved machine/workspace credentials. Keep its actual inventory send in
+    // the explicit enrollment transaction, validating current trust after this send's discovery.
+    internal static async Task<ServerBindingSnapshot?> PutApiKeyEnrollmentInventoryAsync(CliHost host, ConfigStore store,
+        Uri server, string apiKey, MachineInventory inventory, ConfigStore.ProfileSecurityTransaction transaction, CancellationToken ct)
+    {
+        using var gate = new ServerSendGate(host, store, server);
+        var destination = new Uri(CliSettings.BaseAddress(server), Relative(ApiRoutes.MachineInventory));
+        var prepared = await gate.PrepareSendAsync(destination, ct, transaction);
+        using var request = new HttpRequestMessage(HttpMethod.Put, destination) { Content = Json(inventory) };
+        await request.Content.LoadIntoBufferAsync(ct);
+        request.Headers.TryAddWithoutValidation(MbusHeaders.ClientVersion, CliHost.Version);
+        request.Headers.TryAddWithoutValidation(MbusHeaders.ClientComponent, "cli");
+        using var client = CreateAnonymousClient(host, server);
+        using var response = await prepared.ConsumeEnrollmentAsync(destination, async _ =>
+        {
+            request.Headers.Authorization = new AuthenticationHeaderValue(AuthSchemes.ApiKey, apiKey);
+            try
+            {
+                var result = await SendAsync(client, request, server, ct);
+                if ((int)result.StatusCode is >= 300 and <= 399)
+                {
+                    result.Dispose();
+                    throw new ServerBindingException("Inventory redirects are refused; the API key was not replayed.");
+                }
+                return result;
+            }
+            finally { request.Headers.Authorization = null; }
+        }, ct, transaction);
+        await EnsureSuccessAsync(response, "report this machine's inventory", ct);
+        return prepared.Binding;
     }
 
     /// <summary>The enrolled machine from an enrollment answer; throws <see cref="CliException"/> when it was refused.</summary>

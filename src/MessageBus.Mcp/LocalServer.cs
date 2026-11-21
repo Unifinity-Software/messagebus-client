@@ -14,7 +14,7 @@ public sealed record LocalServerOptions
     /// <summary>The service, authenticated as this machine; base address the server URL with a trailing slash.</summary>
     public required HttpClient Http { get; init; }
 
-    /// <summary>Plain client for attachment links (no credentials, long timeout). Made by the server when not given.</summary>
+    /// <summary>Attachment link transport from <see cref="MessageBus.Attachments.Client.AttachmentTransfers.CreateHttpClient"/>. Made by the server when not given.</summary>
     public HttpClient? Links { get; init; }
 
     /// <summary>The workspace this machine is enrolled in.</summary>

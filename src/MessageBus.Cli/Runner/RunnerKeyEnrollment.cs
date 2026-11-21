@@ -172,7 +172,7 @@ internal static class RunnerKeyEnrollment
         if (prepared.Binding != binding) throw new ServerBindingException("The server authority changed before the caller probe.");
         using var client = ServerConnection.CreateAnonymousClient(context.Host, server);
         using var request = new HttpRequestMessage(HttpMethod.Get, destination);
-        using var response = await prepared.ConsumeAsync(destination, async _ =>
+        using var response = await prepared.ConsumeEnrollmentAsync(destination, async _ =>
         {
             request.Headers.Authorization = new AuthenticationHeaderValue(AuthSchemes.ApiKey, apiKey);
             try

@@ -336,6 +336,10 @@ published config generation after restart. `IGenerationMachineKeyVault` is an ad
 custom vaults without separate staging support still refuse replacement. File-to-Keychain movement also
 publishes a generation selector after readback. A matching leftover PEM is checked against the saved
 fingerprint before enrollment key reads consult any OS vault; recovery neither migrates nor writes it.
+Enrollment validates the complete current or legacy trust structure without writes, rejecting missing/null nested
+maps and records, malformed key/signer values, duplicate fields and ambiguous casing. The actual caller-key probe
+and API-key inventory send revalidate current trust after their own discovery/content awaits, inside the explicit
+reserved profile transaction immediately before attaching credentials. No ambient trust authorization is reused.
 Legacy workspace-only trust is validated before enrollment and imported at its saved source origin during
 identity publication, with rollback on a failed publication. No silent plaintext fallback or permission repair occurs.
 
@@ -356,15 +360,18 @@ The built-in CLI and environment-runner API factories register it before returni
 factories must register their own binding-aware callback if they require isolated enforcement; absence of a
 callback retains legacy link behavior and makes no isolated/residency claim. The callback validates the actual
 resolved destination, performs fresh anonymous discovery at the selected API, rereads the durable floor, and
-awaits the actual transfer send inside `ConsumeAsync`'s profile reservation. A supplied cached delivery link
+awaits the actual transfer send inside `ConsumeAsync`'s profile reservation. For downloads this covers the
+single credential-bearing request through response headers; body streaming and hash verification then continue
+without retaining the profile reservation. A supplied cached delivery link
 does not bypass discovery. No extra catalogue request or mandatory link field is introduced.
 
 Transfers use separate long-timeout clients with redirects, cookies and ambient/default credentials disabled.
-`AttachmentTransfers.CreateHttpClient()` provides this transport; callers supplying their own link client must
-provide the same transport guarantees and must not install authentication handlers. Reusing the API client or
-supplying default request headers refuses before transmission rather than clearing a caller's shared state.
+`AttachmentTransfers.CreateHttpClient()` provides and privately registers this transport. Supplied link clients
+must come from that factory: unknown clients (including default/native/delegating handler pipelines) refuse before
+contact in both isolated and legacy mode. A custom API binding callback cannot authorize an unknown transfer client.
+Reusing the API client or supplying default request headers refuses before transmission rather than clearing a caller's shared state.
 All 3xx responses are terminal, including same-origin and explicitly configured alias redirects. Transfer
-errors do not expose response bodies, signed queries or underlying transport diagnostics. Relative links resolve
+status and initial-send errors do not expose response bodies, signed queries or underlying transport diagnostics. Relative links resolve
 against the selected API base; absolute issued links retain their authority and query. Unsafe schemes, userinfo,
 fragments, backslashes and HTTPS downgrades refuse. Isolated transfers require the exact selected transport origin
 and base-path scope; discovery aliases, canonical rewrites and Blob suffixes grant no exception. Never-pinned

@@ -140,6 +140,19 @@ public sealed class PreparedServerSend
     /// </summary>
     public Task<T> ConsumeAsync<T>(Uri destination, Func<ServerSendAuthorization, Task<T>> send, CancellationToken ct,
         ConfigStore.ProfileSecurityTransaction? transaction = null)
+        => ConsumeCoreAsync(destination, send, ct, transaction, requireEnrollmentTrust: false);
+
+    // Enrollment callers must explicitly retain the transaction through final validation and transmission.
+    // The flag travels with this one send, never as ambient state or a reusable trust authorization.
+    internal Task<T> ConsumeEnrollmentAsync<T>(Uri destination, Func<ServerSendAuthorization, Task<T>> send,
+        CancellationToken ct, ConfigStore.ProfileSecurityTransaction transaction)
+    {
+        ArgumentNullException.ThrowIfNull(transaction);
+        return ConsumeCoreAsync(destination, send, ct, transaction, requireEnrollmentTrust: true);
+    }
+
+    private Task<T> ConsumeCoreAsync<T>(Uri destination, Func<ServerSendAuthorization, Task<T>> send, CancellationToken ct,
+        ConfigStore.ProfileSecurityTransaction? transaction, bool requireEnrollmentTrust)
     {
         ArgumentNullException.ThrowIfNull(send);
         if (_preparationTransaction is not null && !ReferenceEquals(transaction, _preparationTransaction))
@@ -159,7 +172,7 @@ public sealed class PreparedServerSend
                 throw new ServerBindingException("The prepared send no longer matches the durable floor.");
             using var authorization = new ServerSendAuthorization(Endpoint, Binding, _isCurrent);
             return await send(authorization).ConfigureAwait(false);
-        });
+        }, requireEnrollmentTrust);
     }
 }
 

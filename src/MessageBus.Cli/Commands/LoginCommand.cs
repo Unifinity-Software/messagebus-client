@@ -243,22 +243,16 @@ internal static class LoginCommand
     {
         var supplied = new CliConfig { Server = CommandContext.ServerText(server), MachineName = machineName, Location = location };
         var inventory = await AgentScanner.BuildInventoryAsync(context.Host, null, location, ct);
-        var settings = context.Settings with { Stored = supplied };
-        using (var client = ServerConnection.CreateAuthenticatedClient(context.Host, settings, context.Store, "cli"))
-        {
-            await ServerConnection.PutInventoryAsync(client, server, inventory, ct);
-        }
         await context.Store.WithProfileSecurityLockAsync(async transaction =>
         {
             transaction.DemandEnrollmentTrust();
-            using var gate = new ServerSendGate(context.Host, context.Store, server);
-            var destination = new Uri(CliSettings.BaseAddress(server), "api/machines/inventory");
-            var prepared = await gate.PrepareSendAsync(destination, ct, transaction);
-            await prepared.ConsumeAsync(destination, _ => Task.FromResult(true), ct, transaction);
+            var binding = await ServerConnection.PutApiKeyEnrollmentInventoryAsync(context.Host, context.Store, server,
+                context.Settings.ApiKey!, inventory, transaction, ct);
+            transaction.DemandEnrollmentTrust();
             var current = transaction.Load();
             if (current with { ServerBinding = context.Settings.Stored.ServerBinding } != context.Settings.Stored)
                 throw new ServerBindingException("The profile changed during API-key login; its identity was preserved.");
-            transaction.Save(supplied with { KeyStore = current.KeyStore, ServerBinding = prepared.Binding });
+            transaction.Save(supplied with { KeyStore = current.KeyStore, ServerBinding = binding });
             return true;
         }, ct);
         context.Console.MarkupLineInterpolated($"[green]Using the API key from {EnvVars.ApiKey}.[/] Saved the server for this machine ({machineName}).");

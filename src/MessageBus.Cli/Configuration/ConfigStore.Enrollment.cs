@@ -19,13 +19,18 @@ public sealed partial class ConfigStore
         try
         {
             using var document = JsonDocument.Parse(json);
-            ValidateObject(document.RootElement);
-            var trust = JsonSerializer.Deserialize(json, CliJsonContext.Default.TrustFile);
-            if (trust?.Servers is null) throw new JsonException("Missing trusted server records.");
-            if (trust.Servers.Any(s => s.Value is null || s.Value.Any(w => w.Value is null))
-                || trust.Workspaces?.Any(w => w.Value is null) == true)
-                throw new JsonException("Missing trusted workspace records.");
-            if (trust.Workspaces is { Count: > 0 } && config.Server is null)
+            var root = document.RootElement;
+            TrustObject(root, ["servers", "workspaces"], requireAll: false);
+            var servers = root.TryGetProperty("servers", out var serverMap);
+            var legacy = root.TryGetProperty("workspaces", out var workspaces);
+            if (!servers && !legacy) throw new JsonException("Missing trusted server or legacy workspace records.");
+            if (servers)
+            {
+                TrustObject(serverMap);
+                foreach (var server in serverMap.EnumerateObject()) ValidateTrustWorkspaces(server.Value);
+            }
+            if (legacy) ValidateTrustWorkspaces(workspaces);
+            if (legacy && workspaces.EnumerateObject().Any() && config.Server is null)
                 throw new JsonException("Legacy trust has no saved source server.");
             // Interpret legacy workspace-only pins only at the saved origin, never the selected target.
             if (config.Server is { } previous) _ = MessageBus.Mcp.KeyTrust.NormalizeServer(previous);
@@ -34,6 +39,58 @@ public sealed partial class ConfigStore
         {
             throw new ServerBindingException($"{path} is damaged ({ex.Message}). Repair the trust record before signing in.", ex);
         }
+    }
+
+    private static void TrustObject(JsonElement value, string[]? fields = null, bool requireAll = true)
+    {
+        if (value.ValueKind != JsonValueKind.Object) throw new JsonException("Trust records must be non-null objects.");
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var property in value.EnumerateObject())
+            if (string.IsNullOrWhiteSpace(property.Name) || !seen.Add(property.Name)
+                || fields is not null && !fields.Contains(property.Name, StringComparer.Ordinal))
+                throw new JsonException("Duplicate, unknown or ambiguously cased trust field.");
+        if (fields is not null && requireAll && seen.Count != fields.Length)
+            throw new JsonException("Incomplete trust record.");
+    }
+
+    private static void ValidateTrustWorkspaces(JsonElement workspaces)
+    {
+        TrustObject(workspaces);
+        foreach (var workspace in workspaces.EnumerateObject())
+        {
+            TrustObject(workspace.Value, ["keys", "signers"]);
+            var keys = workspace.Value.GetProperty("keys");
+            TrustObject(keys);
+            foreach (var owner in keys.EnumerateObject())
+            {
+                if (owner.Value.ValueKind != JsonValueKind.Array) throw new JsonException("Trusted keys must be a non-null array.");
+                var versions = new HashSet<int>();
+                foreach (var key in owner.Value.EnumerateArray())
+                {
+                    TrustObject(key, ["version", "keyId", "fingerprint"]);
+                    var version = key.GetProperty("version");
+                    if (version.ValueKind != JsonValueKind.Number || !version.TryGetInt32(out var number)
+                        || number < 1 || !versions.Add(number)) throw new JsonException("Invalid or duplicate trusted key version.");
+                    TrustText(key, "keyId");
+                    TrustText(key, "fingerprint");
+                }
+            }
+            var signers = workspace.Value.GetProperty("signers");
+            TrustObject(signers);
+            foreach (var signer in signers.EnumerateObject())
+            {
+                TrustObject(signer.Value, ["keyId", "fingerprint"]);
+                TrustText(signer.Value, "keyId");
+                TrustText(signer.Value, "fingerprint");
+            }
+        }
+    }
+
+    private static void TrustText(JsonElement record, string field)
+    {
+        var value = record.GetProperty(field);
+        if (value.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(value.GetString()))
+            throw new JsonException("Trusted key identifiers and fingerprints must be non-empty strings.");
     }
 
     // A key generation is a local opaque filename component, never a caller supplied path.

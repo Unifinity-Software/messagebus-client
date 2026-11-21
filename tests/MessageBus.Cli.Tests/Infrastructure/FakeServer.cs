@@ -23,7 +23,7 @@ public sealed class FakeServer : HttpMessageHandler
 {
     private HttpClient? _links;
     // A distinct client prevents fixture defaults or authentication handlers being reused for signed links.
-    public HttpClient Links => _links ??= new HttpClient(this, disposeHandler: false);
+    public HttpClient Links => _links ??= MessageBus.Attachments.Client.AttachmentTransfers.CreateTestHttpClient(this, disposeHandler: false);
 
     protected override void Dispose(bool disposing)
     {

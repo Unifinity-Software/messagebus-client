@@ -54,7 +54,7 @@ public sealed class AttachmentTransferException(string message, HttpStatusCode? 
 /// authorization registered on this client is inherited by every actual upload and download.
 /// </param>
 /// <param name="links">
-/// Fetches and uploads link URLs. Use <see cref="AttachmentTransfers.CreateHttpClient"/> or a separate
+/// Fetches and uploads link URLs. Use <see cref="AttachmentTransfers.CreateHttpClient"/> for a separate
 /// credential-free, cookie-free, no-redirect client without default headers or body-buffering handlers.
 /// A legacy link may be a SAS URL straight to Blob storage; an isolated binding restricts its destination.
 /// </param>

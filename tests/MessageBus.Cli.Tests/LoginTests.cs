@@ -97,7 +97,38 @@ public sealed class LoginTests
     [InlineData(true, false)]
     [InlineData(false, true)]
     [InlineData(true, true)]
-    public async Task Damaged_trust_stops_login_before_enrolling_the_computer(bool runner, bool duringDiscovery)
+    public Task Damaged_trust_stops_login_before_enrolling_the_computer(bool runner, bool duringDiscovery) =>
+        CheckDamagedTrustAsync(runner, duringDiscovery, "not JSON", legacy: false);
+
+    public static TheoryData<bool, bool, string> DamagedTrustRecords => new(
+        from runner in new[] { false, true }
+        from legacy in new[] { false, true }
+        from json in new[]
+        {
+            "{}",
+            """{"servers":null}""",
+            """{"servers":{"https://old.example":null}}""",
+            """{"workspaces":{"w101":null}}""",
+            """{"workspaces":{"w101":{"keys":null,"signers":{}}}}""",
+            """{"workspaces":{"w101":{"keys":{},"signers":null}}}""",
+            """{"workspaces":{"w101":{"keys":{"-":null},"signers":{}}}}""",
+            """{"workspaces":{"w101":{"keys":{"-":[null]},"signers":{}}}}""",
+            """{"workspaces":{"w101":{"keys":{"-":[{"version":1,"keyId":null,"fingerprint":"pin"}]},"signers":{}}}}""",
+            """{"workspaces":{"w101":{"keys":{},"signers":{"mch_admin":null}}}}""",
+            """{"workspaces":{"w101":{"keys":{},"signers":{"mch_admin":{"keyId":"ek_pin","fingerprint":null}}}}}""",
+            """{"workspaces":{"w101":{"keys":{},"Keys":{},"signers":{}}}}""",
+            """{"workspaces":{"w101":{"keys":{},"signers":{"mch_admin":{"keyId":"first","keyId":"second","fingerprint":"pin"}}}}}""",
+            """{"servers":{},"Servers":{}}""",
+            """{"workspaces":{"w101":{"keys":{},"signers":{}},"W101":{"keys":{},"signers":{}}}}""",
+        }
+        select (runner, legacy, json));
+
+    [Theory]
+    [MemberData(nameof(DamagedTrustRecords))]
+    public Task Structurally_damaged_trust_refuses_real_login_without_writes(bool runner, bool legacy, string json) =>
+        CheckDamagedTrustAsync(runner, false, json, legacy);
+
+    private static async Task CheckDamagedTrustAsync(bool runner, bool duringDiscovery, string json, bool legacy)
     {
         using var machine = new TestMachine();
         machine.Env[ConfigStore.KeyStoreVariable] = "file";
@@ -109,10 +140,10 @@ public sealed class LoginTests
         store.SaveKeyPem(key.ExportPrivateKeyPem());
         var configBytes = File.ReadAllBytes(store.ConfigPath);
         var keyBytes = File.ReadAllBytes(store.KeyPath);
-        var path = Path.Combine(machine.MbusFolder, KeyTrust.FileName);
+        var path = Path.Combine(machine.MbusFolder, legacy ? "trusted-keys.json" : KeyTrust.FileName);
         if (duringDiscovery) KeyTrust.Save(machine.MbusFolder, "w101", new TrustedWorkspace(), "https://old.example");
-        else File.WriteAllText(path, "not JSON");
-        var trustBytes = Encoding.UTF8.GetBytes("not JSON");
+        else File.WriteAllText(path, json);
+        var trustBytes = Encoding.UTF8.GetBytes(json);
         var discoveries = 0;
         machine.Server
             .On(HttpMethod.Get, "/api/server", _ =>
@@ -136,6 +167,79 @@ public sealed class LoginTests
         Assert.Equal(trustBytes, File.ReadAllBytes(path));
         Assert.DoesNotContain(Directory.EnumerateFiles(store.Directory), file => Path.GetFileName(file).StartsWith("machine-key.", StringComparison.Ordinal)
             && file.EndsWith(".pem", StringComparison.Ordinal) && file != store.KeyPath);
+    }
+
+    [Theory]
+    [InlineData("caller")]
+    [InlineData("inventory")]
+    public async Task Trust_damage_during_the_actual_credential_send_discovery_refuses_that_send(string boundary)
+    {
+        using var machine = new TestMachine();
+        machine.Env[ConfigStore.KeyStoreVariable] = "file";
+        machine.Env["MBUS_API_KEY"] = "fixture-key";
+        var store = new ConfigStore(machine.MbusFolder, "file");
+        using var key = MessageBus.Cli.Security.MachineKey.Create();
+        store.Save(new CliConfig { Server = "https://old.example", MachineId = "mch_previous", WorkspaceId = "w101",
+            KeyFingerprint = key.Fingerprint });
+        store.SaveKeyPem(key.ExportPrivateKeyPem());
+        KeyTrust.Save(machine.MbusFolder, "w101", new TrustedWorkspace(), "https://old.example");
+        var configBytes = File.ReadAllBytes(store.ConfigPath);
+        var keyBytes = File.ReadAllBytes(store.KeyPath);
+        var trustPath = Path.Combine(machine.MbusFolder, KeyTrust.FileName);
+        var damaged = Encoding.UTF8.GetBytes("""{"servers":{"https://old.example":{"w101":{"keys":null,"signers":{}}}}}""");
+        var discoveries = 0;
+        var callerObserved = false;
+        var damagePublished = false;
+        machine.Server.On(HttpMethod.Get, "/api/server", _ =>
+        {
+            discoveries++;
+            // Observation 1 is Login's descriptive request; 2 is runner preparation. The next
+            // observation belongs to the actual caller send. Inventory is identified by the
+            // already-observed caller request, so this cannot accidentally damage the initial gate.
+            if (boundary == "caller" && discoveries == 3 || boundary == "inventory" && callerObserved)
+            {
+                File.WriteAllBytes(trustPath, damaged);
+                damagePublished = true;
+            }
+            return FakeServer.Json(FakeServer.ConfiguredServerInfo);
+        });
+        machine.Server.On(HttpMethod.Get, ApiRoutes.Caller, request =>
+        {
+            callerObserved = true;
+            Assert.False(damagePublished);
+            Assert.Equal("MbusKey fixture-key", request.Header("Authorization"));
+            return Text("""{"kind":"api-key","scopes":["send"],"permissions":[]}""");
+        });
+        machine.Server.On(HttpMethod.Put, ApiRoutes.MachineInventory, _ => new(HttpStatusCode.NoContent));
+        var run = await machine.RunAsync("login", "--server", FakeServer.Url);
+        Assert.True(damagePublished, "The fixture must reach the discovery for the named actual send.");
+        Assert.NotEqual(0, run.ExitCode);
+        Assert.Contains(trustPath, run.Error);
+        Assert.Equal(boundary == "inventory", callerObserved);
+        Assert.DoesNotContain(machine.Server.Requests, r => r.Uri.AbsolutePath == ApiRoutes.MachineInventory);
+        Assert.DoesNotContain(machine.Server.Requests, r => r.Uri.AbsolutePath == ApiRoutes.MachineEnroll);
+        if (boundary == "caller") Assert.All(machine.Server.Requests, r => Assert.Null(r.Header("Authorization")));
+        Assert.Equal(configBytes, File.ReadAllBytes(store.ConfigPath));
+        Assert.Equal(keyBytes, File.ReadAllBytes(store.KeyPath));
+        Assert.Equal(damaged, File.ReadAllBytes(trustPath));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Current_and_legacy_trust_validate_without_importing_or_rewriting(bool legacy)
+    {
+        using var machine = new TestMachine();
+        var store = new ConfigStore(machine.MbusFolder, "file");
+        store.Save(new CliConfig { Server = "https://old.example" });
+        const string workspace = """{"w101":{"keys":{"-":[{"version":1,"keyId":"ek_pin","fingerprint":"saved pin"}]},"signers":{"mch_admin":{"keyId":"ek_admin","fingerprint":"admin pin"}}}}""";
+        var json = legacy ? "{\"workspaces\":" + workspace + "}" : "{\"servers\":{\"https://old.example\":" + workspace + "}}";
+        var path = Path.Combine(machine.MbusFolder, legacy ? "trusted-keys.json" : KeyTrust.FileName);
+        File.WriteAllText(path, json);
+        await store.WithProfileSecurityLockAsync(tx => { tx.DemandEnrollmentTrust(); return Task.FromResult(true); },
+            TestContext.Current.CancellationToken);
+        Assert.Equal(Encoding.UTF8.GetBytes(json), File.ReadAllBytes(path));
+        if (legacy) Assert.False(File.Exists(Path.Combine(machine.MbusFolder, KeyTrust.FileName)));
     }
 
     [Theory]

@@ -14,6 +14,7 @@ public static class AttachmentTransfers
 {
     private sealed record Policy(AttachmentTransferSend Send);
     private static readonly ConditionalWeakTable<HttpClient, Policy> Policies = new();
+    private static readonly ConditionalWeakTable<HttpClient, object> TransferClients = new();
 
     /// <summary>
     /// Binds all attachment clients using this API client to a caller-owned current-binding send gate.
@@ -28,11 +29,26 @@ public static class AttachmentTransfers
     }
 
     /// <summary>Creates a separate long-timeout transport with no redirects, cookies or ambient credentials.</summary>
-    public static HttpClient CreateHttpClient() => new(new SocketsHttpHandler
+    public static HttpClient CreateHttpClient() => Register(new HttpClient(new SocketsHttpHandler
     {
         AllowAutoRedirect = false, UseCookies = false, Credentials = null,
         PreAuthenticate = false, DefaultProxyCredentials = null,
-    }) { Timeout = TimeSpan.FromHours(1) };
+    }) { Timeout = TimeSpan.FromHours(1) });
+
+    private static HttpClient Register(HttpClient client)
+    {
+        TransferClients.Add(client, new object());
+        return client;
+    }
+
+    // Only the friend test assembly can substitute an in-memory terminal recorder. No public
+    // handler/registration overload can turn an unknown authentication pipeline into a safe transport.
+    internal static HttpClient CreateTestHttpClient(HttpMessageHandler handler, bool disposeHandler = true)
+    {
+        if (handler is DelegatingHandler or HttpClientHandler or SocketsHttpHandler)
+            throw new ArgumentException("Test transfers require an in-memory terminal handler.", nameof(handler));
+        return Register(new HttpClient(handler, disposeHandler));
+    }
 
     internal static Uri Resolve(Uri? server, string url)
     {
@@ -49,8 +65,8 @@ public static class AttachmentTransfers
     {
         // Defaults are merged by HttpClient at send time. Refuse rather than mutating a caller's shared client.
         // In particular, using the authenticated API client here would attach credentials in its handlers.
-        if (ReferenceEquals(api, links) || links.DefaultRequestHeaders.Any())
-            throw new AttachmentTransferException("Attachment transfers require a separate client without default headers.");
+        if (ReferenceEquals(api, links) || !TransferClients.TryGetValue(links, out _) || links.DefaultRequestHeaders.Any())
+            throw new AttachmentTransferException("Attachment transfers require a separate factory-created client without default headers.");
         var response = Policies.TryGetValue(api, out var policy)
             ? await policy.Send(request.RequestUri!, Send, ct).ConfigureAwait(false)
             : await Send(ct).ConfigureAwait(false);

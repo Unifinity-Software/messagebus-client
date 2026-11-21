@@ -14,6 +14,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="MessageBus.Cli.Tests" />
     <ProjectReference Include="..\MessageBus.Contracts\MessageBus.Contracts.csproj" />
     <ProjectReference Include="..\MessageBus.Crypto\MessageBus.Crypto.csproj" />
   </ItemGroup>
