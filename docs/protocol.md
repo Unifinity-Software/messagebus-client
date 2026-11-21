@@ -396,6 +396,8 @@ legacy/custom/tunnel endpoints report hosting as unknown even when descriptive m
 The observation does not authorize the subsequent machine/policy/agent reads: each still prepares and consumes
 its own fresh gated send. A binding refusal reports restoration/re-enrollment advice and makes doctor not ready;
 there is no credential connectivity probe or alternate-host retry. Discovery can persist a restrictive pin.
+Ordinary machine/policy/agent lookup HTTP or JSON failures after successful binding validation remain diagnostic
+warnings; they do not alone make doctor not ready. Workspace suspension remains blocking.
 
 Remaining required work is explicit: full native verification of enrollment/checkpoint lifecycle, attachment
 factory/real transport fixtures and the doctor/public-feed paths. Compiled fixture source is not runtime evidence.

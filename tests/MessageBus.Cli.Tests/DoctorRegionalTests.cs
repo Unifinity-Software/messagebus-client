@@ -75,6 +75,7 @@ public sealed class DoctorRegionalTests
         });
         var view = await DoctorServerView.AskAsync(Context(machine), TestContext.Current.CancellationToken);
         Assert.NotNull(view.Problem);
+        Assert.True(view.BindingRefused);
         Assert.NotNull(view.PreparedBinding);
         Assert.True(discovery > 1); // Refusal occurred at the subsequent actual read, after the diagnostic observation.
         Assert.DoesNotContain(machine.Server.Requests, r => r.Header("Authorization") is not null);
@@ -130,16 +131,76 @@ public sealed class DoctorRegionalTests
         Assert.DoesNotContain(machine.Server.Requests, r => r.Header("Authorization") is not null);
     }
 
-    [Fact]
-    public async Task Actual_doctor_command_returns_not_ready_on_server_binding_refusal()
+    [Theory]
+    [InlineData(false, "missing")]
+    [InlineData(false, "http")]
+    [InlineData(false, "json")]
+    [InlineData(true, "missing")]
+    [InlineData(true, "http")]
+    [InlineData(true, "json")]
+    public async Task Server_lookup_failure_after_binding_validation_only_warns(bool isolated, string problem)
     {
         using var machine = Machine(Origin);
         machine.InstallFake("git", new("git version 2.50.1"));
         machine.InstallFake("codex", new("codex-cli 0.169.0"), new Dictionary<string, FakeAnswer>
         { ["login"] = new("Logged in using ChatGPT", ToStderr: true) });
-        machine.Server.On(HttpMethod.Get, "/gateway/api/server", _ => new(HttpStatusCode.ServiceUnavailable));
+        machine.Server.On(HttpMethod.Get, "/gateway/api/server", _ => Json(isolated ? Isolated : Legacy));
+        machine.Server.On(HttpMethod.Get, "/gateway/api/w/ws_fixture/machines/mch_fixture", _ => problem switch
+        {
+            "missing" => new(HttpStatusCode.NotFound),
+            "http" => throw new HttpRequestException("Machine lookup unavailable."),
+            _ => Json("bad json"),
+        });
+
+        var view = await DoctorServerView.AskAsync(Context(machine), TestContext.Current.CancellationToken);
+        Assert.NotNull(view.Problem);
+        Assert.False(view.BindingRefused);
+        Assert.Equal(isolated, view.PreparedBinding is not null);
+        var result = await machine.RunAsync("doctor");
+        Assert.Equal(0, result.ExitCode);
+        Assert.Contains("couldn't ask:", result.Output);
+        Assert.DoesNotContain("Server binding validation refused", result.Output);
+        Assert.Contains(machine.Server.Requests, r => r.Header("Authorization") is not null);
+    }
+
+    [Theory]
+    [InlineData("never-pinned-http")]
+    [InlineData("http")]
+    [InlineData("json")]
+    [InlineData("stripped")]
+    [InlineData("changed")]
+    [InlineData("missing-ledger")]
+    public async Task Actual_doctor_command_returns_not_ready_on_server_binding_refusal(string failure)
+    {
+        using var machine = Machine(Origin);
+        machine.InstallFake("git", new("git version 2.50.1"));
+        machine.InstallFake("codex", new("codex-cli 0.169.0"), new Dictionary<string, FakeAnswer>
+        { ["login"] = new("Logged in using ChatGPT", ToStderr: true) });
+        if (failure != "never-pinned-http")
+        {
+            var store = new ConfigStore(machine.MbusFolder, "file");
+            await store.WithProfileSecurityLockAsync(tx =>
+            {
+                tx.PrepareBinding(ServerEndpoint.Parse(Origin + "/gateway"), ServerDiscoveryParser.Parse(Isolated));
+                return Task.FromResult(true);
+            }, TestContext.Current.CancellationToken);
+        }
+        machine.Server.On(HttpMethod.Get, "/gateway/api/server", _ =>
+        {
+            // Remove it after command context loading, at the actual current-send validation boundary.
+            if (failure == "missing-ledger") File.Delete(Path.Combine(machine.MbusFolder, "server-bindings.json"));
+            return failure switch
+            {
+                "json" => Json("bad json"),
+                "stripped" => Json(Legacy),
+                "changed" => Json(Isolated.Replace("eu.stamps", "other.stamps", StringComparison.Ordinal)),
+                "missing-ledger" => Json(Isolated),
+                _ => new(HttpStatusCode.ServiceUnavailable),
+            };
+        });
         var result = await machine.RunAsync("doctor");
         Assert.Equal(1, result.ExitCode);
+        Assert.Contains("Server binding validation refused", result.Output);
         Assert.DoesNotContain(machine.Server.Requests, r => r.Header("Authorization") is not null);
     }
 

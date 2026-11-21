@@ -35,6 +35,9 @@ internal sealed record DoctorServerView(MachineInfo? Machine, RunnerReleasePolic
     internal ServerBindingSnapshot? PreparedBinding { get; init; }
     internal ServerBinding? PersistedBinding { get; init; }
 
+    /// <summary>A security refusal blocks readiness; an optional server-view lookup failure only warns.</summary>
+    internal bool BindingRefused { get; init; }
+
     /// <summary>Asks the server, when this machine is signed in to one.</summary>
     public static async Task<DoctorServerView> AskAsync(CommandContext context, CancellationToken ct)
     {
@@ -81,7 +84,7 @@ internal sealed record DoctorServerView(MachineInfo? Machine, RunnerReleasePolic
         catch (ServerBindingException)
         {
             return new(null, null, "Server binding validation refused. Restore the saved binding or enroll explicitly at the selected endpoint; credentials were not retried.")
-            { Discovery = observation?.Discovery, PreparedBinding = observation?.Binding, PersistedBinding = persistedBinding };
+            { Discovery = observation?.Discovery, PreparedBinding = observation?.Binding, PersistedBinding = persistedBinding, BindingRefused = true };
         }
         catch (Exception ex) when (ex is HttpRequestException or JsonException || (ex is OperationCanceledException && !ct.IsCancellationRequested))
         {
@@ -140,7 +143,7 @@ internal sealed record DoctorServerView(MachineInfo? Machine, RunnerReleasePolic
     {
         if (Problem is { } problem)
         {
-            yield return new("Server's view", problem, SummaryTone.Bad, Suspended ? "suspended:" : "couldn't ask:");
+            yield return new("Server's view", problem, BindingRefused || Suspended ? SummaryTone.Bad : SummaryTone.Note, Suspended ? "suspended:" : "couldn't ask:");
             yield break;
         }
         if (Machine is not { } machine)

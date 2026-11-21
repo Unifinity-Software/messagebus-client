@@ -109,7 +109,7 @@ internal static class DoctorCommand
     {
         var console = context.Console;
         var env = context.Host.GetEnvironmentVariable;
-        var ready = view.Problem is null;
+        var ready = true;
         // the original issue: advice names this mbus by its full path when the mbus on PATH is another one.
         var mbus = Hosting.MbusOnPath.For(context.Host);
         void Good(string what, string detail) => console.MarkupLineInterpolated($"[green]ready[/]      {what}: {mbus.Advice(detail)}");
@@ -140,7 +140,7 @@ internal static class DoctorCommand
             console.MarkupLineInterpolated($"{capacity}");
 
         // This machine and messagebus.ai.
-        if (view.Problem is { } serverProblem)
+        if ((view.BindingRefused || view.Suspended) && view.Problem is { } serverProblem)
         {
             Bad("mbus server", serverProblem);
         }
