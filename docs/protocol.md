@@ -122,7 +122,10 @@ limits, alertRules, access, runEnvironment and instructions. No delete, BuiltIn,
 timestamps, attribution or signature fields are accepted. The definition rejects unknown top-level properties;
 the server validates all nested properties, enum values and storage limits. Name is fixed at submission.
 Omitted create run settings use the server's expanded safe baseline; the client leaves them absent rather
-than substituting permissive runner defaults. Update omissions inherit the captured base. The server owns
+than substituting permissive runner defaults. `RoleProposalRunEnvironment`, `RoleProposalPermissionProfile`
+and `RoleProposalModels` use nullable fields at every level: `{ "runEnvironment": { "timeoutSeconds": 7200 } }`
+forwards only that timeout, with no permission profile, checkout, tools or model defaults. Explicit `false`
+and empty lists remain explicit requests. Update omissions inherit the captured base. The server owns
 normalization, warnings, canonical hashes and review revisions; generic `MessageBusJson` serialization is
 not the canonical digest encoding. Body limit is 256 KiB UTF-8, canonical definition 128 KiB, instructions
 1–30,000 UTF-16 units, rationale 2,000 characters. Existing stricter field/collection/storage bounds apply.
@@ -152,15 +155,22 @@ agent, agent kind and resumable session identity. Legacy records have Unknown or
 requires the runner's existing owner/session checks, exact identity/inbox matching and the original log;
 mutable RunDeliveryId, request arguments and coordination claims do not establish origin. Explicit recovery
 can retain the same expired record; it cannot silently bind another session/inbox. Own GET/wait remains
-available after inbox expiry and results never reroute to another inbox. These are runner/local-host
+available after inbox expiry and results never reroute to another inbox. Before sending a proposal, the
+local host durably marks its original record for retention independently of expiry and host lifetime;
+opening unrelated inboxes cannot prune that provenance. These are runner/local-host
 guarantees. The coordinator fields are not a cryptographic credential: a holder of the underlying machine
 credential can use raw HTTP for that machine's proposals. This adds no stronger raw-HTTP session boundary.
 
 CLI equivalents are `mbus roles propose --input proposal.json --agent codex --json`,
 `mbus roles get-proposal <id> --inbox <original-inbox> --json` and
 `mbus roles wait-proposal <id> --inbox <original-inbox> --timeout 30 --json`. Submission input has the
-MCP input shape; `--input -` reads stdin. A successful interactive CLI response additionally includes local
-`coordinatorInboxId` for subsequent commands. `--inbox` can reuse an original saved interactive record;
+MCP input shape; `--input -` reads stdin. Interactive CLI responses, including ambiguous submission errors
+after opening an inbox, additionally include local `coordinatorInboxId` for subsequent commands. Before
+POST, the CLI durably binds the retry key to the original record, scoped to server, workspace, machine and
+requested agent selector. Repeating the original command reuses that record even if the response was lost;
+changed content under the same key remains subject to the server's idempotency conflict checks. Concurrent
+local submissions with the same binding are serialized by an exclusive file lease; a busy lease fails with
+a retryable error. `--inbox` can reuse an original saved interactive record;
 inside a run the pipe supplies its exact binding and rejects agent/inbox overrides. No command applies a role.
 Customer help-center documentation should cover this review flow before release.
 

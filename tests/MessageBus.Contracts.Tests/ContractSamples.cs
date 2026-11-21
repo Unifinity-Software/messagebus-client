@@ -360,6 +360,9 @@ internal static class ContractSamples
         Instructions,
         Role,
         ProposalDefinition,
+        ProposalDefinition.RunEnvironment!,
+        ProposalDefinition.RunEnvironment!.PermissionProfile!,
+        ProposalDefinition.RunEnvironment!.Models!,
         new RoleProposalsCapability { Version = 1, BaselineVersion = "role-proposal-readonly-v1", NormalizerVersion = "role-definition-v1" },
         new SubmitRoleProposalRequest { Operation = RoleProposalOperation.Create, Definition = ProposalDefinition, Rationale = "Need a reviewer", IdempotencyKey = "retry-example", AgentId = Agt, CoordinatorRecordId = "coord_example", InboxId = "inb_example" },
         new RoleProposalSubmitted { ProposalId = "rpr_example", Status = RoleProposalStatus.Pending, ExpiresAt = T, ReviewUrl = "https://example.com/review" },
@@ -520,7 +523,18 @@ internal static class ContractSamples
 
 
     private static RoleDefinitionV1 ProposalDefinition => new() { Name = Role.Name, DisplayName = Role.DisplayName, Description = Role.Description,
-        Delivery = DeliverySettings, RequiredCapabilities = ["tool:dotnet"], Limits = Limits, AlertRules = [Alert], Access = Role.Access, RunEnvironment = RunEnv, Instructions = "Review changes." };
+        Delivery = DeliverySettings, RequiredCapabilities = ["tool:dotnet"], Limits = Limits, AlertRules = [Alert], Access = Role.Access,
+        RunEnvironment = new RoleProposalRunEnvironment
+        {
+            CodexOnWindows = RunEnv.CodexOnWindows, KeepAgentTools = RunEnv.KeepAgentTools, Checkout = RunEnv.Checkout,
+            SetupCommand = RunEnv.SetupCommand, TimeoutSeconds = RunEnv.TimeoutSeconds, Logs = RunEnv.Logs,
+            PermissionProfile = new RoleProposalPermissionProfile
+            {
+                Name = Profile.Name, AllowedTools = Profile.AllowedTools, Network = Profile.Network, AllowedHosts = Profile.AllowedHosts,
+                CanEditFiles = Profile.CanEditFiles, CanRunCommands = Profile.CanRunCommands, CanPush = Profile.CanPush, CanRunTests = Profile.CanRunTests,
+            },
+            Models = new RoleProposalModels { Defaults = RunEnv.Models.Defaults, Allowed = RunEnv.Models.Allowed },
+        }, Instructions = "Review changes." };
     private static RoleProposalBaseRole ProposalBase => new() { Generation = "gen_original", Etag = "etag_original" };
     private static RoleProposalReceipt ProposalReceipt => new() { ProposalId = "rpr_example", Role = "developer", Generation = "gen_original", Version = 4,
         FinalDigest = Sha, ContentSha256 = Sha, ApprovedBy = Subject, AppliedAt = T };

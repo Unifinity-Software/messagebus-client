@@ -150,6 +150,16 @@ internal sealed partial class LocalTools
         var json = MessageBusJson.Serialize(request);
         if (Encoding.UTF8.GetByteCount(json) > 256 * 1024)
             throw ProposalError(McpErrorCodes.TooLarge, "Role proposal requests are limited to 256 KiB.", "definition");
+        // Persist before POST: the server may accept even when the response never reaches this host.
+        session = (_sessions.Find(session.InboxId) ?? session) with
+        {
+            RoleProposalProvenance = true,
+            RoleProposalRetryKeys = _o.RoleProposalRetryKey is { } retryKey
+                ? [.. session.RoleProposalRetryKeys.Append(retryKey).Distinct(StringComparer.Ordinal)]
+                : session.RoleProposalRetryKeys,
+        };
+        _sessions.Save(session);
+        _session = session;
         using var message = new HttpRequestMessage(HttpMethod.Post, ProposalPath)
         {
             Content = new StringContent(json, Encoding.UTF8, "application/json"),

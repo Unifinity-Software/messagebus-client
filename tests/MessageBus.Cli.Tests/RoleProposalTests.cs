@@ -19,6 +19,124 @@ public sealed class RoleProposalTests
     private const string ProposalPath = "/api/w/ws_test/role-proposals";
 
     [Theory]
+    [InlineData("create", "{\"timeoutSeconds\":7200}")]
+    [InlineData("update", "{\"timeoutSeconds\":7200}")]
+    [InlineData("create", "{\"permissionProfile\":{\"canPush\":false,\"allowedHosts\":[]},\"models\":{\"allowed\":[\"example-model\"]}}")]
+    [InlineData("update", "{\"permissionProfile\":{\"canPush\":false,\"allowedHosts\":[]},\"models\":{\"allowed\":[\"example-model\"]}}")]
+    public async Task Partial_run_settings_reach_the_server_without_materializing_baseline_or_inherited_fields(string operation, string run)
+    {
+        using var machine = new TestMachine();
+        Capability(machine, 1);
+        var record = Record(machine);
+        new SessionRecords(machine.MbusFolder).Save(record);
+        machine.Server.On(HttpMethod.Post, ProposalPath, request =>
+        {
+            using var body = JsonDocument.Parse(request.BodyText);
+            using var expected = JsonDocument.Parse(run);
+            var outgoing = body.RootElement.GetProperty("definition").GetProperty("runEnvironment");
+            Assert.True(JsonElement.DeepEquals(expected.RootElement, outgoing), request.BodyText);
+            // These are the values visible to server normalization: it can still select the safe
+            // create baseline or inherit the captured update settings for each absent nested field.
+            var settings = MessageBusJson.Deserialize<SubmitRoleProposalRequest>(request.BodyText)!.Definition.RunEnvironment!;
+            Assert.Null(settings.Checkout);
+            Assert.Null(settings.KeepAgentTools);
+            Assert.Null(settings.PermissionProfile?.CanEditFiles);
+            Assert.Null(settings.PermissionProfile?.CanRunCommands);
+            Assert.Null(settings.PermissionProfile?.AllowedTools);
+            Assert.Null(settings.Models?.Defaults);
+            return FakeServer.Json(Submitted(machine));
+        });
+        using var http = Client(machine);
+        await using var tools = new LocalTools(Options(machine, http) with { Session = record });
+        var args = JsonNode.Parse(MessageBusJson.Serialize(Input()))!.AsObject();
+        args["operation"] = operation;
+        args["definition"]!["runEnvironment"] = JsonNode.Parse(run);
+        using var document = JsonDocument.Parse(args.ToJsonString());
+        var result = await tools.CallAsync("codex", McpToolNames.ProposeRole,
+            document.RootElement.EnumerateObject().ToDictionary(p => p.Name, p => p.Value.Clone()), Ct);
+        Assert.NotEqual(true, result.IsError);
+        Assert.Single(machine.Server.Requests, r => r.Method == HttpMethod.Post && r.Uri.AbsolutePath == ProposalPath);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task CLI_retry_after_accepted_but_lost_response_reuses_original_record_and_reports_inbox_on_error(bool responseTimeout)
+    {
+        Assert.SkipWhen(InsideRun.Now, InsideRun.MachineKeyReason);
+        using var machine = new TestMachine();
+        Enroll(machine);
+        Capability(machine, 1);
+        var inboxCount = OpenInboxes(machine);
+        string? accepted = null;
+        var posts = 0;
+        machine.Server.On(HttpMethod.Post, ProposalPath, request =>
+        {
+            var sent = MessageBusJson.Deserialize<SubmitRoleProposalRequest>(request.BodyText)!;
+            var saved = new SessionRecords(machine.MbusFolder).Find(sent.InboxId)!;
+            Assert.True(saved.RoleProposalProvenance);
+            Assert.Single(saved.RoleProposalRetryKeys);
+            if (++posts == 1)
+            {
+                accepted = request.BodyText; // Server committed before losing the response.
+                if (responseTimeout) throw new TaskCanceledException("Response timed out after acceptance");
+                throw new HttpRequestException("Response lost after acceptance");
+            }
+            Assert.Equal(accepted, request.BodyText);
+            return FakeServer.Json(Submitted(machine));
+        });
+        var file = machine.WriteHomeFile("proposal.json", MessageBusJson.Serialize(Input()));
+        var command = new[] { "roles", "propose", "--input", file, "--agent", "codex", "--json" };
+        var first = await machine.RunAsync(command);
+        Assert.NotEqual(0, first.ExitCode);
+        var failure = JsonNode.Parse(first.Output)!;
+        Assert.Equal(McpErrorCodes.Unavailable, (string?)failure["error"]!["code"]);
+        Assert.Equal("inb_1", (string?)failure["coordinatorInboxId"]);
+        var second = await machine.RunAsync(command);
+        Assert.Equal(0, second.ExitCode);
+        Assert.Equal("rpr_test", (string?)JsonNode.Parse(second.Output)!["proposalId"]);
+        Assert.Equal("inb_1", (string?)JsonNode.Parse(second.Output)!["coordinatorInboxId"]);
+        Assert.Equal(1, inboxCount());
+        Assert.Equal(2, posts);
+    }
+
+    [Fact]
+    public async Task Submitted_provenance_survives_host_exit_expiry_and_unrelated_inbox_pruning_for_CLI_reads_and_waits()
+    {
+        Assert.SkipWhen(InsideRun.Now, InsideRun.MachineKeyReason);
+        using var machine = new TestMachine();
+        Enroll(machine);
+        Capability(machine, 1);
+        OpenInboxes(machine);
+        machine.Server.On(HttpMethod.Post, ProposalPath, _ => FakeServer.Json(Submitted(machine)));
+        var file = machine.WriteHomeFile("proposal.json", MessageBusJson.Serialize(Input()));
+        Assert.Equal(0, (await machine.RunAsync("roles", "propose", "--input", file, "--json")).ExitCode);
+        var sessions = new SessionRecords(machine.MbusFolder);
+        var original = sessions.Find("inb_1")!;
+        // Simulate the original CLI host exiting; advance fake server/client time past expiry.
+        sessions.Save(original with { ProcessId = null, ProcessStartedAt = null, HostProcessId = null, HostProcessStartedAt = null });
+        var unretained = Record(machine) with { InboxId = "inb_unretained", ExpiresAt = original.ExpiresAt };
+        sessions.Save(unretained);
+        machine.Time.Advance(TimeSpan.FromDays(2));
+        using var http = Client(machine);
+        await using (var unrelated = new LocalTools(Options(machine, http)))
+            Assert.NotEqual(true, (await unrelated.CallAsync("codex", McpToolNames.OpenInbox, null, Ct)).IsError);
+        Assert.Null(sessions.Find(unretained.InboxId)); // Opening the unrelated inbox really pruned expired records.
+        var retained = sessions.Find(original.InboxId)!;
+        Assert.Equal(original.CoordinatorRecordId, retained.CoordinatorRecordId);
+        Assert.True(retained.RoleProposalProvenance);
+        var detail = Detail(original) with { Status = RoleProposalStatus.Applying };
+        machine.Server.On(HttpMethod.Get, ProposalPath + "/rpr_test", _ => FakeServer.Json(detail));
+        machine.Server.On(HttpMethod.Get, ProposalPath + "/rpr_test/wait", _ => FakeServer.Json(detail with { Status = RoleProposalStatus.Rejected }));
+        var read = await machine.RunAsync("roles", "get-proposal", "rpr_test", "--inbox", original.InboxId, "--json");
+        Assert.Equal(0, read.ExitCode);
+        Assert.Equal("applying", (string?)JsonNode.Parse(read.Output)!["status"]);
+        var wait = await machine.RunAsync("roles", "wait-proposal", "rpr_test", "--inbox", original.InboxId, "--timeout", "0", "--json");
+        Assert.Equal(0, wait.ExitCode);
+        Assert.Equal("rejected", (string?)JsonNode.Parse(wait.Output)!["status"]);
+    }
+
+    [Theory]
     [InlineData("{\"name\":\"reviewer\",\"displayName\":\"Reviewer\",\"instructions\":\"Review\",\"access\":{\"unknownGrant\":true}}")]
     [InlineData("{\"name\":\"reviewer\",\"name\":\"other\",\"displayName\":\"Reviewer\",\"instructions\":\"Review\"}")]
     [InlineData("{\"name\":\"reviewer\",\"displayName\":\"Reviewer\",\"instructions\":\"Review\",\"runEnvironment\":{\"permissionProfile\":{\"network\":\"unknown\"}}}")]
@@ -249,6 +367,28 @@ public sealed class RoleProposalTests
     }
 
     private static HttpClient Client(TestMachine machine) => new(machine.Server, disposeHandler: false) { BaseAddress = new Uri(FakeServer.Url + "/") };
+    private static RoleProposalSubmitted Submitted(TestMachine machine) => new()
+    {
+        ProposalId = "rpr_test", Status = RoleProposalStatus.Pending, ExpiresAt = machine.Time.GetUtcNow().AddDays(1), ReviewUrl = "https://example.com/review",
+    };
+    private static void Enroll(TestMachine machine)
+    {
+        var store = new ConfigStore(machine.MbusFolder, "file");
+        using var key = MachineKey.Create();
+        store.Save(new CliConfig { Server = FakeServer.Url, WorkspaceId = "ws_test", MachineId = "mch_test", KeyStore = "file" });
+        store.SaveKeyPem(key.ExportPrivateKeyPem());
+    }
+    private static Func<int> OpenInboxes(TestMachine machine)
+    {
+        var count = 0;
+        FakeMcp(machine, (name, _) => name == McpToolNames.OpenInbox ? new JsonObject
+        {
+            ["inboxId"] = "inb_" + ++count, ["agentId"] = "agt_test",
+            ["replyTo"] = new JsonObject { ["kind"] = "inbox", ["inboxId"] = "inb_" + count },
+            ["expiresAt"] = machine.Time.GetUtcNow().AddHours(24),
+        } : throw new InvalidOperationException(name));
+        return () => count;
+    }
     private static void FakeMcp(TestMachine machine, Func<string, JsonNode?, JsonNode> outcome) => machine.Server.On(HttpMethod.Post, "/mcp", request =>
     {
         var message = JsonNode.Parse(request.BodyText)!;

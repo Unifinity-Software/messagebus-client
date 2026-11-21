@@ -111,6 +111,9 @@ public sealed record LocalServerOptions
     /// sends keep their replies coming there and <c>open_inbox</c> returns it.
     /// </summary>
     public SessionRecord? Session { get; init; }
+
+    /// <summary>Trusted CLI retry binding hash to persist on the original record before proposal transport.</summary>
+    public string? RoleProposalRetryKey { get; init; }
 }
 
 /// <summary>

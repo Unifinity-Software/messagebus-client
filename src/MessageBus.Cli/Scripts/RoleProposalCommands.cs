@@ -1,4 +1,6 @@
 using System.CommandLine;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using MessageBus.Cli.Commands;
@@ -56,10 +58,11 @@ internal static class RoleProposalCommands
     private static async Task<int> RunAsync(CliHost host, ParseResult parse, CommonOptions options, string tool, bool json,
         string? inbox, string? agent, Func<Task<JsonObject>> arguments, CancellationToken ct)
     {
+        string? coordinatorInbox = null;
+        using var retryLease = new RetryLease();
         try
         {
             ScriptResult result;
-            string? coordinatorInbox = null;
             if (LocalServer.HasRunMarkers(host.GetEnvironmentVariable))
             {
                 // Resolve the runner pipe before settings, files, capabilities or machine authentication.
@@ -76,24 +79,43 @@ internal static class RoleProposalCommands
                 if (settings.Server is null || settings.ApiKey is not null || settings.Stored.MachineId is null
                     || !settings.CanAuthenticate(context.Store) || settings.Stored.WorkspaceId is not { } workspace)
                     return await FailAsync(host, json, new McpError { Code = McpErrorCodes.Forbidden, Message = "Role proposals require an enrolled machine connection." });
-                var record = inbox is null ? null : new SessionRecords(context.Store.Directory).Find(inbox);
+                var args = await arguments();
+                var sessions = new SessionRecords(context.Store.Directory);
+                string? retryKey = null;
+                if (tool == McpToolNames.ProposeRole && args.FirstOrDefault(p => p.Key.Equals("idempotencyKey", StringComparison.OrdinalIgnoreCase)).Value
+                    is JsonValue value && value.TryGetValue<string>(out var key) && !string.IsNullOrWhiteSpace(key))
+                {
+                    // Include the connection and requested agent selector; changed request content still reaches
+                    // the server under this same key so it can return an idempotency conflict.
+                    var identity = new JsonArray(settings.Server.ToString(), workspace, settings.Stored.MachineId, agent, key).ToJsonString();
+                    retryKey = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(identity)));
+                    retryLease.Acquire(context.Store.Directory, retryKey);
+                }
+                var bound = retryKey is null ? null : sessions.ForRoleProposalRetry(workspace, settings.Stored.MachineId, retryKey);
+                if (bound is not null && inbox is not null && bound.InboxId != inbox)
+                    return await FailAsync(host, json, new McpError { Code = McpErrorCodes.Conflict,
+                        Message = "This retry key is already bound to another original coordinator inbox." }, bound.InboxId);
+                var record = inbox is null ? bound : sessions.Find(inbox);
+                var retryRecord = inbox is null && record is not null;
                 if ((inbox is not null && (record is null || record.OriginAuthority != ProposalAuthority.Interactive
                     || record.WorkspaceId != workspace || record.MachineId != settings.Stored.MachineId))
+                    || (record is not null && (record.OriginAuthority != ProposalAuthority.Interactive || string.IsNullOrWhiteSpace(record.CoordinatorRecordId)))
                     || (tool != McpToolNames.ProposeRole && record is null))
                     return await FailAsync(host, json, new McpError { Code = McpErrorCodes.Forbidden, Message = "Give the original local coordinator inbox with --inbox." });
-                if (record is not null && agent is not null && agent != record.AgentId)
+                if (record is not null && !retryRecord && agent is not null && agent != record.AgentId)
                     return await FailAsync(host, json, new McpError { Code = McpErrorCodes.Forbidden, Message = "The agent must match the original coordinator record." });
                 using var http = ServerConnection.CreateAuthenticatedClient(host, settings, context.Store, "cli");
                 await using var session = new ScriptSession(LocalServer.Options(http, workspace, settings.Stored.MachineId, context.Store.Directory,
                     Stream.Null, Stream.Null, host.Error, CliHost.Version, host.GetEnvironmentVariable) with
                 {
                     Session = record, Agent = record?.AgentId ?? agent, MachineKeyPem = context.Store.LoadKeyPem,
+                    RoleProposalRetryKey = retryKey,
                     WorkingDirectory = host.CurrentDirectory, Time = host.Time,
                 });
-                result = await session.CallAsync(tool, await arguments(), ct);
-                coordinatorInbox = session.CoordinatorInboxId;
+                try { result = await session.CallAsync(tool, args, ct); }
+                finally { coordinatorInbox = session.CoordinatorInboxId; }
             }
-            if (result.Error is { } error) return await FailAsync(host, json, error);
+            if (result.Error is { } error) return await FailAsync(host, json, error, coordinatorInbox);
             var output = JsonNode.Parse(result.Value.GetRawText())!.AsObject();
             if (coordinatorInbox is not null) output["coordinatorInboxId"] = coordinatorInbox;
             if (json) await host.Out.WriteLineAsync(output.ToJsonString());
@@ -105,20 +127,43 @@ internal static class RoleProposalCommands
             }
             return 0;
         }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException or JsonException or InvalidOperationException or TimeoutException or HttpRequestException or ModelContextProtocol.McpException)
+        catch (Exception e) when ((e is IOException or UnauthorizedAccessException or JsonException or InvalidOperationException or TimeoutException or HttpRequestException or ModelContextProtocol.McpException)
+            || (e is TaskCanceledException && !ct.IsCancellationRequested))
         {
             return await FailAsync(host, json, new McpError
             {
                 Code = e is JsonException ? McpErrorCodes.InvalidInput : McpErrorCodes.Unavailable,
-                Message = e.GetBaseException().Message, Retryable = e is IOException or TimeoutException or HttpRequestException or ModelContextProtocol.McpException,
-            });
+                Message = e.GetBaseException().Message, Retryable = e is IOException or TimeoutException or HttpRequestException or ModelContextProtocol.McpException or TaskCanceledException,
+            }, coordinatorInbox);
         }
     }
 
-    private static async Task<int> FailAsync(CliHost host, bool json, McpError error)
+    private static async Task<int> FailAsync(CliHost host, bool json, McpError error, string? coordinatorInbox = null)
     {
         await host.Error.WriteLineAsync(error.Message);
-        if (json) await host.Out.WriteLineAsync("{\"error\":" + MessageBusJson.Serialize(error) + "}");
+        if (json)
+        {
+            var output = new JsonObject { ["error"] = JsonNode.Parse(MessageBusJson.Serialize(error)) };
+            if (coordinatorInbox is not null) output["coordinatorInboxId"] = coordinatorInbox;
+            await host.Out.WriteLineAsync(output.ToJsonString());
+        }
+        else if (coordinatorInbox is not null)
+            await host.Error.WriteLineAsync($"Coordinator inbox: {coordinatorInbox} (reuse the original command to retry, or --inbox for later reads).");
         return ScriptExitCodes.For(error.Code);
+    }
+
+    // Serialize invocations sharing a retry key so two first attempts cannot open competing records.
+    private sealed class RetryLease : IDisposable
+    {
+        private FileStream? _file;
+
+        public void Acquire(string configDirectory, string key)
+        {
+            var folder = Path.Combine(configDirectory, "proposal-retries");
+            Directory.CreateDirectory(folder);
+            _file = new FileStream(Path.Combine(folder, key + ".lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+        }
+
+        public void Dispose() => _file?.Dispose();
     }
 }

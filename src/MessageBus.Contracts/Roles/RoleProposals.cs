@@ -51,9 +51,63 @@ public sealed record RoleDefinitionV1
     /// <summary>Owners, senders and approval requirements.</summary>
     public RoleAccess Access { get; set; } = new();
     /// <summary>Run settings; omitted create settings use the server's safe proposal baseline.</summary>
-    public RunEnvironment? RunEnvironment { get; init; }
+    public RoleProposalRunEnvironment? RunEnvironment { get; init; }
     /// <summary>Instructions, 1–30,000 UTF-16 code units after server normalization.</summary>
     public required string Instructions { get; init; }
+}
+
+/// <summary>Requested run settings. Omitted fields are normalized by the server against the safe create baseline or captured update base.</summary>
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+public sealed record RoleProposalRunEnvironment
+{
+    /// <summary>Requested Codex Windows sandbox mode.</summary>
+    public CodexWindowsSandbox? CodexOnWindows { get; init; }
+    /// <summary>Agent tools to retain; an explicit empty list clears them.</summary>
+    public IReadOnlyList<string>? KeepAgentTools { get; init; }
+    /// <summary>Requested checkout mode.</summary>
+    public CheckoutMode? Checkout { get; init; }
+    /// <summary>Requested setup command.</summary>
+    public string? SetupCommand { get; init; }
+    /// <summary>Requested run deadline in seconds.</summary>
+    public int? TimeoutSeconds { get; init; }
+    /// <summary>Requested output capture.</summary>
+    public LogCapture? Logs { get; init; }
+    /// <summary>Requested permissions; each omitted field inherits independently.</summary>
+    public RoleProposalPermissionProfile? PermissionProfile { get; init; }
+    /// <summary>Requested model settings; each omitted field inherits independently.</summary>
+    public RoleProposalModels? Models { get; init; }
+}
+
+/// <summary>Requested permissions with no client-side grants or runner defaults.</summary>
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+public sealed record RoleProposalPermissionProfile
+{
+    /// <summary>Requested profile name.</summary>
+    public string? Name { get; init; }
+    /// <summary>Requested allowed tools; empty explicitly requests agent defaults.</summary>
+    public IReadOnlyList<string>? AllowedTools { get; init; }
+    /// <summary>Requested network access.</summary>
+    public NetworkAccess? Network { get; init; }
+    /// <summary>Requested network allowlist.</summary>
+    public IReadOnlyList<string>? AllowedHosts { get; init; }
+    /// <summary>Requested file editing permission.</summary>
+    public bool? CanEditFiles { get; init; }
+    /// <summary>Requested command execution permission.</summary>
+    public bool? CanRunCommands { get; init; }
+    /// <summary>Requested push permission.</summary>
+    public bool? CanPush { get; init; }
+    /// <summary>Requested test execution permission.</summary>
+    public bool? CanRunTests { get; init; }
+}
+
+/// <summary>Requested model settings without expanding omitted lists to unrestricted defaults.</summary>
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+public sealed record RoleProposalModels
+{
+    /// <summary>Requested default models by agent kind.</summary>
+    public IReadOnlyList<AgentModelDefault>? Defaults { get; init; }
+    /// <summary>Requested allowed models; empty explicitly allows any reported model.</summary>
+    public IReadOnlyList<string>? Allowed { get; init; }
 }
 
 /// <summary>A versioned server capability; absent or unknown versions are unsupported.</summary>
