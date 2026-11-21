@@ -66,6 +66,12 @@ public sealed class LinuxNodeImportProofTests
               catch (e) { if (!['ENOENT', 'EACCES'].includes(e.code)) throw e; }
             }
             if (fs.existsSync('/work/.git/config')) process.exit(82);
+            const effective = fs.readFileSync('/proc/self/status', 'utf8').match(/^CapEff:\s*([0-9a-f]+)$/m);
+            if (!effective || !/^0+$/.test(effective[1])) process.exit(83);
+            const socket = require('node:net').connect(443, '127.0.0.1');
+            socket.on('connect', () => process.exit(84));
+            socket.on('error', () => process.exit(0));
+            socket.setTimeout(1000, () => process.exit(85));
             """;
         File.WriteAllText(Path.Combine(agent.WorkTree, "check.js"), denied);
         await CommitAsync(agent.WorkTree, ct);
