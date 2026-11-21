@@ -17,6 +17,7 @@ public sealed partial class ConfigStore
     private Security.FileKeyVault _keyFile;
     private readonly Security.IMachineKeyVault? _osVault;
     private string? _keyGeneration;
+    private string? _selectedKeyStore;
     private readonly string? _initialKeyStore;
 
     // Runner reads check the actual keychain lock state before using the trusted tool.
@@ -74,10 +75,20 @@ public sealed partial class ConfigStore
         if (_environment is not null && Security.RunContext.IsInsideRun(_environment))
             throw new CliException(Security.RunContext.KeyRefused);
         if (choice is not ("file" or "keychain")) throw new CliException("Choose --key-store file or keychain.");
-        var target = KeyStoreName == choice ? KeyVault : choice == "file" ? _keyFile : PlatformVault() ?? throw new CliException("The Keychain is unavailable on this computer.");
         var config = Load();
-        if (config.MachineKeyGeneration is not null && choice == "keychain" && !OperatingSystem.IsWindows())
-            throw new Server.ServerBindingException("This staged identity cannot be moved to a nontransactional Keychain store. Keep its file store or enroll in a separate private profile.");
+        SelectKeyGeneration(config);
+        var target = KeyStoreName == choice ? KeyVault : choice == "file" ? _keyFile
+            : config.MachineKeyGeneration is { } generation ? GenerationVault(generation, false)
+            : PlatformVault() ?? throw new CliException("The Keychain is unavailable on this computer.");
+        // A legacy file moves to an independent native item as well. Its selector is published only
+        // after readback, so a refused/abandoned migration cannot replace the legacy Keychain item.
+        string? targetGeneration = null;
+        if (choice == "keychain" && KeyStoreName != choice && config.MachineKeyGeneration is null
+            && target is Security.IGenerationMachineKeyVault generations)
+        {
+            targetGeneration = Guid.NewGuid().ToString("N");
+            target = generations.ForGeneration(targetGeneration);
+        }
         if (config.KeyStore == choice && KeyStoreName == choice) return new KeyStoreChange(null, choice, target, null);
         if (config.MachineId is null && !HasKey) return new KeyStoreChange(this, choice, target, null);
         // the original issue: the file first when it holds this machine's key, so a locked Keychain (with an older copy, say) doesn't
@@ -136,7 +147,7 @@ public sealed partial class ConfigStore
         }
         // Moving from the Keychain to the file: its copy goes too, also when the file was the source (an older one, say).
         var oldCopies = new[] { source, KeyVault }.Distinct().Where(v => !ReferenceEquals(v, target)).ToArray();
-        return new KeyStoreChange(this, choice, target, oldCopies, newCopy);
+        return new KeyStoreChange(this, choice, target, oldCopies, newCopy, targetGeneration, config);
     }
 
     /// <summary>Reads the key to move it, saying what to do when the Keychain is locked.</summary>
@@ -162,22 +173,28 @@ public sealed partial class ConfigStore
         private readonly Security.IMachineKeyVault _target;
         private readonly Security.IMachineKeyVault[] _oldCopies;
         private readonly Security.IMachineKeyVault? _newCopy;
+        private readonly string? _targetGeneration;
+        private readonly CliConfig? _expected;
 
         internal KeyStoreChange(ConfigStore? store, string choice, Security.IMachineKeyVault target, Security.IMachineKeyVault[]? oldCopies,
-            Security.IMachineKeyVault? newCopy = null)
+            Security.IMachineKeyVault? newCopy = null, string? targetGeneration = null, CliConfig? expected = null)
         {
             _store = store;
             _choice = choice;
             _target = target;
             _oldCopies = oldCopies ?? [];
             _newCopy = newCopy;
+            _targetGeneration = targetGeneration;
+            _expected = expected;
         }
 
         /// <summary>Switches to the new store and deletes the old copy; returns a warning when that copy couldn't be deleted.</summary>
         public string? Commit()
         {
             if (_store is null) return null;
-            _store.Save(_store.Load() with { KeyStore = _choice });
+            if (_targetGeneration is null) _store.Save(_store.Load() with { KeyStore = _choice });
+            else _store.InSecurityTransaction(tx => tx.PublishKeyStoreGeneration(_expected!, _choice, _targetGeneration));
+            _store.SelectKeyGeneration(_store.Load());
             _store.KeyVault = _target;
             string? warning = null;
             foreach (var old in _oldCopies)
@@ -201,7 +218,7 @@ public sealed partial class ConfigStore
         {
             try
             {
-                _newCopy?.Delete();
+                if (_targetGeneration is null || _store?.Load().MachineKeyGeneration != _targetGeneration) _newCopy?.Delete();
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or CliException)
             {
@@ -407,6 +424,7 @@ public sealed partial class ConfigStore
     /// <summary>Saves the machine's private key in the OS store, or in the owner-only file when the store refuses it.</summary>
     public void SaveKeyPem(string pem)
     {
+        SelectKeyGeneration(Load());
         if (!ReferenceEquals(KeyVault, _keyFile))
         {
             try
@@ -427,6 +445,7 @@ public sealed partial class ConfigStore
     /// <summary>Deletes the machine's private key, wherever it is.</summary>
     public void DeleteKey()
     {
+        SelectKeyGeneration(Load());
         _keyFile.Delete();
         if (!ReferenceEquals(KeyVault, _keyFile))
         {

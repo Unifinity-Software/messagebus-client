@@ -58,21 +58,29 @@ internal static class RunnerKeyEnrollment
                 throw new ServerBindingException("The runner bootstrap belongs to another endpoint; its existing identity was preserved.");
 
             var pending = current.PendingRunnerEnrollment;
+            var replacement = current.PendingRunnerIdentity;
+            if (replacement is not null && (replacement.Binding.SelectedEndpoint != endpoint.Value
+                || replacement.Binding.ApiKeyFingerprint != fingerprint))
+                throw new ServerBindingException("The pending runner replacement belongs to another endpoint or bootstrap key.");
             if (pending is not null && (!sameEndpoint || pending != fingerprint))
                 throw new ServerBindingException("The runner checkpoint belongs to another bootstrap key; restore its original configuration.");
-            using var key = pending is null ? MachineKey.Create()
+            using var key = replacement is not null ? MachineKey.FromPem(transaction.LoadRunnerReplacementKey(replacement))
+                : pending is null ? MachineKey.Create()
                 : MachineKey.FromPem(transaction.LoadEnrollmentKeyPem()
                     ?? throw new ServerBindingException("The runner checkpoint has no persisted machine key."));
             var initial = await gate.PrepareSendAsync(destination, ct, transaction);
             transaction.DemandEnrollmentTrust();
+            if (replacement is not null && !replacement.Binding.Matches(endpoint, initial.Binding, fingerprint, key.Fingerprint))
+                throw new ServerBindingException("The pending runner replacement authority or key changed.");
             if (pending is not null) DemandProvenance(current, endpoint, initial.Binding, fingerprint, key.Fingerprint, pending: true);
             if (onlyRunnerKeys && !await IsRunnerKeyAsync(context, server, apiKey, initial.Binding, transaction, ct))
                 return new EnrollmentResult(false);
 
             // Only runner credentials need a new durable machine checkpoint. An ordinary API key
             // may update the selected account/server using its own credential and no saved identity.
-            if (current.MachineId is not null || current.WorkspaceId is not null || current.Server is not null && !sameEndpoint)
-                throw new ServerBindingException("New runner enrollment requires a separate private MBUS_HOME; the existing server identity was preserved.");
+            var replacing = replacement is not null || current.MachineId is not null || current.WorkspaceId is not null
+                || current.Server is not null && !sameEndpoint;
+            transaction.DemandStagedEnrollment();
 
             await log.WriteLineAsync($"Signing this runner in with the API key from {EnvVars.ApiKey}...");
             var inventory = await AgentScanner.BuildInventoryAsync(host, null, context.Settings.Location, ct);
@@ -83,7 +91,11 @@ internal static class RunnerKeyEnrollment
                 PendingRunnerEnrollment = fingerprint, KeyFingerprint = key.Fingerprint,
                 RunnerEnrollmentBinding = Provenance(endpoint, initial.Binding, fingerprint, key.Fingerprint),
             };
-            if (pending is null)
+            if (replacing)
+            {
+                replacement ??= transaction.StageRunnerReplacement(checkpoint.RunnerEnrollmentBinding!, key.ExportPrivateKeyPem(), ct);
+            }
+            else if (pending is null)
                 checkpoint = transaction.CommitEnrollment(current, checkpoint, key.ExportPrivateKeyPem(), ct);
             else
                 transaction.Save(checkpoint);
@@ -104,13 +116,18 @@ internal static class RunnerKeyEnrollment
             await ServerConnection.PutEnrollmentInventoryAsync(host, context.Store, server, key,
                 enrolled.Machine.MachineId, enrolled.Machine.WorkspaceId, inventory, binding, transaction, ct);
             current = transaction.Load();
-            transaction.Save(current with
+            var completed = current with
             {
+                Server = CommandContext.ServerText(server), KeyFingerprint = key.Fingerprint,
                 ServerBinding = binding, MachineId = enrolled.Machine.MachineId, WorkspaceId = enrolled.Machine.WorkspaceId,
                 WorkspaceName = enrolled.WorkspaceName, MachineName = enrolled.Machine.Name,
                 Location = enrolled.Machine.Location ?? context.Settings.Location, EnrolledAt = enrolled.Machine.EnrolledAt,
                 EnrolledWithApiKey = fingerprint, PendingRunnerEnrollment = null,
-            });
+                PendingRunnerIdentity = null,
+                RunnerEnrollmentBinding = Provenance(endpoint, binding, fingerprint, key.Fingerprint),
+            };
+            if (replacing) transaction.CommitEnrollment(current, completed, key.ExportPrivateKeyPem(), ct);
+            else transaction.Save(completed);
             return new EnrollmentResult(true, enrolled, inventory);
         }, ct);
 

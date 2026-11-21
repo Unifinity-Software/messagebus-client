@@ -54,6 +54,9 @@ public sealed record CliConfig
     /// <summary>Bootstrap checkpoint: the runner API-key fingerprint whose pre-saved machine key must be reused until enrollment completes.</summary>
     public string? PendingRunnerEnrollment { get; init; }
 
+    /// <summary>A replacement runner's durable key and provenance, separate from the active identity.</summary>
+    public PendingRunnerIdentity? PendingRunnerIdentity { get; init; }
+
     /// <summary>The settings file's name.</summary>
     public const string FileName = "config.json";
 
@@ -62,6 +65,17 @@ public sealed record CliConfig
 
     /// <summary>Windows: the same key, encrypted with DPAPI for this user (the original issue).</summary>
     public const string ProtectedMachineKeyFile = "machine-key.dpapi";
+}
+
+/// <summary>A staged runner replacement; contains no private key or bootstrap credential.</summary>
+public sealed record PendingRunnerIdentity
+{
+    /// <summary>The independent persisted machine key generation.</summary>
+    public required string KeyGeneration { get; init; }
+    /// <summary>The staged key backend.</summary>
+    public required string KeyStore { get; init; }
+    /// <summary>The exact endpoint, authority and key fingerprints.</summary>
+    public required RunnerEnrollmentBinding Binding { get; init; }
 }
 
 /// <summary>Durable runner enrollment provenance. No credential or private key is stored here.</summary>
@@ -89,6 +103,7 @@ public sealed record RunnerEnrollmentBinding
     DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull)]
 [JsonSerializable(typeof(CliConfig))]
 [JsonSerializable(typeof(RunnerEnrollmentBinding))]
+[JsonSerializable(typeof(PendingRunnerIdentity))]
 [JsonSerializable(typeof(MessageBus.Mcp.TrustFile))]
 [JsonSerializable(typeof(Server.ServerInfoResponse))]
 [JsonSerializable(typeof(CliSessionFile))]

@@ -24,6 +24,13 @@ public interface IMachineKeyVault
     void Delete();
 }
 
+/// <summary>An OS vault that can address independent immutable identity generations.</summary>
+public interface IGenerationMachineKeyVault : IMachineKeyVault
+{
+    /// <summary>Selects a separate item without reading, replacing or deleting the current item.</summary>
+    IMachineKeyVault ForGeneration(string generation);
+}
+
 /// <summary>A key in the login Keychain: what a runner and a change of key store ask it without letting macOS prompt.</summary>
 internal interface IKeychainVault : IMachineKeyVault
 {
@@ -109,7 +116,7 @@ internal sealed class DpapiKeyVault(string path, Action<string, byte[]> writeOwn
 /// <param name="configDirectory">The settings folder (names the item).</param>
 /// <param name="tool">Apple's <c>security</c> tool.</param>
 /// <param name="items">The Keychain without prompts (Security.framework on macOS), for a runner's reads.</param>
-internal sealed class KeychainKeyVault(string configDirectory, IKeychainTool tool, IKeychainItems? items = null) : IKeychainVault
+internal sealed class KeychainKeyVault(string configDirectory, IKeychainTool tool, IKeychainItems? items = null, string? generation = null) : IKeychainVault, IGenerationMachineKeyVault
 {
     public const string Service = "ai.messagebus.mbus.machine-key";
 
@@ -120,10 +127,18 @@ internal sealed class KeychainKeyVault(string configDirectory, IKeychainTool too
     /// </summary>
     public const string RefusedFile = "machine-key.refused";
 
-    private readonly string _refusedPath = System.IO.Path.Combine(configDirectory, RefusedFile);
+    private readonly string _refusedPath = System.IO.Path.Combine(configDirectory, generation is null ? RefusedFile : $"machine-key.{generation}.refused");
+
+    public IMachineKeyVault ForGeneration(string value)
+    {
+        if (value.Length != 32 || value.Any(c => c is not (>= '0' and <= '9' or >= 'a' and <= 'f')))
+            throw new ArgumentException("Invalid key generation.", nameof(value));
+        return new KeychainKeyVault(configDirectory, tool, items, value);
+    }
 
     /// <summary>The item's account: a hash of the settings folder (letters and digits only, nothing to quote).</summary>
-    public string Account { get; } = "mbus-" + Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(System.IO.Path.GetFullPath(configDirectory))))[..24];
+    public string Account { get; } = "mbus-" + Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(System.IO.Path.GetFullPath(configDirectory))))[..24]
+        + (generation is null ? "" : "-" + generation);
 
     public string Description => "in your login Keychain";
 

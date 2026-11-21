@@ -152,6 +152,18 @@ public sealed partial class ConfigStore
                 throw new ServerBindingException("An interrupted identity publication requires profile restoration; credentials refused.");
             var config = ReadConfig();
             ValidateKeyGeneration(config.MachineKeyGeneration);
+            if (config.PendingRunnerIdentity is { } pending)
+            {
+                ValidateKeyGeneration(pending.KeyGeneration);
+                if (pending.Binding is null) throw new ServerBindingException("Missing pending runner provenance.");
+                var endpoint = ServerEndpoint.Parse(pending.Binding.SelectedEndpoint);
+                if (pending.KeyGeneration is null || pending.KeyGeneration == config.MachineKeyGeneration
+                    || pending.KeyStore is not ("file" or "keychain") || pending.Binding.Version != 1
+                    || pending.Binding.SelectedEndpoint != endpoint.Value
+                    || string.IsNullOrEmpty(pending.Binding.ApiKeyFingerprint) || string.IsNullOrEmpty(pending.Binding.MachineKeyFingerprint))
+                    throw new ServerBindingException("Invalid pending runner identity.");
+                CheckSnapshotScope(pending.Binding.ServerBinding, pending.Binding.SelectedEndpoint);
+            }
             if (config.RunnerEnrollmentBinding is { } runner)
             {
                 var endpoint = ServerEndpoint.Parse(runner.SelectedEndpoint);
@@ -186,7 +198,8 @@ public sealed partial class ConfigStore
                 }
             }
             var evidence = ledger.Bindings.Select(e => ServerBindingExpectation.Create(e.Key, e.Value.Binding)).ToList();
-            foreach (var snapshot in new[] { config.ServerBinding, config.RunnerEnrollmentBinding?.ServerBinding, session?.ServerBinding }.OfType<ServerBindingSnapshot>())
+            foreach (var snapshot in new[] { config.ServerBinding, config.RunnerEnrollmentBinding?.ServerBinding,
+                config.PendingRunnerIdentity?.Binding.ServerBinding, session?.ServerBinding }.OfType<ServerBindingSnapshot>())
             {
                 if (!ledgerExists || !ledger.Bindings.TryGetValue(snapshot.Endpoint.Origin, out var pin) || pin.Binding != snapshot.Binding)
                     throw new ServerBindingException("Saved binding has no matching ledger; restore the profile before using credentials.");
@@ -258,6 +271,14 @@ public sealed partial class ConfigStore
         ValidateObject(document.RootElement);
         foreach (var property in document.RootElement.EnumerateObject())
         {
+            if (string.Equals(property.Name, "pendingRunnerIdentity", StringComparison.OrdinalIgnoreCase))
+            {
+                if (property.Name != "pendingRunnerIdentity") throw new ServerBindingException("Ambiguous pending runner identity.");
+                ValidateObject(property.Value, ["keyGeneration", "keyStore", "binding"]);
+                if (!property.Value.TryGetProperty("binding", out var pendingBinding))
+                    throw new ServerBindingException("Missing pending runner binding.");
+                ValidateSavedJson("{\"runnerEnrollmentBinding\":" + pendingBinding.GetRawText() + "}");
+            }
             if (string.Equals(property.Name, "serverBinding", StringComparison.OrdinalIgnoreCase))
             {
                 if (property.Name != "serverBinding") throw new ServerBindingException("Ambiguous saved binding field.");

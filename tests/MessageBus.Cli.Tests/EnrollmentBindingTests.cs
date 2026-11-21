@@ -271,6 +271,78 @@ public sealed class EnrollmentBindingTests
     }
 
     [Theory]
+    [InlineData(Ca, false)]
+    [InlineData(Ca, true)]
+    [InlineData(Eu, false)]
+    [InlineData(Eu, true)]
+    public async Task Occupied_runner_replacement_preserves_active_identity_on_loss_or_proof_failure_and_resumes(string selected, bool failProof)
+    {
+        using var machine = new TestMachine();
+        machine.Env[ConfigStore.KeyStoreVariable] = "file";
+        machine.Env[EnvVars.ApiKey] = ApiKey;
+        machine.Env[EnvVars.Server] = selected;
+        using var oldKey = MachineKey.Create();
+        var store = new ConfigStore(machine.MbusFolder, "file");
+        store.Save(new CliConfig { Server = Ca, MachineId = "mch_old", WorkspaceId = "w_source", KeyFingerprint = oldKey.Fingerprint,
+            EnrolledWithApiKey = RunnerKeyEnrollment.Fingerprint("fixture-old-bootstrap") });
+        store.SaveKeyPem(oldKey.ExportPrivateKeyPem());
+        var active = store.Load();
+        var activeKeyPath = store.KeyPath;
+        machine.Server.On(HttpMethod.Get, "/api/server", _ => Text(Isolated(selected, selected == Ca ? "ca" : "eu")));
+        machine.Server.On(HttpMethod.Get, ApiRoutes.Caller, request =>
+        {
+            Assert.Null(request.Header(MbusHeaders.Workspace));
+            Assert.Equal("MbusKey " + ApiKey, request.Header("Authorization"));
+            return Text("""{"scopes":["runner"]}""");
+        });
+        var failing = true;
+        string? enrolledPublicKey = null;
+        machine.Server.On(HttpMethod.Post, ApiRoutes.MachineEnroll, request =>
+        {
+            Assert.Null(request.Header(MbusHeaders.Workspace));
+            var body = MessageBusJson.Deserialize<MachineEnrollRequest>(request.BodyText)!;
+            Assert.Null(body.WorkspaceId);
+            Assert.Equal("", body.Inventory.MachineId);
+            Assert.NotEqual(oldKey.PublicKeyBase64, body.PublicKey);
+            if (enrolledPublicKey is null) enrolledPublicKey = body.PublicKey;
+            else Assert.Equal(enrolledPublicKey, body.PublicKey);
+            if (failing && !failProof) throw new HttpRequestException("fixture lost response");
+            return FakeServer.Json(EnrollResponse(body));
+        });
+        var proofs = 0;
+        machine.Server.On(HttpMethod.Put, ApiRoutes.MachineInventory, request =>
+        {
+            proofs++;
+            Assert.Equal("MbusMachine " + NewMachineId, request.Header("Authorization"));
+            Assert.Equal("w_same", request.Header(MbusHeaders.Workspace));
+            return new(failing ? HttpStatusCode.Unauthorized : HttpStatusCode.NoContent);
+        });
+        Assert.NotEqual(0, (await machine.RunAsync("login")).ExitCode);
+        var restarted = new ConfigStore(machine.MbusFolder, "file");
+        var checkpoint = restarted.Load();
+        Assert.Equal(active.Server, checkpoint.Server);
+        Assert.Equal(active.MachineId, checkpoint.MachineId);
+        Assert.Equal(active.WorkspaceId, checkpoint.WorkspaceId);
+        Assert.Equal(active.EnrolledWithApiKey, checkpoint.EnrolledWithApiKey);
+        Assert.Equal(active.MachineKeyGeneration, checkpoint.MachineKeyGeneration);
+        Assert.Equal(oldKey.ExportPrivateKeyPem(), restarted.LoadKeyPem());
+        Assert.NotNull(checkpoint.PendingRunnerIdentity);
+        Assert.Equal(ServerEndpoint.Parse(selected).Value, checkpoint.PendingRunnerIdentity.Binding.SelectedEndpoint);
+        Assert.Equal(failProof ? 1 : 0, proofs);
+        failing = false;
+        var result = await machine.RunAsync("login");
+        Assert.True(result.ExitCode == 0, result.Error);
+        var completed = restarted.Load();
+        Assert.Null(completed.PendingRunnerIdentity);
+        Assert.Equal(checkpoint.PendingRunnerIdentity.KeyGeneration, completed.MachineKeyGeneration);
+        Assert.Equal(NewMachineId, completed.MachineId);
+        Assert.Equal(selected, completed.Server);
+        Assert.Equal(oldKey.ExportPrivateKeyPem(), File.ReadAllText(activeKeyPath));
+        Assert.DoesNotContain(machine.Server.Requests, r => r.Header("Authorization") == "MbusMachine mch_old");
+        Assert.All(machine.Server.Requests, r => Assert.Equal(selected, r.Uri.GetLeftPart(UriPartial.Authority)));
+    }
+
+    [Theory]
     [InlineData(Eu)]
     [InlineData(Ca + "/different-base")]
     [InlineData("https://alias.stamps.example.test")]

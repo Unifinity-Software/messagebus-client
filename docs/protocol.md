@@ -319,7 +319,7 @@ the final fresh binding differs; a concurrent legacy-to-isolated promotion canno
 Concurrent profile changes refuse rather than publishing a stale `Stored` record. New identities clear old
 runner bootstrap/checkpoint provenance. The first inventory proves the newly enrolled key with only its returned
 machine/workspace and actual binding, before publishing the identity; a refused proof preserves the old profile
-or leaves the pending runner checkpoint. File and Windows DPAPI enrollment stage and verify a separate immutable
+or leaves the pending runner checkpoint. File, Windows DPAPI and macOS Keychain enrollment stage and verify a separate immutable
 key file, then atomically publish its optional `machineKeyGeneration` (32 lowercase hex filename component),
 key-store choice, identity and actual binding in `config.json`. Existing profiles without this field keep the
 original filenames. A generation uses `machine-key.<generation>.pem` or `machine-key.<generation>.dpapi`.
@@ -330,13 +330,23 @@ blocks all credential use until explicit profile restoration. Old generation key
 build artifacts; this checkpoint does not automatically remove them. Ordinary config saves cannot publish a new
 key generation or silently erase the current generation.
 
-Key stores without a supported separate staging slot (including Keychain and arbitrary custom vaults) refuse
-new enrollment before key replacement, with separate private file-profile guidance. No silent plaintext fallback,
-profile permission repair or keychain migration is performed by enrollment. Legacy trust requiring a separate
-import also refuses before replacement. Runner bootstrap refuses to overwrite an active identity or a different
-server's profile while publishing a pending checkpoint; use a separate private durable home for that fresh runner.
-These conservative restrictions require native UX/compatibility review and are not a claim that all platform
-login workflows are complete.
+Keychain generations use independent accounts: the legacy `mbus-<home-hash>` account remains unchanged;
+new items append `-<generation>`. Both tool-backed and Developer ID providers select the item from the
+published config generation after restart. `IGenerationMachineKeyVault` is an additive local vault seam;
+custom vaults without separate staging support still refuse replacement. File-to-Keychain movement also
+publishes a generation selector after readback. A matching leftover PEM is checked against the saved
+fingerprint before enrollment key reads consult any OS vault; recovery neither migrates nor writes it.
+Legacy workspace-only trust is validated before enrollment and imported at its saved source origin during
+identity publication, with rollback on a failed publication. No silent plaintext fallback or permission repair occurs.
+
+An intentional fresh runner bootstrap may replace an occupied profile. Its optional `pendingRunnerIdentity`
+contains `keyGeneration`, `keyStore`, and `binding` (the runner provenance above). The active server, machine,
+workspace, bootstrap fingerprint and key selector stay active while this separate key/checkpoint is pending.
+Response loss or refused new-key proof retains both identities' local key material. Restart requires the same
+pending endpoint, authority, API-key fingerprint and machine-key fingerprint. Only successful enrollment and
+proof atomically select the pending generation with the new identity and clear pending metadata. Pending
+binding snapshots also establish the ever-isolated floor. A previously consumed source bootstrap still cannot
+move its old identity to another endpoint. Native platform execution and complete compatibility gates remain required.
 
 Attachment transfer/query credentials now use the same current-discovery and durable-floor gate as the selected API.
 `AttachmentTransfers.Bind(api, send)` is an additive caller-owned authorization seam in Attachments.Client;

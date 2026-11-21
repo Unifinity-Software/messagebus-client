@@ -144,6 +144,7 @@ internal static class LoginCommand
                 Location = enrolled.Machine.Location ?? location, KeyFingerprint = key.Fingerprint,
                 EnrolledAt = enrolled.Machine.EnrolledAt, EnrolledWithApiKey = null,
                 PendingRunnerEnrollment = null, RunnerEnrollmentBinding = null,
+                PendingRunnerIdentity = null,
             }, key.ExportPrivateKeyPem(), ct);
         }, ct);
 
