@@ -1,4 +1,6 @@
 using System.Security.Cryptography;
+using System.Security.AccessControl;
+using System.Security.Principal;
 using MessageBus.Attachments.Client;
 using MessageBus.Contracts.Mcp;
 using MessageBus.Contracts.Messaging;
@@ -85,7 +87,8 @@ internal static class TaskReseal
                 moved.Add(attachment);
                 continue;
             }
-            var file = Path.Combine(tempDirectory ?? Path.GetTempPath(), "mbus-reseal-" + Guid.NewGuid().ToString("N"));
+            var directory = CreatePrivateResealDirectory(tempDirectory);
+            var file = Path.Combine(directory, "attachment");
             try
             {
                 var link = await attachments.DownloadLinkAsync(attachment.Id, ct);
@@ -102,9 +105,32 @@ internal static class TaskReseal
             finally
             {
                 File.Delete(file);
+                Directory.Delete(directory);
             }
         }
         return (body, moved);
+    }
+
+    private static string CreatePrivateResealDirectory(string? root)
+    {
+        var directory = Path.Combine(root ?? Path.GetTempPath(), "mbus-reseal-" + Guid.NewGuid().ToString("N"));
+        if (OperatingSystem.IsWindows())
+        {
+            using var identity = WindowsIdentity.GetCurrent();
+            var owner = identity.User ?? throw new IOException("Cannot identify the attachment owner.");
+            var security = new DirectorySecurity();
+            security.SetOwner(owner);
+            security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+            security.AddAccessRule(new FileSystemAccessRule(owner, FileSystemRights.FullControl,
+                InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+                PropagationFlags.None, AccessControlType.Allow));
+            new DirectoryInfo(directory).Create(security);
+        }
+        else
+        {
+            Directory.CreateDirectory(directory, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+        return directory;
     }
 
     private static async Task<byte[]> StoredBodyAsync(HttpClient http, string workspaceId, MessageEnvelope envelope, CancellationToken ct)

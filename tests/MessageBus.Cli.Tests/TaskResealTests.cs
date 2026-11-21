@@ -224,7 +224,7 @@ public sealed class TaskResealTests
             Assert.Null(result.Attachments);
             Assert.DoesNotContain(machine.Server.Requests, r => r.Uri.AbsolutePath.Contains("attachments"));
         }
-        Assert.Empty(Directory.EnumerateFiles(machine.Home, "mbus-reseal-*"));
+        Assert.Empty(Directory.EnumerateFileSystemEntries(machine.Home, "mbus-reseal-*"));
     }
 
     [Theory]
@@ -249,7 +249,10 @@ public sealed class TaskResealTests
             machine.Server.On(HttpMethod.Post, "/api/w/ws_test/attachments/upload-link", _ =>
             {
                 // The decrypted file exists at the failure point, so cleanup must remove it.
-                Assert.Single(Directory.EnumerateFiles(machine.Home, "mbus-reseal-*"));
+                var scratch = Assert.Single(Directory.EnumerateDirectories(machine.Home, "mbus-reseal-*"));
+                Assert.Single(Directory.EnumerateFiles(scratch));
+                if (!OperatingSystem.IsWindows())
+                    Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute, File.GetUnixFileMode(scratch));
                 return new(HttpStatusCode.ServiceUnavailable);
             });
         }
@@ -259,7 +262,7 @@ public sealed class TaskResealTests
             new AttachmentClient(http, links, "ws_test"), Envelope(null, [file]),
             new RoleTarget { Role = "new-role" }, Ct, tempDirectory: machine.Home));
 
-        Assert.Empty(Directory.EnumerateFiles(machine.Home, "mbus-reseal-*"));
+        Assert.Empty(Directory.EnumerateFileSystemEntries(machine.Home, "mbus-reseal-*"));
         Assert.DoesNotContain(machine.Server.Requests, r => r.Method == HttpMethod.Delete || r.Method == HttpMethod.Put);
         if (failUpload)
             Assert.Single(machine.Server.Requests.Where(r => r.Method == HttpMethod.Post &&
