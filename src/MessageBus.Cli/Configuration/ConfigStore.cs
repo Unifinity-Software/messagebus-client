@@ -18,6 +18,7 @@ public sealed partial class ConfigStore
     private readonly Security.IMachineKeyVault? _osVault;
     private string? _keyGeneration;
     private string? _selectedKeyStore;
+    private bool _keySelectionInitialized;
     private readonly string? _initialKeyStore;
 
     // Runner reads check the actual keychain lock state before using the trusted tool.
@@ -40,9 +41,8 @@ public sealed partial class ConfigStore
         _keyFile = new Security.FileKeyVault(Path.Combine(directory, CliConfig.MachineKeyFile), WriteOwnerOnly);
         _osVault = osVault;
         _initialKeyStore = keyStore;
-        var choice = Load().KeyStore ?? keyStore;
-        KeyVault = string.Equals(choice?.Trim(), "file", StringComparison.OrdinalIgnoreCase) ? _keyFile : PlatformVault() ?? _keyFile;
-        SelectKeyGeneration(Load());
+        KeyVault = _keyFile;
+        InSecurityTransaction(tx => tx.RefreshKeySelection());
     }
 
     /// <summary>The folder.</summary>
@@ -71,42 +71,48 @@ public sealed partial class ConfigStore
     /// removes the new one. A runner that is still running reads the old copy until it stops (the original issue).
     /// </summary>
     public KeyStoreChange PrepareKeyStoreChange(string choice)
+        => InSecurityTransaction(tx => tx.PrepareKeyStoreChange(choice));
+
+    private KeyStoreChange PrepareKeyStoreChangeLocked(string choice)
     {
         if (_environment is not null && Security.RunContext.IsInsideRun(_environment))
             throw new CliException(Security.RunContext.KeyRefused);
         if (choice is not ("file" or "keychain")) throw new CliException("Choose --key-store file or keychain.");
-        var config = Load();
+        var config = ReadBindingState().Config;
         SelectKeyGeneration(config);
-        var target = KeyStoreName == choice ? KeyVault : choice == "file" ? _keyFile
+        var vault = KeyVault;
+        var keyFile = _keyFile;
+        var keyStore = ReferenceEquals(vault, keyFile) ? "file" : "keychain";
+        var target = keyStore == choice ? vault : choice == "file" ? keyFile
             : config.MachineKeyGeneration is { } generation ? GenerationVault(generation, false)
             : PlatformVault() ?? throw new CliException("The Keychain is unavailable on this computer.");
         // A legacy file moves to an independent native item as well. Its selector is published only
         // after readback, so a refused/abandoned migration cannot replace the legacy Keychain item.
         string? targetGeneration = null;
-        if (choice == "keychain" && KeyStoreName != choice && config.MachineKeyGeneration is null
+        if (choice == "keychain" && keyStore != choice && config.MachineKeyGeneration is null
             && target is Security.IGenerationMachineKeyVault generations)
         {
             targetGeneration = Guid.NewGuid().ToString("N");
             target = generations.ForGeneration(targetGeneration);
         }
-        if (config.KeyStore == choice && KeyStoreName == choice) return new KeyStoreChange(null, choice, target, null);
-        if (config.MachineId is null && !HasKey) return new KeyStoreChange(this, choice, target, null);
+        if (config.KeyStore == choice && keyStore == choice) return new KeyStoreChange(null, choice, target, null);
+        if (config.MachineId is null && !HasKeyLocked(config)) return new KeyStoreChange(this, choice, target, null, expected: config);
         // the original issue: the file first when it holds this machine's key, so a locked Keychain (with an older copy, say) doesn't
         // stop a move to the file. The Keychain is read only when the file can't be used.
-        var source = KeyVault;
+        var source = vault;
         string? pem;
-        if (!ReferenceEquals(source, _keyFile) && _keyFile.Load() is { } fileKey && MatchesStoredFingerprint(fileKey))
+        if (!ReferenceEquals(source, keyFile) && keyFile.Load() is { } fileKey && MatchesStoredFingerprint(fileKey, config))
         {
-            source = _keyFile;
+            source = keyFile;
             pem = fileKey;
         }
         else
         {
             pem = LoadForChange(source, choice);
         }
-        if (pem is null && !ReferenceEquals(source, _keyFile))
+        if (pem is null && !ReferenceEquals(source, keyFile))
         {
-            source = _keyFile;
+            source = keyFile;
             pem = source.Load();
         }
         if (pem is null) throw new CliException("This machine has no saved key. Run mbus login first.");
@@ -115,7 +121,7 @@ public sealed partial class ConfigStore
             throw new CliException("The saved key does not match this machine. The key store was not changed.");
         if (ReferenceEquals(source, target) && choice == "keychain")
         {
-            return new KeyStoreChange(this, choice, target, null);
+            return new KeyStoreChange(this, choice, target, null, expected: config);
         }
         if (choice == "file" && !OperatingSystem.IsWindows())
         {
@@ -123,7 +129,7 @@ public sealed partial class ConfigStore
             File.SetUnixFileMode(Directory, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
         }
         // The current store's copy is never removed for a failed or abandoned change: it was in use before.
-        var newCopy = ReferenceEquals(source, target) || ReferenceEquals(target, KeyVault) ? null : target;
+        var newCopy = ReferenceEquals(source, target) || ReferenceEquals(target, vault) ? null : target;
         try
         {
             target.Save(pem);
@@ -146,8 +152,8 @@ public sealed partial class ConfigStore
                 : "The key store was not changed: " + ex.Message, 1, ex);
         }
         // Moving from the Keychain to the file: its copy goes too, also when the file was the source (an older one, say).
-        var oldCopies = new[] { source, KeyVault }.Distinct().Where(v => !ReferenceEquals(v, target)).ToArray();
-        return new KeyStoreChange(this, choice, target, oldCopies, newCopy, targetGeneration, config);
+        var oldCopies = new[] { source, vault }.Distinct().Where(v => !ReferenceEquals(v, target)).ToArray();
+        return new KeyStoreChange(this, choice, target, oldCopies, newCopy, targetGeneration, config, key.Fingerprint);
     }
 
     /// <summary>Reads the key to move it, saying what to do when the Keychain is locked.</summary>
@@ -175,9 +181,10 @@ public sealed partial class ConfigStore
         private readonly Security.IMachineKeyVault? _newCopy;
         private readonly string? _targetGeneration;
         private readonly CliConfig? _expected;
+        private readonly string? _fingerprint;
 
         internal KeyStoreChange(ConfigStore? store, string choice, Security.IMachineKeyVault target, Security.IMachineKeyVault[]? oldCopies,
-            Security.IMachineKeyVault? newCopy = null, string? targetGeneration = null, CliConfig? expected = null)
+            Security.IMachineKeyVault? newCopy = null, string? targetGeneration = null, CliConfig? expected = null, string? fingerprint = null)
         {
             _store = store;
             _choice = choice;
@@ -186,16 +193,33 @@ public sealed partial class ConfigStore
             _newCopy = newCopy;
             _targetGeneration = targetGeneration;
             _expected = expected;
+            _fingerprint = fingerprint;
         }
 
         /// <summary>Switches to the new store and deletes the old copy; returns a warning when that copy couldn't be deleted.</summary>
         public string? Commit()
         {
             if (_store is null) return null;
-            if (_targetGeneration is null) _store.Save(_store.Load() with { KeyStore = _choice });
-            else _store.InSecurityTransaction(tx => tx.PublishKeyStoreGeneration(_expected!, _choice, _targetGeneration));
-            _store.SelectKeyGeneration(_store.Load());
-            _store.KeyVault = _target;
+            return _store.InSecurityTransaction(tx => tx.CommitKeyStoreChange(this));
+        }
+
+        internal string? CommitLocked()
+        {
+            var store = _store!;
+            var current = store.ReadBindingState().Config;
+            store.SelectKeyGeneration(current);
+            if (current != _expected)
+                throw new Server.ServerBindingException("The profile changed during key store migration.");
+            if (_fingerprint is not null)
+            {
+                using var key = Security.MachineKey.FromPem(_target.Load()
+                    ?? throw new Server.ServerBindingException("The prepared key store copy is missing."));
+                if (key.Fingerprint != _fingerprint)
+                    throw new Server.ServerBindingException("The prepared key store copy changed.");
+            }
+            if (_targetGeneration is null) store.SaveConfigLocked(current with { KeyStore = _choice });
+            else store.PublishKeyStoreGenerationLocked(current, _choice, _targetGeneration);
+            store.SelectKeyGeneration(store.ReadBindingState().Config);
             string? warning = null;
             foreach (var old in _oldCopies)
             {
@@ -216,14 +240,43 @@ public sealed partial class ConfigStore
         /// <summary>Removes the new copy and leaves everything as it was.</summary>
         public void Abandon()
         {
+            if (_store is null) return;
             try
             {
-                if (_targetGeneration is null || _store?.Load().MachineKeyGeneration != _targetGeneration) _newCopy?.Delete();
+                _store.InSecurityTransaction(tx => tx.AbandonKeyStoreChange(this));
             }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or CliException)
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or CliException or System.Security.Cryptography.CryptographicException)
             {
                 // A second copy of the same key, in a store that isn't used: harmless, and replaced by the next change.
             }
+        }
+
+        internal bool AbandonLocked()
+        {
+            var current = _store!.ReadBindingState().Config;
+            _store.SelectKeyGeneration(current);
+            // A different operation may have selected this very target (including the same generation
+            // in another backend). Stale preparations own no cleanup rights over the new profile.
+            if (current != _expected) return false;
+            if (current.MachineKeyGeneration == (_targetGeneration ?? _expected!.MachineKeyGeneration)
+                && _store.KeyStoreName == _choice) return false;
+            if (current.PendingRunnerIdentity is { } pending
+                && pending.KeyGeneration == (_targetGeneration ?? _expected!.MachineKeyGeneration)
+                && pending.KeyStore == _choice) return false;
+            if (_newCopy is Security.FileKeyVault && _fingerprint is not null)
+            {
+                // A later failed OS-store save can make this same file the only surviving active
+                // copy without changing config. Never remove it unless the selected vault verifies.
+                var vault = _store.KeyVault;
+                if (vault is Security.IKeychainVault keychain && keychain.LockState() != Security.KeychainLockState.Unlocked)
+                    return false;
+                var pem = vault is Security.IKeychainVault native ? native.LoadWithoutPrompts() : vault.Load();
+                if (pem is null) return false;
+                using var key = Security.MachineKey.FromPem(pem);
+                if (key.Fingerprint != _fingerprint) return false;
+            }
+            _newCopy?.Delete();
+            return true;
         }
     }
 
@@ -324,16 +377,21 @@ public sealed partial class ConfigStore
     /// once the store gives the same key back; if the store can't take it, the file keeps working.
     /// </summary>
     public string? LoadKeyPem()
+        => InSecurityTransaction(tx => tx.LoadKeyPem());
+
+    private string? LoadKeyPemLocked(CliConfig config)
     {
-        SelectKeyGeneration(Load());
+        SelectKeyGeneration(config);
+        var vault = KeyVault;
+        var keyFile = _keyFile;
         if (_environment is not null && Security.RunContext.IsInsideRun(_environment))
         {
             throw new CliException(Security.RunContext.KeyRefused);
         }
-        if (RunnerKeyReads && KeyVault is Security.IKeychainVault keychain)
+        if (RunnerKeyReads && vault is Security.IKeychainVault keychain)
         {
             // Leave legacy-file migration to an interactive CLI command; no identity changes while waiting.
-            if (_keyFile.Load() is { } fileKey && MatchesStoredFingerprint(fileKey))
+            if (keyFile.Load() is { } fileKey && MatchesStoredFingerprint(fileKey, config))
             {
                 // Every request reads the key: say it once (the original issue).
                 if (KeyReadLog is { } log && !_leftoverFileLogged)
@@ -345,18 +403,18 @@ public sealed partial class ConfigStore
             }
             return keychain.LoadWithoutPrompts();
         }
-        if (ReferenceEquals(KeyVault, _keyFile) || _keyFile.Load() is not { } legacy)
+        if (ReferenceEquals(vault, keyFile) || keyFile.Load() is not { } legacy)
         {
-            return KeyVault.Load();
+            return vault.Load();
         }
-        if (!MatchesStoredFingerprint(legacy) && Load().KeyFingerprint is not null)
-            return KeyVault.Load(); // Never replace the registered identity with a different leftover file.
-        if (Load().KeyFingerprint is null)
+        if (!MatchesStoredFingerprint(legacy, config) && config.KeyFingerprint is not null)
+            return vault.Load(); // Never replace the registered identity with a different leftover file.
+        if (config.KeyFingerprint is null)
         {
             // With no registered fingerprint, preserve any identity already in the protected store.
             try
             {
-                if (KeyVault.Load() is { } existing) return existing;
+                if (vault.Load() is { } existing) return existing;
             }
             catch (Exception ex) when (ex is IOException or CliException)
             {
@@ -365,10 +423,10 @@ public sealed partial class ConfigStore
         }
         try
         {
-            KeyVault.Save(legacy);
-            if (KeyVault.Load() == legacy)
+            vault.Save(legacy);
+            if (vault.Load() == legacy)
             {
-                _keyFile.Delete();
+                keyFile.Delete();
             }
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.Cryptography.CryptographicException or CliException
@@ -379,41 +437,42 @@ public sealed partial class ConfigStore
         return legacy;
     }
 
-    private bool MatchesStoredFingerprint(string pem)
+    private static bool MatchesStoredFingerprint(string pem, CliConfig config)
     {
-        if (Load().KeyFingerprint is not { } expected) return false;
+        if (config.KeyFingerprint is not { } expected) return false;
         try
         {
             using var key = Security.MachineKey.FromPem(pem);
             return key.Fingerprint == expected;
         }
-        catch (CliException) { return false; }
+        catch (Exception ex) when (ex is CliException or System.Security.Cryptography.CryptographicException) { return false; }
     }
 
     /// <summary>Whether a machine key is saved here (without decrypting it).</summary>
     public bool HasKey
     {
-        get
-        {
-            SelectKeyGeneration(Load());
-            return File.Exists(KeyPath) || (!ReferenceEquals(KeyVault, _keyFile) && SafeHasProtectedKey());
-        }
+        get => InSecurityTransaction(tx => tx.HasKey());
     }
 
-    private bool SafeHasProtectedKey()
+    private bool HasKeyLocked(CliConfig config)
     {
-        if (KeyVault is Security.DpapiKeyVault)
+        SelectKeyGeneration(config);
+        var vault = KeyVault;
+        var keyFile = _keyFile;
+        if (File.Exists(keyFile.Path)) return true;
+        if (ReferenceEquals(vault, keyFile)) return false;
+        if (vault is Security.DpapiKeyVault)
         {
-            return File.Exists(Path.Combine(Directory, _keyGeneration is { } generation
+            return File.Exists(Path.Combine(Directory, config.MachineKeyGeneration is { } generation
                 ? $"machine-key.{generation}.dpapi" : CliConfig.ProtectedMachineKeyFile));
         }
-        if (KeyVault is Security.IKeychainVault keychain)
+        if (vault is Security.IKeychainVault keychain)
         {
             return keychain.Exists();
         }
         try
         {
-            return (RunnerKeyReads ? LoadKeyPem() : KeyVault.Load()) is not null;
+            return (RunnerKeyReads ? LoadKeyPemLocked(config) : vault.Load()) is not null;
         }
         catch (CliException)
         {
@@ -423,14 +482,23 @@ public sealed partial class ConfigStore
 
     /// <summary>Saves the machine's private key in the OS store, or in the owner-only file when the store refuses it.</summary>
     public void SaveKeyPem(string pem)
+        => InSecurityTransaction(tx => { tx.SaveKeyPem(pem); return true; });
+
+    private void SaveKeyPemLocked(string pem)
     {
-        SelectKeyGeneration(Load());
-        if (!ReferenceEquals(KeyVault, _keyFile))
+        var config = ReadBindingState().Config;
+        SelectKeyGeneration(config);
+        // PEM obtained before another enrollment must never overwrite that enrollment's key.
+        if (config.KeyFingerprint is not null && !MatchesStoredFingerprint(pem, config))
+            throw new Server.ServerBindingException("The key does not match the current machine identity.");
+        var vault = KeyVault;
+        var keyFile = _keyFile;
+        if (!ReferenceEquals(vault, keyFile))
         {
             try
             {
-                KeyVault.Save(pem);
-                _keyFile.Delete();
+                vault.Save(pem);
+                keyFile.Delete();
                 return;
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.Cryptography.CryptographicException
@@ -439,18 +507,41 @@ public sealed partial class ConfigStore
                 // A locked keychain over SSH, say: the file works everywhere, and moves to the store later.
             }
         }
-        _keyFile.Save(pem);
+        keyFile.Save(pem);
     }
 
     /// <summary>Deletes the machine's private key, wherever it is.</summary>
     public void DeleteKey()
+        => InSecurityTransaction(tx => { tx.DeleteKey(); return true; });
+
+    private void DeleteKeyLocked()
     {
-        SelectKeyGeneration(Load());
-        _keyFile.Delete();
-        if (!ReferenceEquals(KeyVault, _keyFile))
+        SelectKeyGeneration(ReadBindingState().Config);
+        var vault = KeyVault;
+        var keyFile = _keyFile;
+        keyFile.Delete();
+        if (!ReferenceEquals(vault, keyFile))
         {
-            KeyVault.Delete();
+            vault.Delete();
         }
+    }
+
+    public sealed partial class ProfileSecurityTransaction
+    {
+        internal bool RefreshKeySelection() => Execute(() =>
+        { _store.SelectKeyGeneration(_store.ReadBindingState().Config); return true; });
+        internal KeyStoreChange PrepareKeyStoreChange(string choice) => Execute(() => _store.PrepareKeyStoreChangeLocked(choice));
+        internal string? CommitKeyStoreChange(KeyStoreChange change) => Execute(change.CommitLocked);
+        internal bool AbandonKeyStoreChange(KeyStoreChange change) => Execute(change.AbandonLocked);
+
+        /// <summary>Reads or migrates the current key while holding the profile transaction.</summary>
+        public string? LoadKeyPem() => Execute(() => _store.LoadKeyPemLocked(_store.ReadBindingState().Config));
+        /// <summary>Checks the selected key backend while holding the profile transaction.</summary>
+        public bool HasKey() => Execute(() => _store.HasKeyLocked(_store.ReadBindingState().Config));
+        /// <summary>Saves a matching key without allowing an enrollment to change its destination.</summary>
+        public void SaveKeyPem(string pem) => Execute(() => { _store.SaveKeyPemLocked(pem); return true; });
+        /// <summary>Deletes the selected key while holding the profile transaction.</summary>
+        public void DeleteKey() => Execute(() => { _store.DeleteKeyLocked(); return true; });
     }
 
     /// <summary>Full path of the person's mbus sign-in (<see cref="CliSessionFile"/>).</summary>

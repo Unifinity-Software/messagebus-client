@@ -131,27 +131,27 @@ public sealed partial class ConfigStore
     private void SelectKeyGeneration(CliConfig config)
     {
         ValidateKeyGeneration(config.MachineKeyGeneration);
-        if (_keyGeneration == config.MachineKeyGeneration && _selectedKeyStore == (config.KeyStore ?? _initialKeyStore)) return;
+        if (_keySelectionInitialized && _keyGeneration == config.MachineKeyGeneration && _selectedKeyStore == (config.KeyStore ?? _initialKeyStore)) return;
         var file = string.Equals(config.KeyStore ?? _initialKeyStore, "file", StringComparison.OrdinalIgnoreCase);
         _keyFile = GenerationFile(config.MachineKeyGeneration);
         KeyVault = config.MachineKeyGeneration is { } generation ? file ? _keyFile : GenerationVault(generation, false)
             : file ? _keyFile : PlatformVault() ?? _keyFile;
         _keyGeneration = config.MachineKeyGeneration;
         _selectedKeyStore = config.KeyStore ?? _initialKeyStore;
+        _keySelectionInitialized = true;
+    }
+
+    private void PublishKeyStoreGenerationLocked(CliConfig expected, string choice, string generation)
+    {
+        var state = ReadBindingState();
+        if (state.Config != expected) throw new ServerBindingException("The profile changed during key store migration.");
+        ValidateKeyGeneration(generation);
+        WriteOwnerOnly(ConfigPath, JsonSerializer.Serialize(state.Config with
+            { KeyStore = choice, MachineKeyGeneration = generation }, CliJsonContext.Default.CliConfig));
     }
 
     public sealed partial class ProfileSecurityTransaction
     {
-        internal bool PublishKeyStoreGeneration(CliConfig expected, string choice, string generation) => Execute(() =>
-        {
-            var state = _store.ReadBindingState();
-            if (state.Config != expected) throw new ServerBindingException("The profile changed during key store migration.");
-            ValidateKeyGeneration(generation);
-            _store.WriteOwnerOnly(_store.ConfigPath, JsonSerializer.Serialize(state.Config with
-                { KeyStore = choice, MachineKeyGeneration = generation }, CliJsonContext.Default.CliConfig));
-            return true;
-        });
-
         /// <summary>Stages a runner replacement without changing the active identity or key selector.</summary>
         public PendingRunnerIdentity StageRunnerReplacement(RunnerEnrollmentBinding binding, string pem, CancellationToken ct) => Execute(() =>
         {

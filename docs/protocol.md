@@ -336,6 +336,14 @@ published config generation after restart. `IGenerationMachineKeyVault` is an ad
 custom vaults without separate staging support still refuse replacement. File-to-Keychain movement also
 publishes a generation selector after readback. A matching leftover PEM is checked against the saved
 fingerprint before enrollment key reads consult any OS vault; recovery neither migrates nor writes it.
+Public key reads (including recovery migration), saves, deletion and existence checks hold the same profile
+transaction through selector capture and every vault operation. Explicit transaction callers use its guarded
+key methods; the published session callback routes through that same guard. Saving an earlier PEM refuses
+when it does not match the current registered fingerprint. Every prepared backend migration captures the
+profile, including identity, generation and backend, then compares it again before publication and old-copy
+deletion. A stale preparation refuses commit and relinquishes cleanup rights; abandon never removes a target
+subsequently selected by another migration or enrollment. A file needed for OS-save recovery is retained unless
+the selected protected vault still verifies. Target readback is rechecked before publication.
 Enrollment validates the complete current or legacy trust structure without writes, rejecting missing/null nested
 maps and records, malformed key/signer values, duplicate fields and ambiguous casing. The actual caller-key probe
 and API-key inventory send revalidate current trust after their own discovery/content awaits, inside the explicit

@@ -240,11 +240,243 @@ public sealed class KeychainEnrollmentTests
         Assert.Equal(oldKey.ExportPrivateKeyPem(), Vault().Load());
     }
 
+    public static IEnumerable<object[]> PreparedChanges()
+    {
+        foreach (var appOnly in new[] { false, true })
+        foreach (var source in new[] { "file", "keychain" })
+        foreach (var generated in new[] { false, true })
+        foreach (var abandon in new[] { false, true })
+            yield return [appOnly, source, generated, abandon];
+    }
+
+    [Theory]
+    [MemberData(nameof(PreparedChanges))]
+    public async Task Prepared_A_cannot_publish_or_delete_after_separate_store_enrolls_B(
+        bool appOnly, string source, bool generated, bool abandon)
+    {
+        using var machine = new TestMachine();
+        var backend = new KeychainFixture();
+        IMachineKeyVault Vault() => backend.Vault(machine.MbusFolder, appOnly);
+        var a = new ConfigStore(machine.MbusFolder, source, osVault: Vault());
+        using var oldKey = MachineKey.Create();
+        using var newKey = MachineKey.Create();
+        if (generated) await Enroll(a, oldKey, "old");
+        else
+        {
+            a.Save(new CliConfig { Server = Server, MachineId = "old", KeyStore = source, KeyFingerprint = oldKey.Fingerprint });
+            a.SaveKeyPem(oldKey.ExportPrivateKeyPem());
+        }
+        var prepared = a.PrepareKeyStoreChange(source == "file" ? "keychain" : "file");
+        var b = new ConfigStore(machine.MbusFolder, osVault: Vault());
+        await Enroll(b, newKey, "new");
+        var published = File.ReadAllBytes(b.ConfigPath);
+        if (abandon) prepared.Abandon();
+        else Assert.Throws<ServerBindingException>(() => prepared.Commit());
+        Assert.Equal(published, File.ReadAllBytes(b.ConfigPath));
+        var restarted = new ConfigStore(machine.MbusFolder, osVault: Vault());
+        Assert.Equal("new", restarted.Load().MachineId);
+        Assert.Equal(newKey.Fingerprint, restarted.Load().KeyFingerprint);
+        Assert.Equal(source, restarted.KeyStoreName);
+        Assert.Equal(newKey.ExportPrivateKeyPem(), restarted.LoadKeyPem());
+    }
+
+    [Theory]
+    [InlineData("file")]
+    [InlineData("keychain")]
+    public async Task Abandon_does_not_delete_a_target_selected_by_another_prepared_change(string source)
+    {
+        using var machine = new TestMachine();
+        var backend = new KeychainFixture();
+        IMachineKeyVault Vault() => backend.Vault(machine.MbusFolder, true);
+        var a = new ConfigStore(machine.MbusFolder, source, osVault: Vault());
+        using var key = MachineKey.Create();
+        await Enroll(a, key, "active");
+        var target = source == "file" ? "keychain" : "file";
+        var abandoned = a.PrepareKeyStoreChange(target);
+        var b = new ConfigStore(machine.MbusFolder, osVault: Vault());
+        b.PrepareKeyStoreChange(target).Commit();
+        abandoned.Abandon();
+        var restarted = new ConfigStore(machine.MbusFolder, osVault: Vault());
+        Assert.Equal(target, restarted.KeyStoreName);
+        Assert.Equal(key.ExportPrivateKeyPem(), restarted.LoadKeyPem());
+    }
+
+    public static IEnumerable<object[]> PublicKeyInterleavings()
+    {
+        foreach (var operation in new[] { "save", "load-migration", "delete", "has", "save-fallback" })
+        foreach (var separateStore in new[] { false, true })
+        foreach (var enroll in new[] { false, true })
+            // Deleting the only source intentionally prevents a subsequent backend copy.
+            if (operation != "delete" || enroll) yield return [operation, separateStore, enroll];
+    }
+
+    [Fact]
+    public async Task Abandon_keeps_file_that_became_recovery_after_destructive_native_save_failure()
+    {
+        using var machine = new TestMachine();
+        var backend = new KeychainFixture();
+        IMachineKeyVault Vault() => backend.Vault(machine.MbusFolder, true);
+        var store = new ConfigStore(machine.MbusFolder, osVault: Vault());
+        using var key = MachineKey.Create();
+        await Enroll(store, key, "active");
+        var prepared = store.PrepareKeyStoreChange("file");
+        backend.FailNextNativeSave = true; // The actual provider deletes its old item before Add fails.
+        store.SaveKeyPem(key.ExportPrivateKeyPem());
+        Assert.Empty(backend.Secrets);
+        prepared.Abandon();
+        Assert.Equal(key.ExportPrivateKeyPem(), File.ReadAllText(store.KeyPath));
+        var restarted = new ConfigStore(machine.MbusFolder, osVault: Vault());
+        Assert.Equal("active", restarted.Load().MachineId);
+        Assert.Equal(key.Fingerprint, restarted.Load().KeyFingerprint);
+        Assert.Equal(key.ExportPrivateKeyPem(), restarted.LoadKeyPem());
+        Assert.False(File.Exists(restarted.KeyPath)); // Recovery still migrates successfully.
+    }
+
+    [Theory]
+    [InlineData("file")]
+    [InlineData("keychain")]
+    public async Task Removed_prepared_copy_cannot_be_published(string source)
+    {
+        using var machine = new TestMachine();
+        var backend = new KeychainFixture();
+        IMachineKeyVault Vault() => backend.Vault(machine.MbusFolder, true);
+        var store = new ConfigStore(machine.MbusFolder, source, osVault: Vault());
+        using var key = MachineKey.Create();
+        await Enroll(store, key, "active");
+        var before = File.ReadAllBytes(store.ConfigPath);
+        var prepared = store.PrepareKeyStoreChange(source == "file" ? "keychain" : "file");
+        prepared.Abandon();
+        Assert.Throws<ServerBindingException>(() => prepared.Commit());
+        Assert.Equal(before, File.ReadAllBytes(store.ConfigPath));
+        Assert.Equal(key.ExportPrivateKeyPem(), new ConfigStore(machine.MbusFolder, osVault: Vault()).LoadKeyPem());
+    }
+
+    [Theory(Timeout = 30_000)]
+    [MemberData(nameof(PublicKeyInterleavings))]
+    public async Task Public_key_vault_boundary_holds_profile_lock_until_operation_finishes(
+        string operation, bool separateStore, bool enroll)
+    {
+        using var machine = new TestMachine();
+        var backend = new KeychainFixture();
+        IMachineKeyVault Vault() => backend.Vault(machine.MbusFolder, false);
+        var store = new ConfigStore(machine.MbusFolder, osVault: Vault());
+        using var oldKey = MachineKey.Create();
+        using var newKey = MachineKey.Create();
+        await Enroll(store, oldKey, "old");
+        var competitor = separateStore ? new ConfigStore(machine.MbusFolder, osVault: Vault()) : store;
+        if (operation == "load-migration")
+        {
+            ((IGenerationMachineKeyVault)Vault()).ForGeneration(store.Load().MachineKeyGeneration!).Delete();
+            File.WriteAllText(store.KeyPath, oldKey.ExportPrivateKeyPem());
+        }
+        var boundary = operation switch { "delete" => "delete-generic-password", "has" => "exists", _ => "-i" };
+        Task? competing = null;
+        backend.BeforeOperation = observed =>
+        {
+            if (observed != boundary) return;
+            backend.BeforeOperation = null;
+            // Begin synchronously at the actual provider boundary, so the lock wait has been reached
+            // before IsCompleted is inspected. No scheduler sleeps or timing assumptions.
+            competing = enroll ? Enroll(competitor, newKey, "new")
+                : competitor.WithProfileSecurityLockAsync(tx =>
+                {
+                    var change = tx.PrepareKeyStoreChange("file");
+                    tx.CommitKeyStoreChange(change);
+                    return Task.FromResult(true);
+                }, Ct);
+            Assert.False(competing.IsCompleted);
+            if (operation == "save-fallback") backend.FailNextSave = true;
+        };
+        try
+        {
+            switch (operation)
+            {
+                case "save": case "save-fallback": store.SaveKeyPem(oldKey.ExportPrivateKeyPem()); break;
+                case "load-migration": Assert.Equal(oldKey.ExportPrivateKeyPem(), store.LoadKeyPem()); break;
+                case "delete": store.DeleteKey(); break;
+                case "has": Assert.True(store.HasKey); break;
+            }
+        }
+        finally { backend.BeforeOperation = null; }
+        Assert.NotNull(competing);
+        await competing.WaitAsync(TestContext.Current.CancellationToken);
+        var restarted = new ConfigStore(machine.MbusFolder, osVault: Vault());
+        var expected = enroll ? newKey : oldKey;
+        Assert.Equal(enroll ? "new" : "old", restarted.Load().MachineId);
+        Assert.Equal(expected.Fingerprint, restarted.Load().KeyFingerprint);
+        Assert.Equal(enroll ? "keychain" : "file", restarted.KeyStoreName);
+        Assert.Equal(expected.ExportPrivateKeyPem(), restarted.LoadKeyPem());
+    }
+
+    [Theory]
+    [InlineData("file")]
+    [InlineData("keychain")]
+    public async Task Earlier_identity_PEM_cannot_overwrite_the_current_enrollment(string source)
+    {
+        using var machine = new TestMachine();
+        var backend = new KeychainFixture();
+        IMachineKeyVault Vault() => backend.Vault(machine.MbusFolder, true);
+        var store = new ConfigStore(machine.MbusFolder, source, osVault: Vault());
+        using var oldKey = MachineKey.Create();
+        using var newKey = MachineKey.Create();
+        await Enroll(store, oldKey, "old");
+        var earlier = store.LoadKeyPem()!;
+        await Enroll(new ConfigStore(machine.MbusFolder, osVault: Vault()), newKey, "new");
+        Assert.Throws<ServerBindingException>(() => store.SaveKeyPem(earlier));
+        Assert.Equal(newKey.ExportPrivateKeyPem(), new ConfigStore(machine.MbusFolder, osVault: Vault()).LoadKeyPem());
+    }
+
+    [Fact]
+    public async Task Published_callback_routes_key_operations_through_the_same_busy_and_lifetime_guard()
+    {
+        using var machine = new TestMachine();
+        var backend = new KeychainFixture();
+        var store = new ConfigStore(machine.MbusFolder, osVault: backend.Vault(machine.MbusFolder, false));
+        using var key = MachineKey.Create();
+        await Enroll(store, key, "active");
+        ConfigStore.ProfileSecurityTransaction? escaped = null;
+        backend.BeforeOperation = operation =>
+        {
+            if (operation != "-i") return;
+            backend.BeforeOperation = null;
+            Assert.Throws<InvalidOperationException>(() => store.LoadKeyPem());
+            Assert.Throws<InvalidOperationException>(() => store.SaveKeyPem(key.ExportPrivateKeyPem()));
+            Assert.Throws<InvalidOperationException>(() => store.DeleteKey());
+            Assert.Throws<InvalidOperationException>(() => store.HasKey);
+            Assert.Throws<InvalidOperationException>(() => store.PrepareKeyStoreChange("file"));
+        };
+#pragma warning disable CS0618 // Exercise the published callback overload.
+        await store.WithSessionLockAsync(() =>
+        {
+            store.SaveKeyPem(key.ExportPrivateKeyPem());
+            Assert.True(store.HasKey);
+            Assert.Equal(key.ExportPrivateKeyPem(), store.LoadKeyPem());
+            return Task.FromResult(true);
+        }, Ct);
+#pragma warning restore CS0618
+        await store.WithProfileSecurityLockAsync(tx => { escaped = tx; return Task.FromResult(true); }, Ct);
+        Assert.Throws<InvalidOperationException>(() => escaped!.LoadKeyPem());
+        Assert.Throws<InvalidOperationException>(() => escaped!.SaveKeyPem(key.ExportPrivateKeyPem()));
+        Assert.Throws<InvalidOperationException>(() => escaped!.DeleteKey());
+        Assert.Throws<InvalidOperationException>(() => escaped!.HasKey());
+        Assert.Equal(key.ExportPrivateKeyPem(), store.LoadKeyPem());
+    }
+
+    private static Task<CliConfig> Enroll(ConfigStore store, MachineKey key, string machine) => store.WithProfileSecurityLockAsync(tx =>
+    {
+        var current = tx.Load();
+        return Task.FromResult(tx.CommitEnrollment(current, current with
+        { Server = Server, MachineId = machine, KeyFingerprint = key.Fingerprint }, key.ExportPrivateKeyPem(), Ct));
+    }, Ct);
+
     // The real Keychain providers run against fake process/framework boundaries, never the user's Keychain.
     private sealed class KeychainFixture : IKeychainTool, IKeychainItems
     {
         public Dictionary<string, byte[]> Secrets { get; } = new(StringComparer.Ordinal);
         public bool Locked { get; set; }
+        public Action<string>? BeforeOperation { get; set; }
+        public bool FailNextSave { get; set; }
+        public bool FailNextNativeSave { get; set; }
         public IMachineKeyVault Vault(string directory, bool appOnly)
         {
             var tool = new KeychainKeyVault(directory, this, this);
@@ -252,9 +484,11 @@ public sealed class KeychainEnrollmentTests
         }
         public (int Exit, string Output) Run(IReadOnlyList<string> args, string? input)
         {
+            BeforeOperation?.Invoke(args[0]);
             if (Locked) return (36, "locked fixture");
             if (args[0] == "-i")
             {
+                if (FailNextSave) { FailNextSave = false; throw new IOException("fixture refused save"); }
                 var parts = input!.Trim().Split(' ');
                 Secrets[parts[Array.IndexOf(parts, "-a") + 1]] = Encoding.UTF8.GetBytes(parts[Array.IndexOf(parts, "-w") + 1]);
                 return (0, "");
@@ -269,10 +503,15 @@ public sealed class KeychainEnrollmentTests
             if (Locked) return -25308;
             return Secrets.TryGetValue(Encoding.UTF8.GetString(account), out secret) ? KeychainStatus.Success : KeychainStatus.ItemNotFound;
         }
-        public bool Exists(byte[] service, byte[] account) => Secrets.ContainsKey(Encoding.UTF8.GetString(account));
+        public bool Exists(byte[] service, byte[] account)
+        {
+            BeforeOperation?.Invoke("exists");
+            return Secrets.ContainsKey(Encoding.UTF8.GetString(account));
+        }
         public KeychainLockState LockState(byte[] service, byte[] account) => Locked ? KeychainLockState.Locked : KeychainLockState.Unlocked;
         public int Add(byte[] service, byte[] account, byte[] secret)
         {
+            if (FailNextNativeSave) { FailNextNativeSave = false; return -25308; }
             if (Locked) return -25308;
             return Secrets.TryAdd(Encoding.UTF8.GetString(account), secret) ? 0 : -25299;
         }
