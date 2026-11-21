@@ -54,8 +54,8 @@ public static class ScriptExitCodes
         "workspace-suspended" => WorkspaceSuspended,
         McpErrorCodes.InvalidInput => InvalidInput,
         McpErrorCodes.NotFound => NotFound,
-        McpErrorCodes.Forbidden => Forbidden,
-        McpErrorCodes.Conflict => Conflict,
+        McpErrorCodes.Forbidden or "unauthenticated" => Forbidden,
+        McpErrorCodes.Conflict or "stale-review" or "base-conflict" or "already-terminal" or "idempotency-conflict" => Conflict,
         McpErrorCodes.Unavailable or McpErrorCodes.LimitReached => Unavailable,
         McpErrorCodes.TooLarge => TooLarge,
         _ => Failed,
@@ -181,6 +181,7 @@ internal static class ScriptRunner
             Log = host.Error,
             ClientVersion = CliHost.Version,
             WorkingDirectory = host.CurrentDirectory,
+            ProposalAuthority = LocalServer.HasRunMarkers(host.GetEnvironmentVariable) ? ProposalAuthority.Unknown : ProposalAuthority.Interactive,
             Time = host.Time,
             MaxCallSeconds = MaxWaitSeconds,
         });

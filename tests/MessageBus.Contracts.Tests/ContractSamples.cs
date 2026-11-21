@@ -237,7 +237,7 @@ internal static class ContractSamples
             Owners = [Subject], RequireApprovalToJoin = true, AllowedSenders = ["architect"], JoinApprovers = JoinApprovers.Group,
             JoinApproverGroupId = "8d0f6c1e-5b8a-4f0e-9d4c-2a7b3c9e1f00", RequireRunApproval = true,
         },
-        RunEnvironment = RunEnv, LiveInstructionVersion = 3, CreatedAt = T, UpdatedAt = T,
+        RunEnvironment = RunEnv, GenerationId = "gen_original", LegacyInstructionCutoff = 2, LiveInstructionVersion = 3, CreatedAt = T, UpdatedAt = T,
     };
     public static readonly DirectoryRole DirectoryEntry = new()
     {
@@ -393,6 +393,24 @@ internal static class ContractSamples
         RunEnv.Models.Defaults[0],
         Instructions,
         Role,
+        ProposalDefinition,
+        ProposalDefinition.RunEnvironment!,
+        ProposalDefinition.RunEnvironment!.PermissionProfile!,
+        ProposalDefinition.RunEnvironment!.Models!,
+        new RoleProposalsCapability { Version = 1, BaselineVersion = "role-proposal-readonly-v1", NormalizerVersion = "role-definition-v1" },
+        new SubmitRoleProposalRequest { Operation = RoleProposalOperation.Create, Definition = ProposalDefinition, Rationale = "Need a reviewer", IdempotencyKey = "retry-example", AgentId = Agt, CoordinatorRecordId = "coord_example", InboxId = "inb_example" },
+        new RoleProposalSubmitted { ProposalId = "rpr_example", Status = RoleProposalStatus.Pending, ExpiresAt = T, ReviewUrl = "https://example.com/review" },
+        ProposalBase,
+        new RoleProposalWarning { Code = "runtime-enforcement-dependent", Field = "runEnvironment", Severity = "warning", Message = "Runtime enforcement depends on the runner." },
+        ProposalReceipt,
+        new RoleProposalDetail { ProposalId = "rpr_example", Status = RoleProposalStatus.Approved, Operation = RoleProposalOperation.Update,
+            CoordinatorRecordId = "coord_example", InboxId = "inb_example", AgentId = Agt, MachineId = Mch, ExpiresAt = T, ReviewUrl = "https://example.com/review",
+            Rationale = "Need a reviewer", BaseDefinition = ProposalDefinition, RequestedDefinition = ProposalDefinition, CurrentDefinition = ProposalDefinition,
+            FinalDefinition = ProposalDefinition, Warnings = [new RoleProposalWarning { Code = "runtime-enforcement-dependent", Field = "runEnvironment", Severity = "warning", Message = "Runtime enforcement depends on the runner." }],
+            BaseRole = ProposalBase, Receipt = ProposalReceipt, DecidedBy = Subject, DecidedAt = T, Comment = "Reviewed" },
+        new ProposeRoleInput { Operation = RoleProposalOperation.Create, Definition = ProposalDefinition, Rationale = "Need a reviewer", IdempotencyKey = "retry-example" },
+        new GetRoleProposalInput { ProposalId = "rpr_example" },
+        new WaitRoleProposalInput { ProposalId = "rpr_example", TimeoutSeconds = 10 },
         new RoleJoinRequest
         {
             RequestId = "rjr_01jcz7m2v1g3x4y5z6a7b8c9dj", Role = "developer", AgentId = Agt, MachineId = Mch, RequestedBy = Subject,
@@ -459,7 +477,7 @@ internal static class ContractSamples
         new UploadLinkRequest { Target = RoleTo, Name = "due-dates.bundle", Format = AttachmentFormat.GitBundle, SizeBytes = 20_971_520, Sha256 = Sha, ThreadId = Thr, Encryption = Enc },
         new UploadLink { AttachmentId = Att, Url = "https://127.0.0.1:10000/devstoreaccount1/attachments/w101/att?sig=w", ExpiresAt = T.AddMinutes(10), MaxBytes = 104_857_600 },
         AttachSpec,
-        new McpError { Code = McpErrorCodes.LimitReached, Message = "Project budget reached.", Retryable = true, RetryAfterSeconds = 60, Field = "projectId" },
+        new McpError { Code = McpErrorCodes.LimitReached, Message = "Project budget reached.", Retryable = true, RetryAfterSeconds = 60, Field = "projectId", ProposalId = "rpr_example", Status = RoleProposalStatus.Pending, CurrentRevision = Sha },
         Sealed,
         Send,
         Sent,
@@ -523,7 +541,8 @@ internal static class ContractSamples
             ApprovalId = "apr_01jcz7m2v1g3x4y5z6a7b8c9dn", Status = ApprovalState.Approved, Title = "Drop the archived_tasks table", Approvers = ["Ada"],
             ExpiresAt = T.AddHours(1), DecidedBy = "Ada", DecidedAt = T.AddMinutes(5), Comment = "After the backup.", RequestDigest = "ab12", TimedOut = true,
         },
-        new MessageBus.Contracts.Http.ServerCapabilitiesResponse { Product = "messagebus.ai", Capabilities = ["approvalAffectedV1", "settleAttemptV1"] },
+        new MessageBus.Contracts.Http.ServerCapabilitiesResponse { Product = "messagebus.ai", Capabilities = ["approvalAffectedV1", "settleAttemptV1", "roleProposalsV1"],
+            RoleProposals = new RoleProposalsCapability { Version = 1, BaselineVersion = "role-proposal-readonly-v1", NormalizerVersion = "role-definition-v1" } },
     }.ToDictionary(o => o.GetType());
 
 
@@ -549,6 +568,23 @@ internal static class ContractSamples
     };
 
 
+
+    private static RoleDefinitionV1 ProposalDefinition => new() { Name = Role.Name, DisplayName = Role.DisplayName, Description = Role.Description,
+        Delivery = DeliverySettings, RequiredCapabilities = ["tool:dotnet"], Limits = Limits, AlertRules = [Alert], Access = Role.Access,
+        RunEnvironment = new RoleProposalRunEnvironment
+        {
+            CodexOnWindows = RunEnv.CodexOnWindows, KeepAgentTools = RunEnv.KeepAgentTools, Checkout = RunEnv.Checkout,
+            SetupCommand = RunEnv.SetupCommand, TimeoutSeconds = RunEnv.TimeoutSeconds, Logs = RunEnv.Logs,
+            PermissionProfile = new RoleProposalPermissionProfile
+            {
+                Name = Profile.Name, AllowedTools = Profile.AllowedTools, Network = Profile.Network, AllowedHosts = Profile.AllowedHosts,
+                CanEditFiles = Profile.CanEditFiles, CanRunCommands = Profile.CanRunCommands, CanPush = Profile.CanPush, CanRunTests = Profile.CanRunTests,
+            },
+            Models = new RoleProposalModels { Defaults = RunEnv.Models.Defaults, Allowed = RunEnv.Models.Allowed },
+        }, Instructions = "Review changes." };
+    private static RoleProposalBaseRole ProposalBase => new() { Generation = "gen_original", Etag = "etag_original" };
+    private static RoleProposalReceipt ProposalReceipt => new() { ProposalId = "rpr_example", Role = "developer", Generation = "gen_original", Version = 4,
+        FinalDigest = Sha, ContentSha256 = Sha, ApprovedBy = Subject, AppliedAt = T };
 
     private static DeviceProof DeviceProofSample => new() { Certificate = "MIIDXTCCAkWgAwIBAgI=", SignedAt = 1_794_000_000, Signature = "c2lnbmF0dXJl" };
 

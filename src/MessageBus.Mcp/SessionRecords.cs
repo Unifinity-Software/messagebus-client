@@ -19,6 +19,15 @@ public sealed record SessionRecord
     /// <summary>Its workspace.</summary>
     public required string WorkspaceId { get; init; }
 
+    /// <summary>Immutable original host authority; legacy records remain Unknown.</summary>
+    public ProposalAuthority OriginAuthority { get; init; }
+
+    /// <summary>Random immutable local record id, assigned once when the inbox is opened.</summary>
+    public string? CoordinatorRecordId { get; init; }
+
+    /// <summary>The enrolled machine that opened this record.</summary>
+    public string? MachineId { get; init; }
+
     /// <summary>The agent it belongs to (<c>agt_…</c>), as the service recorded it.</summary>
     public string? AgentId { get; init; }
 
@@ -42,6 +51,12 @@ public sealed record SessionRecord
 
     /// <summary>Keep this inbox for explicit coordination recovery, even after it expires.</summary>
     public bool CoordinationRecovery { get; init; }
+
+    /// <summary>Retain original proposal provenance independently of inbox expiry and host lifetime.</summary>
+    public bool RoleProposalProvenance { get; init; }
+
+    /// <summary>Opaque CLI retry binding keys, saved before sending a proposal.</summary>
+    public IReadOnlyList<string> RoleProposalRetryKeys { get; init; } = [];
 
     /// <summary>The local MCP host, including when a runner owns the session.</summary>
     public int? HostProcessId { get; init; }
@@ -103,6 +118,19 @@ public sealed class SessionRecords(string configDirectory)
     /// <summary>The record for an inbox, or null.</summary>
     public SessionRecord? Find(string inboxId) => IsSafeId(inboxId) ? Read(PathOf(inboxId)) : null;
 
+    /// <summary>Finds the original interactive CLI proposal record for an opaque retry binding, refusing ambiguous matches.</summary>
+    public SessionRecord? ForRoleProposalRetry(string workspaceId, string machineId, string retryKey)
+    {
+        var matches = All().Where(r => r.WorkspaceId == workspaceId && r.MachineId == machineId
+            && r.RoleProposalProvenance && r.RoleProposalRetryKeys.Contains(retryKey, StringComparer.Ordinal)).ToList();
+        return matches.Count switch
+        {
+            0 => null,
+            1 => matches[0],
+            _ => throw new InvalidOperationException("Multiple original coordinator records match this proposal retry; give --inbox explicitly."),
+        };
+    }
+
     /// <summary>The newest record of an open inbox for this agent session, or null.</summary>
     public SessionRecord? ForSession(string workspaceId, string agentKind, string sessionId, DateTimeOffset now) =>
         All().Where(r => r.WorkspaceId == workspaceId && r.AgentKind == agentKind && r.SessionId == sessionId && r.ExpiresAt > now)
@@ -117,9 +145,25 @@ public sealed class SessionRecords(string configDirectory)
             if (OperatingSystem.IsWindows()) System.IO.Directory.CreateDirectory(Directory);
             else System.IO.Directory.CreateDirectory(Directory, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
         }
+        var original = Find(record.InboxId);
+        if (original is not null &&
+            (original.OriginAuthority != record.OriginAuthority || original.CoordinatorRecordId != record.CoordinatorRecordId
+             || original.MachineId != record.MachineId || original.WorkspaceId != record.WorkspaceId
+             || original.AgentId != record.AgentId || original.AgentKind != record.AgentKind
+             || original.SessionId != record.SessionId || original.Folder != record.Folder))
+            throw new InvalidOperationException("An inbox record's original identity and authority cannot change.");
+        // A later maintenance write from an older in-memory copy must not discard durable provenance.
+        record = record with
+        {
+            RoleProposalProvenance = record.RoleProposalProvenance || original?.RoleProposalProvenance == true,
+            RoleProposalRetryKeys = [.. (original?.RoleProposalRetryKeys ?? []).Concat(record.RoleProposalRetryKeys).Distinct(StringComparer.Ordinal)],
+        };
         var json = new JsonObject
         {
             ["inboxId"] = record.InboxId,
+            ["originAuthority"] = record.OriginAuthority.ToString(),
+            ["coordinatorRecordId"] = record.CoordinatorRecordId,
+            ["machineId"] = record.MachineId,
             ["workspaceId"] = record.WorkspaceId,
             ["agentId"] = record.AgentId,
             ["agentKind"] = record.AgentKind,
@@ -129,6 +173,8 @@ public sealed class SessionRecords(string configDirectory)
             ["processStartedAt"] = record.ProcessStartedAt,
             ["runDeliveryId"] = record.RunDeliveryId,
             ["coordinationRecovery"] = record.CoordinationRecovery,
+            ["roleProposalProvenance"] = record.RoleProposalProvenance,
+            ["roleProposalRetryKeys"] = new JsonArray([.. record.RoleProposalRetryKeys.Select(s => (JsonNode)s)]),
             ["hostProcessId"] = record.HostProcessId,
             ["hostProcessStartedAt"] = record.HostProcessStartedAt,
             ["createdAt"] = record.CreatedAt,
@@ -160,13 +206,13 @@ public sealed class SessionRecords(string configDirectory)
     }
 
     /// <summary>
-    /// Removes closed inbox records, retaining live hosts and explicit coordination recovery. A runner's
+    /// Removes closed inbox records, retaining live hosts, proposal provenance and explicit coordination recovery. A runner's
     /// tools connection ending does not end its run, so retain its records until the host process exits.
     /// </summary>
     public void Prune(DateTimeOffset now, string? protectedInboxId = null)
     {
         foreach (var record in All().Where(r => r.ExpiresAt <= now && r.InboxId != protectedInboxId
-            && !r.CoordinationRecovery && !r.ProcessRunning() && !r.HostRunning()
+            && !r.CoordinationRecovery && !r.RoleProposalProvenance && !r.ProcessRunning() && !r.HostRunning()
             // Older runner records have no host metadata: conservatively retain their resume state.
             && !(r.RunDeliveryId is not null && r.HostProcessId is null)))
         {
@@ -209,10 +255,15 @@ public sealed class SessionRecords(string configDirectory)
             return new SessionRecord
             {
                 InboxId = inbox, WorkspaceId = ws, Folder = folder, ExpiresAt = expires,
+                OriginAuthority = Enum.TryParse<ProposalAuthority>(Text(o, "originAuthority"), out var origin) && Enum.IsDefined(origin) ? origin : ProposalAuthority.Unknown,
+                CoordinatorRecordId = Text(o, "coordinatorRecordId"), MachineId = Text(o, "machineId"),
                 AgentId = Text(o, "agentId"), AgentKind = Text(o, "agentKind"), SessionId = Text(o, "sessionId"),
                 ProcessId = o["processId"] is JsonValue p && p.TryGetValue<int>(out var pid) ? pid : null,
                 ProcessStartedAt = Time(o, "processStartedAt"), RunDeliveryId = Text(o, "runDeliveryId"),
                 CoordinationRecovery = o["coordinationRecovery"] is JsonValue recovery && recovery.TryGetValue<bool>(out var keep) && keep,
+                RoleProposalProvenance = o["roleProposalProvenance"] is JsonValue proposal && proposal.TryGetValue<bool>(out var retain) && retain,
+                RoleProposalRetryKeys = o["roleProposalRetryKeys"] is JsonArray retries
+                    ? [.. retries.Select(s => s is JsonValue v && v.TryGetValue<string>(out var key) ? key : null).OfType<string>()] : [],
                 HostProcessId = o["hostProcessId"] is JsonValue host && host.TryGetValue<int>(out var hostPid) ? hostPid : null,
                 HostProcessStartedAt = Time(o, "hostProcessStartedAt"),
                 CreatedAt = Time(o, "createdAt") ?? expires,

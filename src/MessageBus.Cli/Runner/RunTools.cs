@@ -18,6 +18,9 @@ public sealed record RunToolsRequest(RunWorkspace Workspace, TaskDelivery Delive
     /// <summary>The session the run resumes for a reply to its inbox (the original issue), or null.</summary>
     public MessageBus.Mcp.SessionRecord? Session { get; init; }
 
+    /// <summary>Origin verified by the runner, never inferred from the role's permission profile.</summary>
+    public MessageBus.Mcp.ProposalAuthority ProposalAuthority { get; init; } = MessageBus.Mcp.ProposalAuthority.Worker;
+
     /// <summary>Reports the last non-retryable mbus refusal without trusting files the agent can rewrite.</summary>
     public Action<string, MessageBus.Contracts.Mcp.McpError>? Refused { get; init; }
 
@@ -67,6 +70,36 @@ public static class RunToolsVariables
 /// <param name="log">Runner log.</param>
 public sealed class PipeRunTools(Func<RunToolsRequest, Stream, CancellationToken, Task> serve, TextWriter log) : IRunTools
 {
+    /// <summary>Calls the runner's authenticated tools pipe from a CLI command inside a run, without machine credentials.</summary>
+    public static async Task<MessageBus.Mcp.ScriptResult> CallAsync(string file, string tool, JsonObject arguments, CancellationToken ct)
+    {
+        var json = JsonNode.Parse(await System.IO.File.ReadAllTextAsync(file, ct).ConfigureAwait(false));
+        var pipe = (string?)json?["pipe"] ?? throw new JsonException("The run's tools file has no pipe.");
+        var token = (string?)json?["token"] ?? throw new JsonException("The run's tools file has no credential.");
+        await using var stream = new NamedPipeClientStream(".", pipe, PipeDirection.InOut, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+        await stream.ConnectAsync(TimeSpan.FromSeconds(10), ct).ConfigureAwait(false);
+        await stream.WriteAsync(Encoding.ASCII.GetBytes($"{Greeting} {token}\n"), ct).ConfigureAwait(false);
+        await stream.FlushAsync(ct).ConfigureAwait(false);
+        var answer = await ReadLineAsync(stream, 64, ct).ConfigureAwait(false);
+        if (answer is null || !answer.AsSpan().SequenceEqual("ok"u8))
+            throw new UnauthorizedAccessException("The runner refused this run's tools credential.");
+        await using var client = await ModelContextProtocol.Client.McpClient.CreateAsync(
+            new ModelContextProtocol.Protocol.StreamClientTransport(stream, stream),
+            new ModelContextProtocol.Client.McpClientOptions
+            {
+                ClientInfo = new ModelContextProtocol.Protocol.Implementation { Name = MessageBus.Mcp.ScriptSession.ClientName, Version = Cli.Hosting.CliHost.Version },
+            }, cancellationToken: ct).ConfigureAwait(false);
+        using var doc = JsonDocument.Parse(arguments.ToJsonString());
+        var args = doc.RootElement.EnumerateObject().ToDictionary(p => p.Name, p => p.Value.Clone(), StringComparer.Ordinal);
+        var result = await client.CallToolAsync(new ModelContextProtocol.Protocol.CallToolRequestParams { Name = tool, Arguments = args }, ct).ConfigureAwait(false);
+        var value = result.StructuredContent?.Clone()
+            ?? JsonDocument.Parse(result.Content.OfType<ModelContextProtocol.Protocol.TextContentBlock>().FirstOrDefault()?.Text ?? "{}").RootElement.Clone();
+        return new MessageBus.Mcp.ScriptResult(value, result.IsError == true
+            ? MessageBus.Contracts.Json.MessageBusJson.Deserialize<MessageBus.Contracts.Mcp.McpError>(value.GetRawText())
+                ?? new MessageBus.Contracts.Mcp.McpError { Code = "internal", Message = "The runner returned an invalid error." }
+            : null);
+    }
+
     /// <summary>What the connecting side sends first: this, a space, the credential and a newline.</summary>
     public const string Greeting = "MBUS-RUN";
 

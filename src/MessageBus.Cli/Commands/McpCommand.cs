@@ -24,6 +24,12 @@ internal static class McpCommand
                 return await Runner.PipeRunTools.RelayAsync(runTools, host.OpenStandardInput(), host.OpenStandardOutput(), host.Error, ct);
             }
 
+            if (MessageBus.Mcp.LocalServer.HasRunMarkers(host.GetEnvironmentVariable))
+            {
+                await host.Error.WriteLineAsync("mbus mcp: this run has no tools pipe; direct machine authentication is refused.");
+                return 1;
+            }
+
             var context = CommandContext.Load(host, parse, options);
             var settings = context.Settings;
             if (settings.Server is not { } server || !settings.CanAuthenticate(context.Store))

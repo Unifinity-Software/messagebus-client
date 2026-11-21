@@ -1,3 +1,5 @@
+using MessageBus.Contracts.Roles;
+
 namespace MessageBus.Cli.Server;
 
 /// <summary><c>GET /api/server</c> (answered by the hosted service): what a server URL points at.</summary>
@@ -15,6 +17,9 @@ public sealed record ServerInfoResponse
     /// <summary>How people sign in.</summary>
     public ServerSignIn? SignIn { get; init; }
 
+    /// <summary>Optional feature protocols; absence keeps existing operations compatible.</summary>
+    public ServerCapabilities? Capabilities { get; init; }
+
     /// <summary>The product name every messagebus.ai server reports.</summary>
     public const string ProductName = "messagebus.ai";
 }
@@ -29,4 +34,11 @@ public sealed record ServerSignIn
     /// The dashboard page where the person approves <c>mbus login</c> (the original issue); mbus adds <c>?code=…</c>.
     /// </summary>
     public string? CliApprovalUrl { get; init; }
+}
+
+/// <summary>Optional server protocols, independent of the product version.</summary>
+public sealed record ServerCapabilities
+{
+    /// <summary>Role proposal protocol, present only when the complete implementation is enabled.</summary>
+    public RoleProposalsCapability? RoleProposals { get; init; }
 }
