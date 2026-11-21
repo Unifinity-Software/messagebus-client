@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Globalization;
 using System.Net;
 using System.Net.Security;
@@ -22,6 +23,11 @@ internal sealed class IsolatedHttpsServer : IAsyncDisposable
 
     private readonly TcpListener _listener = new(IPAddress.Loopback, 0);
     private readonly CancellationTokenSource _stop;
+    private readonly CancellationTokenRegistration _stopTrace;
+    private readonly ITestOutputHelper _output;
+    private readonly Stopwatch _elapsed = Stopwatch.StartNew();
+    private readonly ConcurrentDictionary<int, string> _phases = new();
+    private int _nextConnection;
     private readonly X509Certificate2 _root;
     private readonly X509Certificate2 _leaf;
     private readonly Task _serving;
@@ -37,17 +43,22 @@ internal sealed class IsolatedHttpsServer : IAsyncDisposable
     internal string Discovery => Stripped ? """{"product":"messagebus.ai","signIn":{"microsoft":true}}"""
         : $$$$"""{"product":"messagebus.ai","stamp":{"stampId":"eu","geography":"eu","azureRegion":"westeurope","url":"{{{{Origin}}}}","aliases":[]},"signIn":{"authority":{"version":1,"stampId":"eu","issuer":"{{{{Origin}}}}","audience":"{{{{Origin}}}}"},"machineSignature":{"version":2,"required":true}}}""";
 
-    internal IsolatedHttpsServer(CancellationToken ct)
+    internal IsolatedHttpsServer(CancellationToken ct, ITestOutputHelper output)
     {
+        _output = output;
         _stop = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        _stopTrace = _stop.Token.Register(() => Trace("stop requested; active: " +
+            string.Join(", ", _phases.OrderBy(p => p.Key).Select(p => $"{p.Key}={p.Value}"))));
         // Wall-clock timeout is a deadlock guard only; tests advance a fake clock for backoff.
         _stop.CancelAfter(TimeSpan.FromSeconds(20));
+        Trace("creating root RSA key and certificate");
         using var caKey = RSA.Create(2048);
         var ca = new CertificateRequest("CN=Fixture private root", caKey, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
         ca.CertificateExtensions.Add(new X509BasicConstraintsExtension(true, false, 0, true));
         ca.CertificateExtensions.Add(new X509KeyUsageExtension(X509KeyUsageFlags.KeyCertSign, true));
         var now = DateTimeOffset.UtcNow;
         _root = ca.CreateSelfSigned(now.AddDays(-1), now.AddDays(1));
+        Trace("creating leaf RSA key and certificate");
         using var leafKey = RSA.Create(2048);
         var leaf = new CertificateRequest("CN=localhost", leafKey, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
         var san = new SubjectAlternativeNameBuilder();
@@ -60,19 +71,32 @@ internal sealed class IsolatedHttpsServer : IAsyncDisposable
         using var withKey = issued.CopyWithPrivateKey(leafKey);
         try
         {
+            Trace("importing server certificate");
             _leaf = ServerCertificate(withKey);
             _listener.Start();
             Origin = $"https://localhost:{((IPEndPoint)_listener.LocalEndpoint).Port}";
             _serving = AcceptAsync();
+            Trace("listener ready");
         }
         catch
         {
             _listener.Stop();
             _leaf?.Dispose();
             _root.Dispose();
+            _stopTrace.Dispose();
             _stop.Dispose();
             throw;
         }
+    }
+
+    // Only fixture phases and credential-free method/path metadata: never headers, bodies or signed queries.
+    internal void Trace(string phase) => _output.WriteLine(
+        $"HTTPS fixture +{_elapsed.Elapsed.TotalMilliseconds:F0}ms: {phase}; HTTP requests={Requests.Count}");
+
+    private void Phase(int connection, string phase)
+    {
+        _phases[connection] = phase;
+        Trace($"connection {connection}: {phase}");
     }
 
     private static X509Certificate2 ServerCertificate(X509Certificate2 certificate)
@@ -113,7 +137,7 @@ internal sealed class IsolatedHttpsServer : IAsyncDisposable
             {
                 var socket = await _listener.AcceptTcpClientAsync(_stop.Token);
                 _sockets.TryAdd(socket, 0);
-                _connections.Enqueue(ServeAsync(socket));
+                _connections.Enqueue(ServeAsync(socket, Interlocked.Increment(ref _nextConnection)));
             }
         }
         catch (OperationCanceledException) when (_stop.IsCancellationRequested) { }
@@ -121,7 +145,18 @@ internal sealed class IsolatedHttpsServer : IAsyncDisposable
         catch (ObjectDisposedException) when (_stop.IsCancellationRequested) { }
     }
 
-    private async Task ServeAsync(TcpClient socket)
+    private async Task ServeAsync(TcpClient socket, int connection)
+    {
+        try { await ServeConnectionAsync(socket, connection); }
+        finally
+        {
+            _sockets.TryRemove(socket, out _);
+            _phases.TryRemove(connection, out _);
+            Trace($"connection {connection} closed");
+        }
+    }
+
+    private async Task ServeConnectionAsync(TcpClient socket, int connection)
     {
         using (socket)
         await using (var stream = new SslStream(socket.GetStream(), leaveInnerStreamOpen: false))
@@ -129,16 +164,19 @@ internal sealed class IsolatedHttpsServer : IAsyncDisposable
             var receivedHttp = false;
             try
             {
+                Phase(connection, "TLS handshake");
                 await stream.AuthenticateAsServerAsync(new SslServerAuthenticationOptions
                 {
                     ServerCertificate = _leaf,
                     ApplicationProtocols = [SslApplicationProtocol.Http11],
                 }, _stop.Token);
-                var request = await ReadAsync(stream, _stop.Token);
+                Phase(connection, "reading HTTP headers");
+                var request = await ReadAsync(stream, connection, _stop.Token);
                 if (request is null) return; // A client rejecting trust/name may close immediately after TLS.
                 receivedHttp = true;
                 Assert.Equal(new Uri(Origin).Authority, request.Header("Host"));
                 Requests.Enqueue(request);
+                Phase(connection, "responding to " + request.Method + " " + request.RawTarget.Split('?')[0]);
                 if (request.RawTarget == "/gateway%20scope/api/server")
                 {
                     AssertCredentialFree(request);
@@ -152,11 +190,16 @@ internal sealed class IsolatedHttpsServer : IAsyncDisposable
             catch (OperationCanceledException) when (_stop.IsCancellationRequested) { }
             catch (IOException) when (_stop.IsCancellationRequested) { }
             catch (ObjectDisposedException) when (_stop.IsCancellationRequested) { }
-            finally { _sockets.TryRemove(socket, out _); }
+            catch (Exception ex)
+            {
+                Trace($"connection {connection} failed during {_phases[connection]}: {ex.GetType().Name}");
+                throw;
+            }
+            finally { Phase(connection, "disposing TLS stream"); }
         }
     }
 
-    private static async Task<Request?> ReadAsync(Stream stream, CancellationToken ct)
+    private async Task<Request?> ReadAsync(Stream stream, int connection, CancellationToken ct)
     {
         // Do not buffer beyond the headers: the remaining bytes may belong to a WebSocket.
         var bytes = new List<byte>();
@@ -181,6 +224,7 @@ internal sealed class IsolatedHttpsServer : IAsyncDisposable
         var length = headers.TryGetValue("Content-Length", out var text) ? int.Parse(text, CultureInfo.InvariantCulture) : 0;
         Assert.InRange(length, 0, 1024 * 1024);
         var body = new byte[length];
+        Phase(connection, $"reading HTTP body ({length} bytes)");
         await stream.ReadExactlyAsync(body, ct);
         return new(first[0], first[1], headers, body);
     }
@@ -215,14 +259,25 @@ internal sealed class IsolatedHttpsServer : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
-        await _stop.CancelAsync();
+        Trace("stopping fixture");
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var cancelling = _stop.CancelAsync();
         _listener.Stop();
         try
         {
-            await _serving;
+            Trace("joining cancellation and accept loop");
+            await Task.WhenAll(cancelling, _serving).WaitAsync(deadline.Token);
             foreach (var socket in _sockets.Keys) socket.Dispose();
-            await Task.WhenAll(_connections).WaitAsync(TimeSpan.FromSeconds(5));
+            Trace("joining TLS connections");
+            await Task.WhenAll(_connections).WaitAsync(deadline.Token);
         }
-        finally { _leaf.Dispose(); _root.Dispose(); _stop.Dispose(); }
+        finally
+        {
+            // Also close owned sockets if cancellation or the accept loop exceeded the shared deadline.
+            foreach (var socket in _sockets.Keys) socket.Dispose();
+            Trace("disposing certificates");
+            _leaf.Dispose(); _root.Dispose(); _stopTrace.Dispose(); _stop.Dispose();
+            Trace("fixture disposed");
+        }
     }
 }

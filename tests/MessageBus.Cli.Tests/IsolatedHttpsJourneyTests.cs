@@ -23,7 +23,7 @@ using Xunit;
 
 namespace MessageBus.Cli.Tests;
 
-public sealed class IsolatedHttpsJourneyTests
+public sealed class IsolatedHttpsJourneyTests(ITestOutputHelper testOutput)
 {
     private const string MachineId = "mch_00000000000000000000000000";
     [Theory(Timeout = 30_000)]
@@ -32,7 +32,8 @@ public sealed class IsolatedHttpsJourneyTests
     public async Task Real_TLS_factory_transfers_ciphertext_then_refuses_stripping_after_link(bool environment)
     {
         var Ct = TestContext.Current.CancellationToken;
-        await using var server = new IsolatedHttpsServer(Ct);
+        await using var server = new IsolatedHttpsServer(Ct, testOutput);
+        server.Trace("creating machine profile and signing key");
         using var machine = new TestMachine();
         using var signingKey = MachineKey.Create();
         var store = Profile(machine, server, signingKey);
@@ -41,11 +42,13 @@ public sealed class IsolatedHttpsJourneyTests
         machine.Env[EnvVars.Home] = machine.MbusFolder;
         machine.Env[RunnerEnvVars.Workspace] = "ws_fixture";
         var host = Host(machine, server);
+        server.Trace(environment ? "creating API-key client" : "loading machine signer and creating API client");
         using var api = environment
             ? new EnvironmentRunnerHostContext(n => machine.Env.GetValueOrDefault(n), machine.Home, server.Handler).CreateServiceClient()
             : ServerConnection.CreateAuthenticatedClient(host, new CliSettings
             { Stored = store.Load(), Server = new Uri(server.Selected), MachineName = "fixture" }, store, "cli");
         Assert.Equal(server.Selected + "/", api.BaseAddress!.AbsoluteUri);
+        server.Trace("creating transfer client and encryption keys");
         // This calls the production factory's real SocketsHttpHandler path, with only its private root replaced.
         using var links = AttachmentTransfers.CreateHttpClient(() => new WebProxy(), server.ChainPolicy());
         using var recipientKey = KeyPair.GenerateP256();
@@ -90,29 +93,34 @@ public sealed class IsolatedHttpsJourneyTests
         };
 
         using var plaintext = new MemoryStream("private fixture plaintext"u8.ToArray());
+        server.Trace("uploading ciphertext");
         var reference = await attachments.UploadAsync(plaintext, upload, recipient, Ct);
+        server.Trace("upload complete");
         Assert.NotEmpty(ciphertext);
         Assert.NotEqual(plaintext.ToArray(), ciphertext);
         Assert.Equal(ciphertext.LongLength, reference.SizeBytes);
         Assert.Equal(Convert.ToHexStringLower(SHA256.HashData(ciphertext)), reference.Sha256);
         Assert.NotNull(reference.Encryption);
         using var output = new MemoryStream();
+        server.Trace("downloading ciphertext");
         await attachments.DownloadAsync(reference, new DownloadLink
         { Id = reference.Id, Url = link, ExpiresAt = DateTimeOffset.MaxValue }, output, ring, Ct);
         Assert.Equal(plaintext.ToArray(), output.ToArray());
+        server.Trace("download complete; uploading with stripped discovery");
         using var refusedPlaintext = new MemoryStream("refused fixture plaintext"u8.ToArray());
         await Assert.ThrowsAsync<AttachmentTransferException>(() => attachments.UploadAsync(refusedPlaintext, upload, recipient, Ct));
         Assert.Equal(2, issued);
         Assert.Equal(new[] { "PUT", "GET" }, transfers.Select(r => r.Method));
         Assert.Equal(5, server.Requests.Count(r => r.RawTarget.EndsWith("/api/server", StringComparison.Ordinal)));
         Assert.True(File.Exists(store.ServerBindingsPath));
+        server.Trace("attachment assertions complete");
     }
 
     [Fact(Timeout = 30_000)]
     public async Task Real_WSS_reconnect_rediscovers_and_signs_each_upgrade_then_refuses_stripping()
     {
         var Ct = TestContext.Current.CancellationToken;
-        await using var server = new IsolatedHttpsServer(Ct);
+        await using var server = new IsolatedHttpsServer(Ct, testOutput);
         using var machine = new TestMachine();
         using var key = MachineKey.Create();
         var store = Profile(machine, server, key);
@@ -175,7 +183,7 @@ public sealed class IsolatedHttpsJourneyTests
     public async Task Safe_factory_reaches_private_root_HTTPS_through_real_credential_free_CONNECT()
     {
         var ct = TestContext.Current.CancellationToken;
-        await using var server = new IsolatedHttpsServer(ct);
+        await using var server = new IsolatedHttpsServer(ct, testOutput);
         await using var proxy = new FixtureConnectProxy(new Uri(server.Origin), ct);
         using var links = AttachmentTransfers.CreateHttpClient(() => new WebProxy(proxy.Address)
         {
@@ -196,7 +204,7 @@ public sealed class IsolatedHttpsJourneyTests
     public async Task Private_root_seam_still_rejects_untrusted_chain_and_wrong_hostname(bool wrongHostname)
     {
         var Ct = TestContext.Current.CancellationToken;
-        await using var server = new IsolatedHttpsServer(Ct);
+        await using var server = new IsolatedHttpsServer(Ct, testOutput);
         server.ExpectTlsRejection = true;
         using var links = AttachmentTransfers.CreateHttpClient(() => new WebProxy(), server.ChainPolicy(trustRoot: wrongHostname));
         var destination = wrongHostname ? server.Origin.Replace("localhost", "127.0.0.1", StringComparison.Ordinal) : server.Origin;
