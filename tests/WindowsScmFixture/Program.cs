@@ -141,7 +141,8 @@ internal static class WindowsScmFixture
             return DotnetToolUpdater.RunCommand(command, args, timeout, environment);
 
         Require(DotnetToolInstall.SamePath(command, paths.Dotnet)
-            && args is ["tool", "update", "--tool-path", var tools, DotnetToolInstall.PackageId, "--version", Candidate, "--configfile", var config]
+            && args is ["tool", "update", "--tool-path", var tools, var packageId, "--version", Candidate, "--configfile", var config]
+            && string.Equals(packageId, DotnetToolInstall.PackageId, StringComparison.OrdinalIgnoreCase)
             && DotnetToolInstall.SamePath(tools, paths.WorkerTools)
             && DotnetToolInstall.SamePath(config, Path.Combine(paths.Settings, "update", "NuGet.Config"))
             && File.ReadAllText(config) == DotnetToolUpdater.NuGetConfig(DotnetToolUpdater.NuGetOrg, requireSignature: true),
