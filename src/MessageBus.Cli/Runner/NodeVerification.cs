@@ -14,6 +14,8 @@ internal sealed class NodeVerification(string remote, IVerificationProcess proce
     internal const string RemoteVariable = "MBUS_RUNNER_VERIFICATION_REMOTE";
     internal const string Branch = "mbus-verified";
     private const string BranchRef = "refs/heads/" + Branch;
+    internal INodeVerificationReadiness? Readiness { get; init; }
+    internal bool IsReady => Readiness?.IsReady == true;
     private static readonly TimeSpan FetchTimeout = TimeSpan.FromMinutes(3);
     private static readonly TimeSpan NpmTimeout = TimeSpan.FromMinutes(5);
     private static readonly string[] NpmOptions =
@@ -24,9 +26,15 @@ internal sealed class NodeVerification(string remote, IVerificationProcess proce
     ];
 
     internal static async Task<NodeVerification?> EnrollAsync(Func<string, string?> settings, bool linuxAgentIsolation,
-        bool canReturnCommits, TimeProvider time, TextWriter log, IRepoCredentialSource credentials, string privateRoot, CancellationToken ct)
+        bool canReturnCommits, TimeProvider time, TextWriter log, IRepoCredentialSource credentials, string privateRoot, CancellationToken ct,
+        INodeVerificationReadiness? readiness = null)
     {
         if (settings(EnrollmentVariable) is not { Length: > 0 } enrollment) return null;
+        if (readiness?.IsReady != true)
+        {
+            await log.WriteLineAsync("Isolated Node verification is unavailable: shared protected-execution readiness is unsupported or unready.").ConfigureAwait(false);
+            return null;
+        }
         var approvedRemote = settings(RemoteVariable);
         var process = new VerificationProcess(time);
         try
@@ -35,7 +43,7 @@ internal sealed class NodeVerification(string remote, IVerificationProcess proce
                 && await process.ProbeAsync(ct).ConfigureAwait(false))
             {
                 await log.WriteLineAsync("Isolated Node verification is enrolled.").ConfigureAwait(false);
-                return new NodeVerification(approvedRemote!, process, credentials, privateRoot, time);
+                return new NodeVerification(approvedRemote!, process, credentials, privateRoot, time) { Readiness = readiness };
             }
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
@@ -48,6 +56,7 @@ internal sealed class NodeVerification(string remote, IVerificationProcess proce
 
     internal string? Refusal(TaskDelivery delivery)
     {
+        if (!IsReady) return "Shared protected-execution readiness is unsupported, unready or no longer current.";
         if (delivery.Verification is not { } snapshot || delivery.Envelope.Verification is not { } request
             || snapshot.Recipe != Recipe || snapshot.Remote != remote || string.IsNullOrWhiteSpace(snapshot.Repository)
             || string.IsNullOrWhiteSpace(snapshot.Environment) || string.IsNullOrWhiteSpace(snapshot.Version)

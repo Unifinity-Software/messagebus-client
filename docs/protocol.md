@@ -233,10 +233,16 @@ authenticated `/environments` registry (without a repository filter) and require
 the particular verified handler. A listed tool alone never authorizes dispatch. A missing,
 disabled, malformed or unsupported registry, or a missing handler, refuses the whole request
 without creating ordinary children. Ordinary sends do not make these negotiation requests.
-`McpToolCatalog.Tools(local: false)` omits verified tools by default. A service with their handlers
-installed explicitly uses the additive overload with `includeVerified: true`; the original
-two-parameter signature remains available. Local `send` and `send_many` retain the verification
-request schema and route negotiated requests to the service-only tools.
+`McpToolCatalog.Tools(local: false)` omits verified tools and optional verification request schemas
+by default. A service with their handlers installed explicitly uses
+`Tools(bool local, IReadOnlySet<string>? only, McpCatalogFeatures features)` with
+`McpCatalogFeatures.VerifiedTasks`. The original two-parameter signature and all constructor
+signatures remain available. The flags in `MessageBus.Contracts.Mcp` are `None = 0`,
+`VerifiedTasks = 1`, `Retarget = 2`, and `RoleProposals = 4`; the latter two reserve integration
+values and do not enable additional tools here. Name filtering cannot enable an unsupported
+feature. Local `send` and `send_many` retain the supported verification request schema and route
+negotiated requests to the service-only tools, which remain hidden locally. Catalog visibility
+never replaces the live registry/handler preflight or service authorization.
 
 The service persists the normalized request as `MessageEnvelope.verification`, including on the
 root message used by local retry. Retry sends it again with `sourceThreadId`. The service must
@@ -254,7 +260,12 @@ the required execution boundary declines before checkout with `verification-unav
 service records the blocked reason independently of ordinary task completion.
 
 Eligible runners report `verification:node-npm-ci-v1` in `MachineInventory.capabilities`.
-The capability is reserved for executable preflight plus explicit local owner enrollment. The
+Runtime enrollment and capability advertising stay disabled until the shared protected-execution
+lifecycle supplies current session/generation/recipe/policy/proof-bound readiness, including
+storage bounds, authenticated receipts and cleanup proof. The internal readiness adapter defaults
+to unsupported; owner environment settings and executable/bubblewrap preflight cannot establish
+this readiness. Inventory and delivery admission re-read the adapter, so missing or invalidated
+readiness withholds the capability and refuses required deliveries before checkout. The
 service also needs to positively enroll the runner in the workspace's approved pool and match the
 delivery's pinned environment and repository. The capability alone does not attest to deployer
 egress control or authorize a delivery. [Dedicated Node verifier setup](node-verifier.md) describes

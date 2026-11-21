@@ -1,5 +1,12 @@
 # Dedicated Node verification runner
 
+Runtime enrollment and capability advertising are disabled in this candidate. The shared
+protected-execution lifecycle (#496) must first supply session/generation/recipe/policy/proof-bound
+readiness, bounded storage, authenticated receipts and verified cleanup. The internal readiness
+adapter has no production implementation and defaults to unsupported. The provisioning settings
+below are recipe inputs for that integration; setting them and passing executable preflight do
+not enable verification. No personal runner should be enrolled from this candidate.
+
 Provision a disposable Linux runner as an unprivileged user for one approved repository. The
 deployer enforces egress restrictions outside mbus. Allow the approved Git HTTPS origin and
 `registry.npmjs.org` for checkout and restore, plus the application and model endpoints needed by
@@ -26,9 +33,12 @@ Set the following values in the runner process environment.
 | `MBUS_RUNNER_ISOLATION` | `os` (the default) |
 | `MBUS_KEY_STORE` | `file` (the default on Linux) |
 
-Use the normal credential-scoped run tools and runner bundle return. The runner advertises
-`verification:node-npm-ci-v1` after the Linux agent sandbox with nesting and the separate verifier
-preflight succeed. Enroll the machine in the service's approved verification pool and assign its
+Use the normal credential-scoped run tools and runner bundle return. Once the shared lifecycle
+is integrated, advertising `verification:node-npm-ci-v1` also requires current shared readiness,
+the Linux agent sandbox with nesting and the separate verifier preflight. Inventory and delivery
+admission re-read readiness; expiry, revocation or cleanup failure must invalidate it. Shared
+per-delivery acknowledgment and child-launch enforcement remain mandatory. After that integration
+and acceptance proof, enroll the machine in the service's approved verification pool and assign its
 Node and npm versions to the environment. A dedicated verifier accepts only required Node
 verification tasks. The recorded OCI digest identifies the operator-approved image provenance.
 The runner checks that namespace preflight succeeds and that the installed Node and npm

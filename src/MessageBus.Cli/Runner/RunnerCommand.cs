@@ -73,7 +73,8 @@ public static class RunnerCommand
         var sandbox = Sandbox.RunIsolation.Create(isolation, covered);
         var verification = await NodeVerification.EnrollAsync(host.GetEnvironmentVariable,
             sandbox is Sandbox.RunIsolation { SupportsVerificationAgent: true } && parts.Tools is not null && options.KeyStore == "file",
-            parts.ReturnCommits is not null, time, covered, isolation.Credentials, isolation.WorkRoot, cancellationToken).ConfigureAwait(false);
+            parts.ReturnCommits is not null, time, covered, isolation.Credentials, isolation.WorkRoot, cancellationToken,
+            parts.VerificationReadiness).ConfigureAwait(false);
         var readiness = new Readiness.RunnerReadiness(covered, time, parts.Advice);
         var engine = new RunnerEngine(options, host, new HttpRunnerServiceClient(http), time, log,
             parts with

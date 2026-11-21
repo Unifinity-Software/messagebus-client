@@ -14,6 +14,7 @@ public sealed record RunnerExtensions
     public IBundleSource? Bundles { get; init; }
 
     internal NodeVerification? Verification { get; init; }
+    internal INodeVerificationReadiness? VerificationReadiness { get; init; }
 
     /// <summary>Wraps agent commands in a sandbox (the original issue).</summary>
     public IRunSandbox Sandbox { get; init; } = new NoSandbox();
@@ -468,8 +469,9 @@ public sealed class RunnerEngine : IAsyncDisposable
         // the original issue: the ceiling and this machine's size, for the dashboard's slot setting and its suggestion.
         inventory = inventory with
         {
-            Capabilities = _ext.Verification is null ? inventory.Capabilities
-                : [.. inventory.Capabilities, CapabilityNames.NodeVerificationV1],
+            Capabilities = _ext.Verification is { IsReady: true }
+                ? [.. inventory.Capabilities.Where(c => c != CapabilityNames.NodeVerificationV1), CapabilityNames.NodeVerificationV1]
+                : [.. inventory.Capabilities.Where(c => c != CapabilityNames.NodeVerificationV1)],
             Slots = slots,
             SlotCeiling = _ceiling,
             SlotMachineMax = _machineMax,

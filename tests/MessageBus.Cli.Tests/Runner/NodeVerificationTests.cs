@@ -22,6 +22,65 @@ public sealed class NodeVerificationTests
         """;
 
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Owner_settings_cannot_enroll_without_shared_readiness(bool adapterInstalled)
+    {
+        await using var runner = new RunnerHarness();
+        using var log = new StringWriter();
+        var verifier = await NodeVerification.EnrollAsync(
+            name => name == NodeVerification.EnrollmentVariable ? NodeVerification.Enrollment : Remote,
+            linuxAgentIsolation: true, canReturnCommits: true, runner.Time, log,
+            new FixtureCredentialSource { ExpiresAt = DateTimeOffset.UnixEpoch.AddHours(1) }, runner.WorkRoot, TestContext.Current.CancellationToken,
+            adapterInstalled ? new FixtureReadiness { IsReady = false } : null);
+        Assert.Null(verifier);
+        Assert.Contains("shared protected-execution readiness", log.ToString());
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Missing_or_revoked_readiness_withholds_capability_and_declines_delivery(bool revoke)
+    {
+        var readiness = new FixtureReadiness { IsReady = true };
+        var verifier = new NodeVerification(Remote, new VerificationProcess(TimeProvider.System))
+        {
+            Readiness = revoke ? readiness : null,
+        };
+        await using var runner = new RunnerHarness(extensions: e => e with { Verification = verifier });
+        var ct = TestContext.Current.CancellationToken;
+        var task = runner.Task("unready");
+        task = task with
+        {
+            Envelope = task.Envelope with { Verification = new() { Environment = "frontend", RequiredChecks = ["test"] } },
+            Verification = new()
+            {
+                Environment = "frontend", Recipe = NodeVerification.Recipe, Version = "1", Digest = new string('a', 64),
+                NodeVersion = "24.1.0", NpmVersion = "11.3.0", Repository = "gh:example/frontend", Remote = Remote,
+                Revision = new string('b', 40), BaseRevision = new string('c', 40), RequiredChecks = ["test"],
+            },
+        };
+        if (revoke)
+        {
+            Assert.Null(verifier.Refusal(task));
+            await runner.Engine.RescanAsync(ct);
+            Assert.Contains(CapabilityNames.NodeVerificationV1, (await runner.Service.NextInventoryAsync()).Capabilities);
+            readiness.IsReady = false;
+        }
+        await runner.Engine.RescanAsync(ct);
+        Assert.DoesNotContain(CapabilityNames.NodeVerificationV1, (await runner.Service.NextInventoryAsync()).Capabilities);
+        var decision = await runner.DeliverAsync(task);
+        Assert.False(decision.Accepted);
+        Assert.Equal(DeclineReason.VerificationUnavailable, decision.Reason);
+        Assert.False(Directory.Exists(Path.Combine(runner.WorkRoot, task.DeliveryId + "-1")));
+    }
+
+    private sealed class FixtureReadiness : INodeVerificationReadiness
+    {
+        public bool IsReady { get; set; }
+    }
+
+    [Theory]
     [InlineData("review", VerificationState.Passed)]
     [InlineData("nested-review", VerificationState.Passed)]
     [InlineData("nested-build", VerificationState.Passed)]
@@ -224,7 +283,7 @@ public sealed class NodeVerificationTests
         await using var fixtures = new RunnerHarness();
         var repo = Directory.CreateDirectory(Path.Combine(fixtures.Scratch, "repo")).FullName;
         var process = new LocalFixtureProcess(repo, fixtures.Scratch, git!, node!, npm!);
-        var verifier = new NodeVerification(Remote, process);
+        var verifier = new NodeVerification(Remote, process) { Readiness = new FixtureReadiness { IsReady = true } };
         await Git.RunAsync(repo, ["init", "--template=", "--initial-branch=main"], ct);
         File.WriteAllText(Path.Combine(repo, "package.json"), """
             {"name":"frontend","version":"1.0.0","scripts":{
