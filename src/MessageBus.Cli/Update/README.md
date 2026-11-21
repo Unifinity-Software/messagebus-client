@@ -78,6 +78,13 @@ Files under the settings folder's `update/`:
 
 ## Standalone files
 
+HTTP(S) feeds use a separate public transport without cookies, profile headers or ambient credentials. Redirects
+are refused, including same-origin redirects; configure the final feed URL. Feed URLs cannot contain userinfo,
+query or fragment. The machine's `MBUS_UPDATE_FEED` overrides the workspace mirror, which overrides the selected
+server's feed. A mirror supplies artifacts only. Release signatures and payload hashes establish release
+authenticity; the signed manifest does not identify a mirror origin, hosting geography or workspace authority.
+Code constructing `HttpReleaseSource` must use `HttpReleaseSource.CreateHttpClient()` without adding default headers.
+
 ### What it checks before replacing anything
 
 1. `manifest.json` from the release channel, and `manifest.json.sig` next to it: an ECDSA P-256 (ES256) signature of

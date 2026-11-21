@@ -387,8 +387,16 @@ legacy/custom servers retain direct HTTPS SAS links (and explicitly selected HTT
 the same separate credential-free/no-redirect client. Encryption, streaming hash/size checks and cancellation
 remain in the attachment pipeline.
 
-Remaining required work is explicit: full native verification of enrollment/checkpoint lifecycle and attachment
-factory/real transport fixtures, public signed update-feed transport and diagnostics.
+Doctor obtains a separate current anonymous observation through the shared preparation gate for diagnostics.
+It distinguishes the selected API endpoint/base path, transport origin, saved and provisioned canonical authority,
+validated authority/stamp, server-reported geography and the runner's execution-location label. Never-pinned
+legacy/custom/tunnel endpoints report hosting as unknown even when descriptive metadata names a region.
+The observation does not authorize the subsequent machine/policy/agent reads: each still prepares and consumes
+its own fresh gated send. A binding refusal reports restoration/re-enrollment advice and makes doctor not ready;
+there is no credential connectivity probe or alternate-host retry. Discovery can persist a restrictive pin.
+
+Remaining required work is explicit: full native verification of enrollment/checkpoint lifecycle, attachment
+factory/real transport fixtures and the doctor/public-feed paths. Compiled fixture source is not runtime evidence.
 `CreateAnonymousClient` now restricts its raw HTTP transport, but is not itself a per-send credential gate.
 The old three-argument signer remains available for compatibility and is not evidence of gated WS integration.
 Native full suites, real isolated HTTPS/WS/proxy fixtures, remaining transport integration, independent combined
@@ -665,6 +673,23 @@ Defined in `src/MessageBus.Contracts/Releases`. `mbus` installs updates two ways
   `manifest.json` and its detached signature `manifest.json.sig` (ECDSA P-256, base64 or base64url, DER or P1363),
   `manifest-<version>.json` for pinned versions, and the files the manifest names with their size and SHA-256. Only
   a manifest signed with the release key built into that `mbus` is installed.
+
+Public feed selection stays `MBUS_UPDATE_FEED` > workspace mirror > selected API base plus
+`api/releases/{channel}/`. A mirror is an explicit artifact source, never a credential authority or API fallback.
+The CLI uses a dedicated public transport, separate from both API and anonymous discovery pipelines, with no
+cookies, ambient/proxy credentials, default headers or redirects. Every 3xx (including same-origin) is terminal.
+HTTP(S) source URLs cannot contain userinfo, query, fragment, whitespace or backslashes. Explicit HTTP custom/local
+feeds remain supported; the release signature remains mandatory. Payloads stream through the existing size/hash
+checks. TLS validation, the existing release public key, exact signed manifest bytes, pinned-version and downgrade
+checks are unchanged. Public stamp metadata and mirror configuration never authorize sending profile credentials.
+Callers constructing `HttpReleaseSource` must supply `HttpReleaseSource.CreateHttpClient()`; arbitrary clients and
+factory clients with added default headers refuse before contact. The constructor signature remains available.
+
+The current signed manifest contains version/channel/publication time and RID/name/size/SHA-256 file entries.
+It does **not** sign a mirror origin, stamp or credential authority. A valid signature authenticates those release
+bytes and payload hashes, not the identity or location of the mirror serving them. No origin field, advertised
+release key or mandatory manifest extension is introduced. Requiring cryptographic mirror-origin identity would
+need a separately frozen additive signed-metadata contract and publisher support.
 
 The service asks a runner to update with `POST /update` on the runner connection (`UpdateRequest`: version or
 `latest`, whether it is pinned, the channel, a mirror, and how the runner is installed). The runner takes no new

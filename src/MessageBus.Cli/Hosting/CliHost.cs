@@ -58,6 +58,9 @@ public sealed class CliHost
 
     /// <summary>Optional separate anonymous discovery transport factory. It must not inject credentials or follow redirects.</summary>
     public Func<HttpMessageHandler>? CreateDiscoveryHttpHandler { get; init; }
+    // Public artifacts never share the API/discovery pipeline. Only friend tests can replace
+    // this factory, with a registered in-memory terminal or the real restricted transport.
+    internal Func<HttpClient> CreateReleaseHttpClient { get; init; } = Update.HttpReleaseSource.CreateHttpClient;
     internal Func<HttpMessageHandler> CreateLocalModelHttpHandler { get; init; } = Agents.OpenCodeReadiness.Handler;
 
     /// <summary>Clock for request signatures and scan times.</summary>

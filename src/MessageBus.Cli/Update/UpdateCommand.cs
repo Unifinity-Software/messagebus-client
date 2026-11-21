@@ -144,8 +144,11 @@ public static class UpdateSetup
         {
             if (Uri.TryCreate(feed, UriKind.Absolute, out var url) && (url.Scheme == Uri.UriSchemeHttps || url.Scheme == Uri.UriSchemeHttp))
             {
+                HttpReleaseSource.ValidateChannelUrl(url);
                 return Http(host, new Uri(url.AbsoluteUri.TrimEnd('/') + "/" + channel + "/"));
             }
+            if (feed.Contains("://", StringComparison.Ordinal))
+                throw new CliException("The release feed must be an HTTP(S) URL without credentials, query or fragment, or a folder.");
             return new FolderReleaseSource(Path.Combine(Path.GetFullPath(feed), channel));
         }
         var server = settings.Server
@@ -155,9 +158,7 @@ public static class UpdateSetup
 
     private static HttpReleaseSource Http(CliHost host, Uri channelUrl)
     {
-        var client = new HttpClient(host.CreateHttpHandler(), disposeHandler: true);
-        client.DefaultRequestHeaders.TryAddWithoutValidation(MbusHeaders.ClientVersion, CliHost.Version);
-        client.DefaultRequestHeaders.TryAddWithoutValidation(MbusHeaders.ClientComponent, "cli");
+        var client = host.CreateReleaseHttpClient();
         return new HttpReleaseSource(client, channelUrl);
     }
 

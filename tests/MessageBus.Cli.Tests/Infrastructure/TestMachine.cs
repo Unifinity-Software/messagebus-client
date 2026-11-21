@@ -53,6 +53,8 @@ public sealed class TestMachine : IDisposable
     public Dictionary<string, string> Env { get; } = new(StringComparer.Ordinal);
 
     public FakeServer Server { get; } = new();
+    internal Func<HttpClient>? ReleaseHttpClient { get; set; }
+    internal Func<HttpMessageHandler>? DiscoveryHttpHandler { get; set; }
     internal Func<HttpMessageHandler> LocalModelHandler { get; set; } = MessageBus.Cli.Agents.OpenCodeReadiness.Handler;
 
     public FakeTimeProvider Time { get; } = new(new DateTimeOffset(2026, 11, 13, 9, 0, 0, TimeSpan.Zero));
@@ -163,6 +165,8 @@ public sealed class TestMachine : IDisposable
             MbusCommand = MbusCommand,
             ExtraAgentDirectories = [],
             CreateHttpHandler = () => new NonDisposingHandler(Server),
+            CreateDiscoveryHttpHandler = DiscoveryHttpHandler,
+            CreateReleaseHttpClient = ReleaseHttpClient ?? (() => MessageBus.Cli.Update.HttpReleaseSource.CreateTestHttpClient(Server, disposeHandler: false)),
             CreateLocalModelHttpHandler = LocalModelHandler,
             Time = Time,
             Browser = Browser,
