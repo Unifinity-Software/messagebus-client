@@ -45,6 +45,12 @@ internal static class LoginCommand
 
     private static async Task<int> RunAsync(CommandContext context, LoginChoices choices, Func<CommandContext> reload, CancellationToken ct)
     {
+        try { return await RunCoreAsync(context, choices, reload, ct); }
+        catch (ServerBindingException ex) { throw new CliException(ex.Message, 1, ex); }
+    }
+
+    private static async Task<int> RunCoreAsync(CommandContext context, LoginChoices choices, Func<CommandContext> reload, CancellationToken ct)
+    {
         var host = context.Host;
         var settings = context.Settings;
         var server = settings.Server ?? throw new CliException("Which server? Run: mbus login --server <url>", 2);

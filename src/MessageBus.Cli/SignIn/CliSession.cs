@@ -69,34 +69,68 @@ public sealed class CliSession(CliHost host, ConfigStore store, Uri server)
     private const string Prefix = "api/cli/auth/";
 
     private readonly string _serverText = server.AbsoluteUri.TrimEnd('/');
+    private readonly ServerEndpoint _endpoint = ServerEndpoint.Parse(server.AbsoluteUri);
+    private string? _deviceCode;
+    private ServerBindingSnapshot? _deviceBinding;
+    private CliPollResponse? _approved;
+    private ServerBindingSnapshot? _approvedBinding;
 
     /// <summary>The saved sign-in for this server, if any.</summary>
     public CliSessionFile? Saved => store.LoadSession() is { } saved && saved.Server == _serverText ? saved : null;
 
-    internal async Task<CliStartResponse> StartAsync(CliStartBody body, CancellationToken ct)
+    internal Task<CliStartResponse> StartAsync(CliStartBody body, CancellationToken ct) => StartAsync(body, null, ct);
+
+    internal async Task<CliStartResponse> StartAsync(CliStartBody body, Uri? approval, CancellationToken ct)
     {
-        using var response = await SendAnonymousAsync(Post("start", body, CliJsonContext.Default.CliStartBody), ct);
+        _deviceCode = null;
+        _approved = null;
+        var sent = await SendGatedAsync(Post("start", body, CliJsonContext.Default.CliStartBody), ct,
+            validate: prepared =>
+            {
+                var current = BrowserSignIn.ParseApproval(prepared.Discovery.Info.SignIn?.CliApprovalUrl);
+                if (approval is not null && current != approval)
+                    throw new ServerBindingException("The approval address changed. Run login again.");
+                BrowserSignIn.DemandApproval(current, prepared);
+            });
+        using var response = sent.Response;
         await EnsureSuccessAsync(response, "start signing in", ct);
-        return await ReadAsync(response, CliJsonContext.Default.CliStartResponse, ct);
+        var started = await ReadAsync(response, CliJsonContext.Default.CliStartResponse, ct);
+        _deviceBinding = sent.Binding;
+        _deviceCode = started.DeviceCode;
+        return started;
     }
 
     /// <summary>One poll. A rate-limited answer comes back as <c>pending</c> with the wait the server asked for.</summary>
     internal async Task<CliPollResponse> PollAsync(string deviceCode, CancellationToken ct)
     {
-        using var response = await SendAnonymousAsync(Post("token", new CliTokenBody(deviceCode), CliJsonContext.Default.CliTokenBody), ct);
+        if (_deviceCode is null || deviceCode != _deviceCode)
+            throw new ServerBindingException("The device code was not issued by this sign-in at the selected server.");
+        var sent = await SendGatedAsync(Post("token", new CliTokenBody(deviceCode), CliJsonContext.Default.CliTokenBody), ct,
+            validate: prepared => DemandSameBinding(_deviceBinding, prepared.Binding));
+        using var response = sent.Response;
         if (response.StatusCode == HttpStatusCode.TooManyRequests)
         {
             var wait = response.Headers.RetryAfter?.Delta ?? TimeSpan.FromSeconds(10);
             return new CliPollResponse { State = "pending", Interval = (int)Math.Ceiling(wait.TotalSeconds) };
         }
         await EnsureSuccessAsync(response, "check the sign-in", ct);
-        return await ReadAsync(response, CliJsonContext.Default.CliPollResponse, ct);
+        var poll = await ReadAsync(response, CliJsonContext.Default.CliPollResponse, ct);
+        if (poll.State == "approved") { _approved = poll; _approvedBinding = sent.Binding; }
+        if (poll.State is "denied" or "expired") _deviceCode = null;
+        return poll;
     }
 
     /// <summary>Saves an approved poll's tokens, replacing any earlier sign-in.</summary>
     internal Task<CliSessionFile> SaveApprovedAsync(CliPollResponse approved, CancellationToken ct) =>
-        store.WithSessionLockAsync(transaction =>
+        store.WithSessionLockAsync(async transaction =>
         {
+            if (!ReferenceEquals(approved, _approved))
+                throw new ServerBindingException("The approval was not collected by this sign-in.");
+            using var gate = new ServerSendGate(host, store, server);
+            var destination = new Uri(_endpoint.Value + Prefix + "token");
+            var prepared = await gate.PrepareSendAsync(destination, ct, transaction);
+            DemandSameBinding(_approvedBinding, prepared.Binding);
+            await prepared.ConsumeAsync(destination, _ => Task.FromResult(true), ct, transaction);
             var now = host.Time.GetUtcNow();
             var saved = new CliSessionFile
             {
@@ -108,9 +142,12 @@ public sealed class CliSession(CliHost host, ConfigStore store, Uri server)
                 AccountName = approved.Account?.Name,
                 AccountEmail = approved.Account?.Email,
                 SignedInAt = now,
+                ServerBinding = _approvedBinding,
             };
             transaction.SaveSession(saved);
-            return Task.FromResult(saved);
+            _approved = null;
+            _deviceCode = null;
+            return saved;
         }, ct);
 
     /// <summary>
@@ -121,13 +158,18 @@ public sealed class CliSession(CliHost host, ConfigStore store, Uri server)
     /// <param name="ct">Cancels.</param>
     public async Task<string?> AccessTokenAsync(string? rejected, CancellationToken ct)
     {
-        if (Saved is not { } saved) return null;
-        if (rejected is null && Fresh(saved)) return saved.AccessToken;
         return await store.WithSessionLockAsync<string?>(async transaction =>
         {
             // Read again: another process may have refreshed while this one waited for the lock.
             if (transaction.LoadSession() is not { } current || current.Server != _serverText) return null;
-            if (current.AccessToken != rejected && Fresh(current)) return current.AccessToken;
+            if (current.AccessToken != rejected && Fresh(current))
+            {
+                using var gate = new ServerSendGate(host, store, server);
+                var destination = new Uri(_endpoint.Value + Prefix + "refresh");
+                var prepared = await gate.PrepareSendAsync(destination, ct, transaction);
+                await prepared.ConsumeAsync(destination, _ => Task.FromResult(true), ct, transaction);
+                return current.AccessToken;
+            }
             return await RefreshAsync(current, transaction, ct);
         }, ct);
     }
@@ -140,12 +182,16 @@ public sealed class CliSession(CliHost host, ConfigStore store, Uri server)
     /// <param name="ct">Cancels.</param>
     public async Task<HttpResponseMessage?> SendAsync(Func<HttpRequestMessage> build, CancellationToken ct)
     {
+        using var request = build();
+        ResolveDestination(request); // Reject caller destinations before even refreshing a credential.
         if (await AccessTokenAsync(null, ct) is not { } token) return null;
-        var response = await SendWithAsync(build(), token, ct);
+        var response = (await SendGatedAsync(request, ct, accessToken: token)).Response;
         if (response.StatusCode != HttpStatusCode.Unauthorized) return response;
         response.Dispose();
+        using var retry = build();
+        ResolveDestination(retry);
         if (await AccessTokenAsync(token, ct) is not { } refreshed) return null;
-        return await SendWithAsync(build(), refreshed, ct);
+        return (await SendGatedAsync(retry, ct, accessToken: refreshed)).Response;
     }
 
     /// <summary>
@@ -155,24 +201,21 @@ public sealed class CliSession(CliHost host, ConfigStore store, Uri server)
     /// </summary>
     public async Task<(bool Ended, string? Problem)> LogoutAsync(CancellationToken ct)
     {
-        if (Saved is null)
-        {
-            return (true, null);
-        }
         return await store.WithSessionLockAsync<(bool Ended, string? Problem)>(async transaction =>
         {
             try
             {
-                if (transaction.LoadSession() is not { } current || current.Server != _serverText) return (true, null);
+                if (transaction.LoadSession() is not { } current) return (true, null);
+                if (current.Server != _serverText)
+                    return (false, "the saved sign-in belongs to a different server; it was only forgotten here");
                 var request = Post("logout", new CliRefreshBody(current.RefreshToken), CliJsonContext.Default.CliRefreshBody);
-                request.Headers.Authorization = new AuthenticationHeaderValue(AuthSchemes.Cli, current.AccessToken);
-                using var response = await SendAnonymousAsync(request, ct);
+                using var response = (await SendGatedAsync(request, ct, transaction, accessToken: current.AccessToken)).Response;
                 // 401: already expired or revoked, which is what signing out wants.
                 return response.IsSuccessStatusCode || response.StatusCode == HttpStatusCode.Unauthorized
                     ? (true, (string?)null)
                     : (false, $"the server answered {(int)response.StatusCode}");
             }
-            catch (CliException ex)
+            catch (Exception ex) when (ex is CliException or ServerBindingException)
             {
                 return (false, ex.Message);
             }
@@ -188,8 +231,9 @@ public sealed class CliSession(CliHost host, ConfigStore store, Uri server)
     /// <summary>Rotates the refresh token (inside the lock). Null, and the saved sign-in deleted, when the server says it has ended.</summary>
     private async Task<string?> RefreshAsync(CliSessionFile current, ConfigStore.ProfileSecurityTransaction transaction, CancellationToken ct)
     {
-        using var response = await SendAnonymousAsync(
-            Post("refresh", new CliRefreshBody(current.RefreshToken), CliJsonContext.Default.CliRefreshBody), ct);
+        var sent = await SendGatedAsync(
+            Post("refresh", new CliRefreshBody(current.RefreshToken), CliJsonContext.Default.CliRefreshBody), ct, transaction);
+        using var response = sent.Response;
         if (response.StatusCode == HttpStatusCode.Unauthorized)
         {
             transaction.DeleteSession();
@@ -202,25 +246,61 @@ public sealed class CliSession(CliHost host, ConfigStore store, Uri server)
             AccessToken = tokens.AccessToken,
             AccessExpiresAt = host.Time.GetUtcNow() + TimeSpan.FromSeconds(tokens.ExpiresIn),
             RefreshToken = tokens.RefreshToken,
+            ServerBinding = sent.Binding,
         });
         return tokens.AccessToken;
     }
 
-    private async Task<HttpResponseMessage> SendWithAsync(HttpRequestMessage request, string accessToken, CancellationToken ct)
+    private void ResolveDestination(HttpRequestMessage request)
     {
-        request.Headers.Authorization = new AuthenticationHeaderValue(AuthSchemes.Cli, accessToken);
-        return await SendAnonymousAsync(request, ct);
+        var destination = request.RequestUri ?? throw new ServerBindingException("The request has no destination.");
+        if (!destination.IsAbsoluteUri) destination = new Uri(new Uri(_endpoint.Value), destination);
+        if (!_endpoint.Contains(destination))
+            throw new ServerBindingException("The request destination differs from the selected sign-in server or API base path.");
+        request.RequestUri = destination;
     }
 
-    private async Task<HttpResponseMessage> SendAnonymousAsync(HttpRequestMessage request, CancellationToken ct)
+    private static void DemandSameBinding(ServerBindingSnapshot? original, ServerBindingSnapshot? current)
     {
-        using var client = ServerConnection.CreateAnonymousClient(host, server);
+        if (original != current) throw new ServerBindingException("The sign-in authority changed after the device code was issued.");
+    }
+
+    private async Task<(HttpResponseMessage Response, ServerBindingSnapshot? Binding)> SendGatedAsync(
+        HttpRequestMessage request, CancellationToken ct, ConfigStore.ProfileSecurityTransaction? transaction = null,
+        Action<PreparedServerSend>? validate = null, string? accessToken = null)
+    {
+        using (request)
         try
         {
-            using (request)
+            ResolveDestination(request);
+            using var gate = new ServerSendGate(host, store, server);
+            using var client = ServerConnection.CreateAnonymousClient(host, server);
+            var prepared = await gate.PrepareSendAsync(request.RequestUri!, ct, transaction);
+            validate?.Invoke(prepared);
+            if (request.Content is { } content)
             {
-                return await client.SendAsync(request, ct);
+                var copy = new ByteArrayContent(await content.ReadAsByteArrayAsync(ct));
+                foreach (var header in content.Headers) copy.Headers.TryAddWithoutValidation(header.Key, header.Value);
+                request.Content = copy;
+                content.Dispose();
             }
+            var response = await prepared.ConsumeAsync(request.RequestUri!, async _ =>
+            {
+                if (accessToken is not null)
+                    request.Headers.Authorization = new AuthenticationHeaderValue(AuthSchemes.Cli, accessToken);
+                try
+                {
+                    var result = await client.SendAsync(request, ct);
+                    if ((int)result.StatusCode is >= 300 and <= 399)
+                    {
+                        result.Dispose();
+                        throw new ServerBindingException("Sign-in redirects are refused; credentials were not replayed.");
+                    }
+                    return result;
+                }
+                finally { if (accessToken is not null) request.Headers.Authorization = null; }
+            }, ct, transaction);
+            return (response, prepared.Binding);
         }
         catch (HttpRequestException ex)
         {

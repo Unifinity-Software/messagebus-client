@@ -251,8 +251,29 @@ Integrated callers are the normal client returned to CLI machine/inventory/key o
 probes, local MCP and script API operations, runner REST/tool services, and attachment-link API requests that
 use that client. Factory use supplies this gate; separate transports do not inherit it automatically.
 
-Remaining required work is explicit: `CliSession` access-token/refresh/logout sends, login and device approval/
-start/poll/collection, anonymous caller-key and enrollment probes, environment-runner factories/checkpoint
+`CliSession` now uses the same gate for device start/poll, access-token sends (including workspaces and
+enrollment as the signed-in person), each 401 retry, refresh and logout. Its public constructor,
+`AccessTokenAsync`, `SendAsync` and `LogoutAsync` signatures remain unchanged. Even a still-fresh saved token
+requires current anonymous validation before return; the actual request independently validates again.
+Final destinations are resolved and checked against the exact selected endpoint/base before any refresh or
+credential attachment. Bodies are buffered before consumption; access headers are attached only inside the
+lock-held send and cleared on exit. All sign-in 3xx responses refuse without replay. Refresh, logout and
+approved-session persistence pass their explicit same-store transaction to nested gate operations rather than
+reacquiring the profile lock. Refresh rotation preserves the prepared snapshot. Refused or unavailable logout
+reports only local forgetting, and session deletion retains the independent ever-isolated ledger.
+
+Browser approval is checked before device start, including `--no-browser`. Require an absolute HTTP(S) URI
+without userinfo, fragment, backslash, whitespace or control characters, and reject an existing `code` query
+parameter. Existing unrelated query parameters are retained when adding the escaped user code. Current discovery
+must still report the same approval address at start. In isolated mode its origin must be the canonical authority
+or the exact selected alias already accepted by local provisioning/persisted binding and server configuration;
+another advertised alias grants no permission. Never-pinned legacy servers retain explicit split-port and tunnel
+approval addresses after the basic URI checks. The start's exact binding is retained for every device poll.
+Approved tokens may be saved only by the collecting sign-in with that same prepared endpoint/authority, after
+fresh validation and a current ledger check inside the session transaction; changed or stripped discovery cannot
+relabel already-issued tokens. These are source integrations, not runtime verification or release readiness.
+
+Remaining required work is explicit: anonymous caller-key and enrollment-token probes, environment-runner factories/checkpoint
 reuse, WebSocket connect/reconnect and terminal refusal classification, attachment transfer/query credentials
 and all separate MCP/script/dead-letter transfer clients, public signed update-feed transport and diagnostics.
 `CreateAnonymousClient` now restricts its raw HTTP transport, but is not itself a per-send credential gate.

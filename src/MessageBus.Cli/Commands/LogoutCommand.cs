@@ -54,7 +54,7 @@ internal static class LogoutCommand
             await ServerConnection.RemoveMachineAsync(client, server, workspaceId, machineId, ct);
             return true;
         }
-        catch (CliException ex)
+        catch (Exception ex) when (ex is CliException or ServerBindingException)
         {
             context.Console.MarkupLineInterpolated($"[yellow]Couldn't tell the server: {ex.Message}[/]");
             return false;

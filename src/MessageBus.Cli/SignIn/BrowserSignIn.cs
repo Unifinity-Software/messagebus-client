@@ -21,14 +21,16 @@ internal static class BrowserSignIn
         var host = context.Host;
         var console = context.Console;
         var serverText = CommandContext.ServerText(context.Settings.Server!);
-        if (string.IsNullOrWhiteSpace(info.SignIn?.CliApprovalUrl) || !Uri.TryCreate(info.SignIn.CliApprovalUrl, UriKind.Absolute, out var approval))
+        if (string.IsNullOrWhiteSpace(info.SignIn?.CliApprovalUrl))
         {
             throw new CliException($"{serverText} can't sign mbus in through the browser yet (it needs updating). "
                 + "Use a runner enrollment token (mbus login --token <token>).");
         }
+        var approval = ParseApproval(info.SignIn.CliApprovalUrl);
 
-        var started = await session.StartAsync(new CliStartBody($"mbus {CliHost.Version}", machineName, location, DescribeOs()), ct);
-        var url = new Uri($"{approval.AbsoluteUri.TrimEnd('/')}?code={Uri.EscapeDataString(started.UserCode)}");
+        var started = await session.StartAsync(new CliStartBody($"mbus {CliHost.Version}", machineName, location, DescribeOs()), approval, ct);
+        var query = approval.Query.TrimStart('?');
+        var url = new UriBuilder(approval) { Query = (query.Length == 0 ? "" : query + "&") + "code=" + Uri.EscapeDataString(started.UserCode) }.Uri;
 
         console.WriteLine();
         console.MarkupLine("To sign in, open this page, sign in to messagebus.ai and approve mbus:");
@@ -62,6 +64,29 @@ internal static class BrowserSignIn
             }
             await Task.Delay(interval, host.Time, ct);
         }
+    }
+
+    internal static Uri ParseApproval(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text) || text.Any(c => char.IsControl(c) || char.IsWhiteSpace(c) || c == '\\')
+            || !Uri.TryCreate(text, UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https")
+            || uri.UserInfo.Length != 0 || uri.Fragment.Length != 0)
+            throw new ServerBindingException("The server supplied an unsafe browser approval address.");
+        // Validate the raw origin too: URI parsing must not silently accept ambiguous host spellings.
+        var originEnd = text.IndexOfAny(['/', '?', '#'], text.IndexOf("://", StringComparison.Ordinal) + 3);
+        ServerEndpoint.Parse(originEnd < 0 ? text : text[..originEnd]);
+        if (uri.Query.TrimStart('?').Split('&').Any(part =>
+            Uri.UnescapeDataString(part.Split('=')[0]).Equals("code", StringComparison.OrdinalIgnoreCase)))
+            throw new ServerBindingException("The approval address already contains a code.");
+        return uri;
+    }
+
+    internal static void DemandApproval(Uri approval, PreparedServerSend prepared)
+    {
+        if (prepared.Binding is not { } binding) return; // Preserve legacy split-port and tunnel approval.
+        var origin = ServerEndpoint.Parse(approval.GetLeftPart(UriPartial.Authority)).Origin;
+        if (origin != binding.Issuer && origin != prepared.Endpoint.Origin)
+            throw new ServerBindingException("The browser approval address is outside the canonical authority and explicitly selected alias.");
     }
 
     /// <summary>"macOS arm64", shown on the approval page so the person recognises the machine.</summary>
