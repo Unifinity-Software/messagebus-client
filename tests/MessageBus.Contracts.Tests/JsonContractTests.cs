@@ -51,8 +51,7 @@ public class JsonContractTests
     public void Enums_are_written_as_lowercase_hyphenated_names_and_read_back()
     {
         var pattern = new Regex("^[a-z0-9]+(-[a-z0-9]+)*$");
-        // Catalog configuration is a runtime API, not a JSON wire contract.
-        foreach (var enumType in Contracts.GetExportedTypes().Where(t => t.IsEnum && t != typeof(McpCatalogFeatures)))
+        foreach (var enumType in Contracts.GetExportedTypes().Where(t => t.IsEnum))
         {
             var info = MessageBusJson.Options.GetTypeInfo(enumType);
             var names = new HashSet<string>();
