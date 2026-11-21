@@ -18,7 +18,7 @@ namespace MessageBus.Cli.Runner;
 /// <summary>Returns code before the runner removes the only local copy.</summary>
 internal static class RunCodeReturn
 {
-    private static readonly HttpClient Links = new() { Timeout = TimeSpan.FromHours(1) };
+    private static readonly HttpClient Links = MessageBus.Attachments.Client.AttachmentTransfers.CreateHttpClient();
 
     public static Func<RunWorkspace, TaskDelivery, string, string?, CancellationToken, Task<bool>>? Create(CommandContext context)
     {

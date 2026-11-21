@@ -43,7 +43,8 @@ public static class ServerConnection
             var signer = CreateSigner(host, settings, store) ?? throw NotSignedIn();
             handler = AuthenticatingHandler.WithMachineKey(ServerHttpTransport.Restrict(host.CreateHttpHandler()), signer, settings.Stored.WorkspaceId, component, CliHost.Version, new ServerSendGate(host, store, server));
         }
-        return new HttpClient(handler, disposeHandler: true) { BaseAddress = CliSettings.BaseAddress(server) };
+        return ServerAttachmentTransfers.Bind(new HttpClient(handler, disposeHandler: true) { BaseAddress = CliSettings.BaseAddress(server) },
+            () => new ServerSendGate(host, store, server));
     }
 
     /// <summary>The enrolled machine's request signer, or null when this machine isn't enrolled.</summary>

@@ -56,7 +56,7 @@ public sealed class VerificationSendTests
         using var http = new HttpClient(machine.Server) { BaseAddress = new Uri(FakeServer.Url) };
         await using var tools = new LocalTools(new LocalServerOptions
         {
-            Http = http, Links = http, WorkspaceId = "ws_test", ConfigDirectory = machine.MbusFolder,
+            Http = http, Links = machine.Server.Links, WorkspaceId = "ws_test", ConfigDirectory = machine.MbusFolder,
             Input = Stream.Null, Output = Stream.Null,
         });
 
@@ -108,7 +108,7 @@ public sealed class VerificationSendTests
         using var http = new HttpClient(machine.Server) { BaseAddress = new Uri(FakeServer.Url) };
         await using var tools = new LocalTools(new LocalServerOptions
         {
-            Http = http, Links = http, WorkspaceId = "ws_test", ConfigDirectory = machine.MbusFolder,
+            Http = http, Links = machine.Server.Links, WorkspaceId = "ws_test", ConfigDirectory = machine.MbusFolder,
             Input = Stream.Null, Output = Stream.Null,
         });
         const string required = """{"to":"role:developer","type":"task.implement","body":{"summary":"Build it."},"verification":{"environment":"frontend","requiredChecks":["build"]}}""";
@@ -140,7 +140,7 @@ public sealed class VerificationSendTests
         using var http = new HttpClient(machine.Server) { BaseAddress = new Uri(FakeServer.Url) };
         await using var tools = new LocalTools(new LocalServerOptions
         {
-            Http = http, Links = http, WorkspaceId = "ws_test", ConfigDirectory = machine.MbusFolder,
+            Http = http, Links = machine.Server.Links, WorkspaceId = "ws_test", ConfigDirectory = machine.MbusFolder,
             Input = Stream.Null, Output = Stream.Null,
         });
         var result = await tools.CallAsync(null, McpToolNames.Send,
@@ -162,7 +162,7 @@ public sealed class VerificationSendTests
         using var http = new HttpClient(machine.Server) { BaseAddress = new Uri(FakeServer.Url) };
         await using var tools = new LocalTools(new LocalServerOptions
         {
-            Http = http, Links = http, WorkspaceId = "ws_test", ConfigDirectory = machine.MbusFolder,
+            Http = http, Links = machine.Server.Links, WorkspaceId = "ws_test", ConfigDirectory = machine.MbusFolder,
             Input = Stream.Null, Output = Stream.Null,
         });
         const string required = """{"to":"role:developer","type":"task.implement","body":{"summary":"Build it."},"verification":{"environment":"frontend","requiredChecks":["build"]}}""";
@@ -202,7 +202,7 @@ public sealed class VerificationSendTests
         http.DefaultRequestHeaders.Add("Authorization", "MbusKey mbk_test");
         await using var tools = new LocalTools(new LocalServerOptions
         {
-            Http = http, Links = http, WorkspaceId = "ws_test", ConfigDirectory = machine.MbusFolder,
+            Http = http, Links = machine.Server.Links, WorkspaceId = "ws_test", ConfigDirectory = machine.MbusFolder,
             Input = Stream.Null, Output = Stream.Null,
         });
         var ct = TestContext.Current.CancellationToken;
@@ -278,7 +278,7 @@ public sealed class VerificationSendTests
         using var http = new HttpClient(machine.Server) { BaseAddress = new Uri(FakeServer.Url) };
         await using var tools = new LocalTools(new LocalServerOptions
         {
-            Http = http, Links = http, WorkspaceId = "ws_test", ConfigDirectory = machine.MbusFolder,
+            Http = http, Links = machine.Server.Links, WorkspaceId = "ws_test", ConfigDirectory = machine.MbusFolder,
             Input = Stream.Null, Output = Stream.Null,
         });
         var result = await tools.CallAsync(null, McpToolNames.Retry,

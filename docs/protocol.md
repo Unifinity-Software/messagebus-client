@@ -320,8 +320,32 @@ server's profile while publishing a pending checkpoint; use a separate private d
 These conservative restrictions require native UX/compatibility review and are not a claim that all platform
 login workflows are complete.
 
-Remaining required work is explicit: full native verification of enrollment/checkpoint lifecycle, attachment transfer/query credentials
-and all separate MCP/script/dead-letter transfer clients, public signed update-feed transport and diagnostics.
+Attachment transfer/query credentials now use the same current-discovery and durable-floor gate as the selected API.
+`AttachmentTransfers.Bind(api, send)` is an additive caller-owned authorization seam in Attachments.Client;
+it has no CLI dependency and changes no existing constructors or MCP options. Registration follows the API client
+through CLI, local MCP, scripts, dead-letter resealing, runner bundle downloads, kept answers and return uploads.
+The built-in CLI and environment-runner API factories register it before returning their clients. Custom API
+factories must register their own binding-aware callback if they require isolated enforcement; absence of a
+callback retains legacy link behavior and makes no isolated/residency claim. The callback validates the actual
+resolved destination, performs fresh anonymous discovery at the selected API, rereads the durable floor, and
+awaits the actual transfer send inside `ConsumeAsync`'s profile reservation. A supplied cached delivery link
+does not bypass discovery. No extra catalogue request or mandatory link field is introduced.
+
+Transfers use separate long-timeout clients with redirects, cookies and ambient/default credentials disabled.
+`AttachmentTransfers.CreateHttpClient()` provides this transport; callers supplying their own link client must
+provide the same transport guarantees and must not install authentication handlers. Reusing the API client or
+supplying default request headers refuses before transmission rather than clearing a caller's shared state.
+All 3xx responses are terminal, including same-origin and explicitly configured alias redirects. Transfer
+errors do not expose response bodies, signed queries or underlying transport diagnostics. Relative links resolve
+against the selected API base; absolute issued links retain their authority and query. Unsafe schemes, userinfo,
+fragments, backslashes and HTTPS downgrades refuse. Isolated transfers require the exact selected transport origin
+and base-path scope; discovery aliases, canonical rewrites and Blob suffixes grant no exception. Never-pinned
+legacy/custom servers retain direct HTTPS SAS links (and explicitly selected HTTP custom/local transport), with
+the same separate credential-free/no-redirect client. Encryption, streaming hash/size checks and cancellation
+remain in the attachment pipeline.
+
+Remaining required work is explicit: full native verification of enrollment/checkpoint lifecycle and attachment
+factory/real transport fixtures, public signed update-feed transport and diagnostics.
 `CreateAnonymousClient` now restricts its raw HTTP transport, but is not itself a per-send credential gate.
 The old three-argument signer remains available for compatibility and is not evidence of gated WS integration.
 Native full suites, real isolated HTTPS/WS/proxy fixtures, remaining transport integration, independent combined

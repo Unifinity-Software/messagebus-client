@@ -458,7 +458,7 @@ namespace MessageBus.Cli.Runner
     /// <summary>A task's git bundle, decrypted with this machine's keys by the local MCP server's code (the original issue).</summary>
     internal sealed class MachineBundleSource(MessageBus.Mcp.MachineBundles bundles) : IBundleSource
     {
-        private static readonly HttpClient Links = new() { Timeout = TimeSpan.FromHours(1) };
+        private static readonly HttpClient Links = MessageBus.Attachments.Client.AttachmentTransfers.CreateHttpClient();
 
         public static IBundleSource? Create(CommandContext context, HttpClient api) =>
             context.Settings.Stored.WorkspaceId is { } workspace

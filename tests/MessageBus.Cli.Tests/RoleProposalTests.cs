@@ -485,7 +485,7 @@ public sealed class RoleProposalTests
     });
     private static LocalServerOptions Options(TestMachine machine, HttpClient http) => new()
     {
-        Http = http, Links = http, WorkspaceId = "ws_test", MachineId = "mch_test", ConfigDirectory = machine.MbusFolder,
+        Http = http, Links = machine.Server.Links, WorkspaceId = "ws_test", MachineId = "mch_test", ConfigDirectory = machine.MbusFolder,
         Input = Stream.Null, Output = Stream.Null, Time = machine.Time, ProposalAuthority = ProposalAuthority.Interactive,
         CodexHome = Path.Combine(machine.Home, ".codex"), ClaudeHome = Path.Combine(machine.Home, ".claude"),
     };

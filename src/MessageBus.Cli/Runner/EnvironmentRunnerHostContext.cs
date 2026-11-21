@@ -237,7 +237,8 @@ public sealed class EnvironmentRunnerHostContext : IRunnerHostContext
         var handler = AuthenticatingHandler.WithApiKey(ServerHttpTransport.Restrict(_createHandler()),
             ApiKey(), RunnerEnvironment.NonEmpty(_env(RunnerEnvVars.Workspace)), "runner", RunnerEnvironment.Version,
             new ServerSendGate(store, ServerUrl, _createHandler, _env));
-        return new HttpClient(handler, disposeHandler: true) { BaseAddress = CliSettings.BaseAddress(ServerUrl) };
+        return ServerAttachmentTransfers.Bind(new HttpClient(handler, disposeHandler: true) { BaseAddress = CliSettings.BaseAddress(ServerUrl) },
+            () => new ServerSendGate(store, ServerUrl, _createHandler, _env));
     }
 
     /// <summary>Validates current discovery and durable binding before each actual environment-runner handshake.</summary>

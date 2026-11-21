@@ -50,11 +50,13 @@ public sealed class AttachmentTransferException(string message, HttpStatusCode? 
 /// </summary>
 /// <param name="api">
 /// Calls the service as this machine (or API key): base address the server URL with a trailing slash,
-/// requests signed (<c>McpHostContext.Http</c> in the CLI).
+/// requests signed (<c>McpHostContext.Http</c> in the CLI). Any <see cref="AttachmentTransfers.Bind"/>
+/// authorization registered on this client is inherited by every actual upload and download.
 /// </param>
 /// <param name="links">
-/// Fetches and uploads link URLs. No credentials and no body-buffering handlers: a link is its own
-/// permission, and may be a SAS URL straight to Blob storage. Give it a long timeout.
+/// Fetches and uploads link URLs. Use <see cref="AttachmentTransfers.CreateHttpClient"/> or a separate
+/// credential-free, cookie-free, no-redirect client without default headers or body-buffering handlers.
+/// A legacy link may be a SAS URL straight to Blob storage; an isolated binding restricts its destination.
 /// </param>
 /// <param name="workspaceId">The workspace.</param>
 /// <param name="tempDirectory">Where the git bundles git writes and reads go (a runner's task: its own temp folder, which its sandbox lets git use); null for the system's.</param>
@@ -92,7 +94,7 @@ public sealed class AttachmentClient(HttpClient api, HttpClient links, string wo
             request.Content.Headers.ContentLength = sealedResult.CiphertextLength;
             request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
             request.Headers.TryAddWithoutValidation("x-ms-blob-type", "BlockBlob");   // what a SAS link needs; the API ignores it
-            using var response = await links.SendAsync(request, ct);
+            using var response = await AttachmentTransfers.SendAsync(api, links, request, HttpCompletionOption.ResponseContentRead, ct);
             await EnsureAsync(response, ct);
         }
 
@@ -189,7 +191,8 @@ public sealed class AttachmentClient(HttpClient api, HttpClient links, string wo
     public async Task DownloadAsync(AttachmentRef attachment, DownloadLink link, Stream destination, IKeyRing keys, CancellationToken ct = default)
     {
         await using var cipher = TempFile();
-        using (var response = await links.GetAsync(Resolve(link.Url), HttpCompletionOption.ResponseHeadersRead, ct))
+        using (var request = new HttpRequestMessage(HttpMethod.Get, Resolve(link.Url)))
+        using (var response = await AttachmentTransfers.SendAsync(api, links, request, HttpCompletionOption.ResponseHeadersRead, ct))
         {
             await EnsureAsync(response, ct);
             await using var body = await response.Content.ReadAsStreamAsync(ct);
@@ -269,7 +272,7 @@ public sealed class AttachmentClient(HttpClient api, HttpClient links, string wo
         template.TrimStart('/').Replace("{workspaceId}", Uri.EscapeDataString(workspaceId), StringComparison.Ordinal);
 
     /// <summary>Links are absolute; a relative one is resolved against the server.</summary>
-    private Uri Resolve(string url) => api.BaseAddress is { } server ? new Uri(server, url) : new Uri(url, UriKind.Absolute);
+    private Uri Resolve(string url) => AttachmentTransfers.Resolve(api.BaseAddress, url);
 
     private static FileStream TempFile() =>
         new(Path.Combine(Path.GetTempPath(), "mbus-" + Guid.NewGuid().ToString("N")), FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None,

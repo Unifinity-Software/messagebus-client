@@ -66,7 +66,7 @@ internal static class DeadLettersCommand
             }
 
             var failed = 0;
-            using var links = new HttpClient { Timeout = TimeSpan.FromHours(1) };
+            using var links = MessageBus.Attachments.Client.AttachmentTransfers.CreateHttpClient();
             var attachments = new AttachmentClient(http, links, keys.WorkspaceId);
             foreach (var letter in letters)
             {
