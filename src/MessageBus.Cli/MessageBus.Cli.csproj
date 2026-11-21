@@ -7,12 +7,8 @@
     <Description>The reusable implementation of the messagebus.ai mbus command.</Description>
     <AssemblyName>MessageBus.Cli</AssemblyName>
     <RootNamespace>MessageBus.Cli</RootNamespace>
-    <!-- the original issue: release-mbus.yml passes -p:Version=<release>, and that build reports exactly it. Every other build is a
-         development build of MbusSourceVersion and reports it with build metadata, e.g. 0.1.0+dev.1a2b3c4 (the commit
-         it was built from, read from .git by the SDK's built-in source control support, no git command needed), or
-         0.1.0+dev without a repository. Build metadata is ignored by every version comparison (ReleaseVersion, the
-         dashboard), so a development build compares equal to MbusSourceVersion, as before. -->
-    <!-- The SDK would add the full commit hash to every build, releases too; MbusBuildVersion below decides instead. -->
+    <!-- Release builds opt in explicitly, even when Version equals MbusSourceVersion.
+         Keep source revision separate so the version command prints a single SemVer value. -->
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
   </PropertyGroup>
 
@@ -21,16 +17,19 @@
     <InternalsVisibleTo Include="MessageBus.Cli.Tests" />
   </ItemGroup>
 
-  <!-- the original issue: a development build's version (see MbusSourceVersion): +dev and the short commit, once the SDK has read it. -->
-  <Target Name="MbusBuildVersion" BeforeTargets="GetAssemblyAttributes"
-          DependsOnTargets="GetAssemblyVersion;InitializeSourceControlInformation"
-          Condition="'$(Version)' == '$(MbusSourceVersion)'">
-    <PropertyGroup>
+  <Target Name="MbusBuildMetadata" BeforeTargets="GetAssemblyAttributes"
+          DependsOnTargets="GetAssemblyVersion;InitializeSourceControlInformation">
+    <PropertyGroup Condition="'$(MbusReleaseBuild)' != 'true'">
       <_MbusCommit Condition="'$(SourceRevisionId)' != ''">$(SourceRevisionId)</_MbusCommit>
       <_MbusCommit Condition="'$(_MbusCommit)' != '' and $(_MbusCommit.Length) &gt; 7">$(_MbusCommit.Substring(0, 7))</_MbusCommit>
-      <InformationalVersion>$(Version)+dev</InformationalVersion>
-      <InformationalVersion Condition="'$(_MbusCommit)' != ''">$(Version)+dev.$(_MbusCommit)</InformationalVersion>
+      <_MbusDevVersion>$(Version.Split('+')[0])+dev</_MbusDevVersion>
+      <InformationalVersion>$(_MbusDevVersion)</InformationalVersion>
+      <InformationalVersion Condition="'$(_MbusCommit)' != ''">$(_MbusDevVersion).$(_MbusCommit)</InformationalVersion>
     </PropertyGroup>
+    <ItemGroup>
+      <AssemblyMetadata Include="MbusSourceRevision" Value="$(SourceRevisionId)" Condition="'$(SourceRevisionId)' != ''" />
+      <AssemblyMetadata Include="MbusImageManaged" Value="true" Condition="'$(MbusImageManaged)' == 'true'" />
+    </ItemGroup>
   </Target>
 
   <!-- the original issue: the public key releases are signed with (ECDSA P-256, SubjectPublicKeyInfo base64), built in

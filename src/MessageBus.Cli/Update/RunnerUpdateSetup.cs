@@ -12,7 +12,7 @@ public static class RunnerUpdateSetup
 {
     /// <summary>
     /// The runner's updater, or null (with a line in <paramref name="log"/>) when this mbus can't update
-    /// itself: a development build without the release key, run from a build folder, or no feed.
+    /// itself: an image-managed installation, a development build without the release key, a build folder, or no feed.
     /// </summary>
     /// <param name="record">Where the result of an update is kept for the next start to report (the original issue).</param>
     public static IRunnerUpdater? TryCreate(CliHost host, CliSettings settings, TextWriter log, RunnerUpdateRecord? record = null) =>
@@ -27,6 +27,12 @@ public static class RunnerUpdateSetup
     public static IRunnerUpdater? TryCreate(CliHost host, CliSettings settings, TextWriter log, RunnerUpdateRecord? record, out RunnerUpdateAbility ability)
     {
         static RunnerUpdateAbility Off(string reason) => new() { CanUpdate = false, Reason = reason };
+        if (host.ImageManaged)
+        {
+            ability = Off(ImageUpdatePolicy.Reason);
+            log.WriteLine("Updates: off. " + ImageUpdatePolicy.Reason);
+            return null;
+        }
         ability = new RunnerUpdateAbility { CanUpdate = true, Via = RunnerInstallKind.Standalone };
         if (DotnetToolInstall.Running is { } installedTool)
         {

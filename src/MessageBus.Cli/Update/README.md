@@ -19,7 +19,7 @@ mbus update --version 0.3.0     # install exactly that version, older or not
 
 Versions compare as SemVer and ignore `+build` details. A build made from source rather than by the release reports
 `MbusSourceVersion` (`Directory.Build.props`) with `+dev.<commit>` (`0.1.0+dev.1a2b3c4`, or `0.1.0+dev` outside a git
-repository), so it compares exactly like that version. A release build (`-p:Version=<release>`) reports exactly its
+repository), so it compares exactly like that version. A release build (`-p:Version=<release> -p:MbusReleaseBuild=true`) reports exactly its
 version.
 
 ## The .NET tool
@@ -31,7 +31,7 @@ mbus login --server https://app.messagebus.ai
 mbus connect
 ```
 
-`dotnet pack src/MessageBus.Cli.Tool -c Release -p:Version=<version> -o out/nuget` makes the framework-dependent
+`dotnet pack src/MessageBus.Cli.Tool -c Release -p:Version=<version> -p:MbusReleaseBuild=true -o out/nuget` makes the framework-dependent
 `MessageBus.Ai.Cli` package. It uses the installed .NET runtime and rolls forward to newer major runtimes. To try a
 local package without changing your global installation:
 
@@ -214,7 +214,7 @@ A release build puts the public key in at build time:
 
 ```sh
 dotnet publish src/MessageBus.Cli.Tool -c Release -r osx-arm64 -p:PublishSingleFile=true -p:DebugType=none \
-  -p:MbusReleasePublicKey=<base64 SubjectPublicKeyInfo> -o out/osx-arm64
+  -p:MbusReleaseBuild=true -p:Version=<release> -p:MbusReleasePublicKey=<base64 SubjectPublicKeyInfo> -o out/osx-arm64
 ```
 
 A machine that trusts a key through `MBUS_RELEASE_PUBLIC_KEY` installs anything signed with it, from any feed or

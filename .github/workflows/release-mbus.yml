@@ -139,11 +139,26 @@ jobs:
         run: |
           set -euo pipefail
           python3 eng/check-release-version.py "$VERSION"
-          dotnet pack MessageBus.Client.slnx -c Release -p:Version="$VERSION" \
+          dotnet pack MessageBus.Client.slnx -c Release -p:Version="$VERSION" -p:MbusReleaseBuild=true \
             -p:RepositoryCommit="$(git rev-parse HEAD)" -o artifacts/packages
           bash eng/verify-packages.sh artifacts/packages "$VERSION"
       - name: Check the complete runner image
-        run: docker build -f docker/runner/Dockerfile .
+        env:
+          VERSION: ${{ steps.eligible.outputs.version }}
+          SHA: ${{ steps.eligible.outputs.sha }}
+        run: |
+          set -euo pipefail
+          image=$(docker build --quiet -f docker/runner/Dockerfile \
+            --build-arg MBUS_RELEASE_VERSION="$VERSION" --build-arg MBUS_SOURCE_REVISION="$SHA" .)
+          test "$(docker run --rm --entrypoint mbus "$image" --version)" = "$VERSION"
+          test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$image")" = "$SHA"
+          test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' "$image")" = "$VERSION"
+          test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.source" }}' "$image")" = "https://github.com/Unifinity-Software/messagebus-client"
+          if refusal=$(docker run --rm --entrypoint mbus "$image" update --check 2>&1); then
+            echo "The image unexpectedly allowed an in-place update check." >&2
+            exit 1
+          fi
+          printf '%s\n' "$refusal" | grep -F 'redeploy the runner'
       - uses: actions/upload-artifact@v4
         id: artifact
         with:

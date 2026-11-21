@@ -23,6 +23,17 @@ public static class UpdateEnvVars
     public const string Target = "MBUS_UPDATE_TARGET";
 }
 
+internal static class ImageUpdatePolicy
+{
+    public const string Reason = "This mbus is managed by the runner image. Build or obtain a replacement image and redeploy the runner with it.";
+
+    public static void ThrowIfImageManaged(CliHost host)
+    {
+        if (host.ImageManaged)
+            throw new CliException(Reason);
+    }
+}
+
 /// <summary><c>mbus update [--check] [--allow-downgrade] [--channel name]</c>.</summary>
 internal static class UpdateCommand
 {
@@ -39,6 +50,7 @@ internal static class UpdateCommand
         };
         command.SetAction(async (parse, ct) =>
         {
+            ImageUpdatePolicy.ThrowIfImageManaged(host);
             var context = CommandContext.Load(host, parse, options);
             var tool = DotnetToolInstall.Find(UpdateSetup.TargetPath(host)) ?? DotnetToolInstall.Running;
             if (tool is not null)
@@ -111,9 +123,10 @@ public static class UpdateSetup
     /// <param name="log">Progress lines.</param>
     /// <param name="mirror">An http(s) feed to use instead of the server's.</param>
     /// <param name="version">A version to install instead of the channel's latest.</param>
-    /// <exception cref="CliException">No release key, or nowhere to get releases from.</exception>
+    /// <exception cref="CliException">Image-managed installation, no release key, or nowhere to get releases from.</exception>
     public static SelfUpdater Create(CliHost host, CliSettings settings, string? channel, TextWriter log, string? mirror = null, string? version = null)
     {
+        ImageUpdatePolicy.ThrowIfImageManaged(host);
         if (version is not null && !ReleaseFeed.IsPinnableVersion(version))
         {
             throw new CliException($"'{version}' isn't an mbus version (write it like 0.2.0).", 2);

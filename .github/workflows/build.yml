@@ -64,7 +64,7 @@ jobs:
           name: test-diagnostics
           path: artifacts/test-results
           if-no-files-found: ignore
-      - run: dotnet pack MessageBus.Client.slnx -c Release -p:Version=0.0.0-ci.1 -o artifacts/packages
+      - run: dotnet pack MessageBus.Client.slnx -c Release -p:Version=0.0.0-ci.1 -p:MbusReleaseBuild=true -o artifacts/packages
       - run: bash eng/verify-packages.sh artifacts/packages 0.0.0-ci.1
       - run: python eng/test-check-packages.py
       - run: python eng/test-release-version.py

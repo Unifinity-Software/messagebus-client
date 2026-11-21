@@ -100,6 +100,8 @@ public static class RunnerCommand
             // the original issue, the original issue: the dashboard chooses how many run at once (it starts at 1 until the setting arrives).
             var slots = engine.GetStatus();
             await covered.WriteLineAsync($"mbus {RunnerEnvironment.Version} runner on {host.MachineName}{(host.Location is { } l ? $" ({l})" : "")}: {slots.Slots} task(s) at once (the dashboard can set up to {slots.SlotCeiling}), runs in {options.WorkRoot}, server {host.ServerUrl}").ConfigureAwait(false);
+            if (Hosting.CliHost.SourceRevision is { } revision)
+                await covered.WriteLineAsync($"Source revision: {revision}").ConfigureAwait(false);
             if (toolPaths.TryGetValue("PATH", out var runPath))
             {
                 var added = runPath.Split(Path.PathSeparator).Except((host.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator));

@@ -14,10 +14,14 @@ the repository root and use the release version in both the checkout and image t
 ```sh
 version='<version>'
 git checkout "mbus-v$version"
+revision=$(git rev-parse HEAD)
+docker build -f docker/runner/Dockerfile -t "messagebus-runner:$version" \
+  --build-arg MBUS_RELEASE_VERSION="$version" --build-arg MBUS_SOURCE_REVISION="$revision" .
 ```
 
 For a development build, use your development checkout and set `version` to
-a development image tag.
+a development image tag. Omit `MBUS_RELEASE_VERSION` to keep the `+dev` version.
+You can pass `MBUS_SOURCE_REVISION` on its own for a development image.
 
 ```sh
 podman build --ignorefile docker/runner/Dockerfile.dockerignore -f docker/runner/Dockerfile -t "messagebus-runner:$version" .
@@ -26,7 +30,13 @@ docker build -f docker/runner/Dockerfile -t "messagebus-runner:$version" .
 
 The agent CLIs are installed at their newest version unless you pin them:
 `--build-arg CLAUDE_CODE_VERSION=… --build-arg CODEX_VERSION=… --build-arg OPENCODE_VERSION=… --build-arg COPILOT_VERSION=…`.
-Rebuild the image to update them; they don't update themselves inside it.
+A release image records its CLI version and full source commit in OCI labels. Use
+`mbus --version` for the CLI version and `mbus doctor` for the full source revision
+and update policy. The agent CLIs have their own versions.
+
+To update mbus or the agent CLIs, rebuild or obtain a replacement image and
+redeploy the runner with it. Image-managed mbus refuses `mbus update`,
+`mbus update --check`, and remote in-place updates.
 
 ## Configure
 

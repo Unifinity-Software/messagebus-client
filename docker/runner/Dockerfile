@@ -8,10 +8,23 @@
 #   docker build -f docker/runner/Dockerfile -t messagebus-runner .
 
 ARG NODE_VERSION=24
+ARG MBUS_RELEASE_VERSION
+ARG MBUS_SOURCE_REVISION
 
 # ── mbus, self-contained for the image's architecture ─────────────────────────
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 ARG TARGETARCH
+ARG MBUS_RELEASE_VERSION
+ARG MBUS_SOURCE_REVISION
+RUN if [ -n "$MBUS_RELEASE_VERSION" ]; then \
+      [ "$(printf '%s\n' "$MBUS_RELEASE_VERSION" | grep -Ex '[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?')" = "$MBUS_RELEASE_VERSION" ] \
+        && [ -n "$MBUS_SOURCE_REVISION" ] \
+        || { echo "Supply a release version and a full Git SHA for a release image." >&2; exit 1; }; \
+    fi \
+ && if [ -n "$MBUS_SOURCE_REVISION" ]; then \
+      [ "$(printf '%s\n' "$MBUS_SOURCE_REVISION" | grep -Ex '[0-9a-f]{40}')" = "$MBUS_SOURCE_REVISION" ] \
+        || { echo "MBUS_SOURCE_REVISION must be a full Git SHA." >&2; exit 1; }; \
+    fi
 WORKDIR /src
 COPY global.json Directory.Build.props Directory.Build.targets Directory.Packages.props ./
 COPY src/ src/
@@ -22,11 +35,19 @@ COPY global.json skill[s] skills/
 RUN rm -f skills/global.json \
  && find src -type d \( -name bin -o -name obj -o -name node_modules \) -prune -exec rm -rf {} + \
  && case "${TARGETARCH:-amd64}" in arm64) rid=linux-arm64 ;; *) rid=linux-x64 ;; esac \
+ && set -- \
+ && if [ -n "$MBUS_SOURCE_REVISION" ]; then set -- "$@" "-p:SourceRevisionId=$MBUS_SOURCE_REVISION"; fi \
+ && if [ -n "$MBUS_RELEASE_VERSION" ]; then set -- "$@" "-p:Version=$MBUS_RELEASE_VERSION" -p:MbusReleaseBuild=true; fi \
  && dotnet publish src/MessageBus.Cli.Tool/MessageBus.Cli.Tool.csproj -c Release -r "$rid" --self-contained \
-      -p:PublishSingleFile=true -p:DebugType=none -o /out
+      -p:PublishSingleFile=true -p:DebugType=none -p:MbusImageManaged=true "$@" -o /out
 
 # ── runtime: Node (the agent CLIs are npm packages) plus mbus ─────────────────
 FROM node:${NODE_VERSION}-bookworm-slim
+ARG MBUS_RELEASE_VERSION
+ARG MBUS_SOURCE_REVISION
+LABEL org.opencontainers.image.source="https://github.com/Unifinity-Software/messagebus-client" \
+      org.opencontainers.image.version="$MBUS_RELEASE_VERSION" \
+      org.opencontainers.image.revision="$MBUS_SOURCE_REVISION"
 
 # Agent CLI versions. "latest" picks up the newest release at build time; pin them (for example
 # --build-arg CLAUDE_CODE_VERSION=2.1.0) for repeatable images.

@@ -88,6 +88,13 @@ public sealed class CliHost
     /// </summary>
     public static string Version { get; } = ReadVersion();
 
+    internal static string? SourceRevision { get; } = BuildMetadata("MbusSourceRevision");
+    internal static bool IsRunnerImage { get; } = BuildMetadata("MbusImageManaged") == "true";
+    internal bool ImageManaged { get; init; } = IsRunnerImage;
+
+    private static string? BuildMetadata(string key) => typeof(CliHost).Assembly
+        .GetCustomAttributes<AssemblyMetadataAttribute>().FirstOrDefault(attribute => attribute.Key == key)?.Value;
+
     /// <summary>
     /// Folder for mbus's settings and machine key: <c>MBUS_HOME</c>, else <c>~/.mbus</c>.
     /// </summary>
