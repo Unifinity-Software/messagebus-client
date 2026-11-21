@@ -1,11 +1,14 @@
 using System.Diagnostics;
 using System.ComponentModel;
+using System.Net;
+using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using System.Xml.Linq;
 using System.IO.Compression;
 using System.Text.Json.Nodes;
+using MessageBus.Cli.Agents;
 using MessageBus.Cli.Update;
 using MessageBus.Cli.Runner;
 using MessageBus.Contracts.Runner;
@@ -24,15 +27,19 @@ public sealed class RealDotnetUpdateTests(ITestOutputHelper output)
     private string _probeHome = "";
     private string? _updateSource;
     private string? _cliHome;
+    private string _mcpEndpoint = "http://127.0.0.1:1";
 
     public static bool Enabled => Environment.GetEnvironmentVariable("MBUS_REAL_DOTNET_TESTS") == "1"
         && !new[] { "CI", "GITHUB_ACTIONS", "TF_BUILD", "GITLAB_CI", "JENKINS_URL", "TEAMCITY_VERSION", "BUILDKITE", "CIRCLECI" }.Any(name =>
             Environment.GetEnvironmentVariable(name) is { Length: > 0 } value
             && !value.Equals("false", StringComparison.OrdinalIgnoreCase) && value != "0");
 
-    [Fact]
-    public async Task Service_updates_and_rolls_back_using_package_versions_when_both_tools_report_the_same_dev_build()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Service_updates_and_rolls_back_using_package_versions_when_both_tools_report_the_same_dev_build(bool scm)
     {
+        if (scm && !OperatingSystem.IsWindows()) return;
         using var machine = new TestMachine();
         _probeHome = machine.MbusFolder;
         _cliHome = Path.Combine(machine.Home, "dotnet-home");
@@ -49,6 +56,7 @@ public sealed class RealDotnetUpdateTests(ITestOutputHelper output)
                 <TargetFramework>net10.0</TargetFramework>
                 <OutputType>Exe</OutputType>
                 <PackAsTool>true</PackAsTool>
+                <IsPackable>true</IsPackable>
                 <ToolCommandName>mbus</ToolCommandName>
                 <PackageId>{DotnetToolInstall.PackageId}</PackageId>
                 <InformationalVersion>{assemblyVersion}</InformationalVersion>
@@ -79,7 +87,8 @@ public sealed class RealDotnetUpdateTests(ITestOutputHelper output)
         var settings = machine.MbusFolder;
         var record = RunnerUpdateRecord.In(settings);
         DotnetToolUpdater Updater(string path) => new(DotnetToolInstall.Find(path)!, settings, dotnet, TextWriter.Null,
-            record, assemblyVersion, machine.Time, () => ProcessTable.Empty, source: feed, entryAssembly: path);
+            record, assemblyVersion, machine.Time, () => ProcessTable.Empty, source: feed, entryAssembly: path)
+            { MinimumServiceVersion = scm ? older : null };
         var updater = Updater(entry);
         await using var runner = new RunnerHarness(extensions: e => e with { SessionUpdater = updater });
         var ct = TestContext.Current.CancellationToken;
@@ -93,9 +102,20 @@ public sealed class RealDotnetUpdateTests(ITestOutputHelper output)
         Assert.Equal(older, attempt.From);
         Assert.Equal(newer, attempt.To);
 
-        // Enter the same applier as the service wrapper, with no live service or mbus subprocess.
-        File.Move(Path.Combine(root, OperatingSystem.IsWindows() ? "pending.cmd" : "pending.sh"), Path.Combine(root, "applying"));
-        Assert.Equal(0, await DotnetToolUpdater.RunApplierAsync("apply", root));
+        // Enter the real appliers without registering a service.
+        Task<CommandResult?> RunOffline(string executable, IReadOnlyList<string> args, TimeSpan timeout,
+            IReadOnlyDictionary<string, string>? environment) =>
+            DotnetToolUpdater.RunCommand(executable, args.Count == 9 && args[6] == newer
+                ? [.. args.Take(8), config] : args, timeout, environment);
+        Task<int> StartApplier() => scm
+            ? DotnetToolUpdater.RunServiceApplierAsync(root, tools, dotnet, () => ProcessTable.Empty, RunOffline)
+            : DotnetToolUpdater.RunApplierAsync("start", root);
+        if (scm) Assert.Equal(0, await StartApplier());
+        else
+        {
+            File.Move(Path.Combine(root, OperatingSystem.IsWindows() ? "pending.cmd" : "pending.sh"), Path.Combine(root, "applying"));
+            Assert.Equal(0, await DotnetToolUpdater.RunApplierAsync("apply", root));
+        }
         var newEntry = Entry(newer);
         Updater(newEntry).Startup();
         Assert.Equal(RunnerUpdateOutcome.Updated, record.Load(assemblyVersion, DotnetToolInstall.Find(newEntry))?.Outcome);
@@ -104,8 +124,8 @@ public sealed class RealDotnetUpdateTests(ITestOutputHelper output)
 
         // Simulate a runner that starts but cannot confirm its connection, with the original feed offline.
         Directory.Move(feed, feed + "-offline");
-        for (var starts = 0; starts < 3; starts++)
-            Assert.Equal(0, await DotnetToolUpdater.RunApplierAsync("start", root));
+        for (var starts = scm ? 1 : 0; starts < 3; starts++)
+            Assert.Equal(0, await StartApplier());
         Assert.Equal(RunnerUpdateOutcome.RolledBack,
             DotnetToolUpdater.Read<ToolUpdateResult>(Path.Combine(root, "result.json"))?.Outcome);
         Assert.Equal(older, DotnetToolInstall.Find(Entry(older))?.Package?.Version);
@@ -116,6 +136,8 @@ public sealed class RealDotnetUpdateTests(ITestOutputHelper output)
     [Fact(SkipUnless = nameof(Enabled), Skip = "Manual only: MBUS_REAL_DOTNET_TESTS=1 outside CI.")]
     public async Task Local_feed_update_with_and_without_running_mcp()
     {
+        await using var endpoint = new ProbeEndpoint();
+        _mcpEndpoint = endpoint.Url;
         var root = FindRoot();
         var temp = Path.Combine(Path.GetTempPath(), "mbus-real-dotnet-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(temp);
@@ -215,8 +237,8 @@ public sealed class RealDotnetUpdateTests(ITestOutputHelper output)
             await Run(shim, ["--version"], expectedOutput: exit == 0 ? newer : older);
             output.WriteLine("Old store directory exists: " + Directory.Exists(Path.Combine(tools, ".store", "messagebus.ai.cli", older)));
             await Request(mcp, 3, "tools/list", new { });
-            // First attachment call: exercises networking after the update. The closed loopback port
-            // must yield a protocol error, never a process crash or assembly load failure.
+            // First attachment call exercises networking after the update. This server has no
+            // attachments, but the running MCP must still reply with a protocol result.
             await Request(mcp, 4, "tools/call", new { name = "fetch_attachment", arguments = new { threadId = "probe", attachmentId = "probe", path = Path.Combine(temp, "attachment") } });
             if (OperatingSystem.IsMacOS()) await Run("/usr/sbin/lsof", ["-p", mcp.Id.ToString()], success: false);
         }
@@ -462,8 +484,9 @@ public sealed class RealDotnetUpdateTests(ITestOutputHelper output)
         foreach (var key in start.Environment.Keys.Where(k => k.StartsWith("MBUS_", StringComparison.Ordinal)).ToArray()) start.Environment.Remove(key);
         start.Environment["MBUS_HOME"] = _probeHome;
         Directory.CreateDirectory(start.Environment["MBUS_HOME"]!);
-        File.WriteAllText(Path.Combine(start.Environment["MBUS_HOME"]!, "config.json"), "{\"workspaceId\":\"probe\",\"keyStore\":\"file\"}");
-        start.Environment["MBUS_SERVER"] = "http://127.0.0.1:1";
+        File.WriteAllText(Path.Combine(start.Environment["MBUS_HOME"]!, "config.json"),
+            JsonSerializer.Serialize(new { workspaceId = "probe", keyStore = "file", server = _mcpEndpoint }));
+        start.Environment["MBUS_SERVER"] = _mcpEndpoint;
         start.Environment["MBUS_API_KEY"] = "synthetic-probe-only";
         if (_updateSource is not null) start.Environment["MBUS_UPDATE_NUGET_SOURCE"] = _updateSource;
         if (_cliHome is not null)
@@ -476,6 +499,53 @@ public sealed class RealDotnetUpdateTests(ITestOutputHelper output)
         if (packages is not null) start.Environment["NUGET_PACKAGES"] = packages;
         output.WriteLine(file + " " + (commandLine ?? string.Join(" ", start.ArgumentList)));
         return Process.Start(start)!;
+    }
+
+    // The packed MCP requires successful discovery before it can start. Use a loopback-only
+    // endpoint so the subprocess still uses real HTTP without contacting a hosted service.
+    private sealed class ProbeEndpoint : IAsyncDisposable
+    {
+        private readonly TcpListener _listener = new(IPAddress.Loopback, 0);
+        private readonly CancellationTokenSource _stop = new();
+        private readonly Task _serve;
+
+        internal ProbeEndpoint()
+        {
+            _listener.Start();
+            Url = $"http://127.0.0.1:{((IPEndPoint)_listener.LocalEndpoint).Port}";
+            _serve = ServeAsync(_stop.Token);
+        }
+
+        internal string Url { get; }
+
+        private async Task ServeAsync(CancellationToken ct)
+        {
+            try
+            {
+                while (!ct.IsCancellationRequested)
+                {
+                    using var client = await _listener.AcceptTcpClientAsync(ct);
+                    var stream = client.GetStream();
+                    using var reader = new StreamReader(stream, Encoding.ASCII, leaveOpen: true);
+                    var request = await reader.ReadLineAsync(ct);
+                    while (await reader.ReadLineAsync(ct) is { Length: > 0 }) { }
+                    var discovery = request?.StartsWith("GET /api/server ", StringComparison.Ordinal) == true;
+                    var body = discovery ? """{"product":"messagebus.ai","version":"0.1.0","capabilities":[]}""" : "{}";
+                    var status = discovery ? "200 OK" : "404 Not Found";
+                    await stream.WriteAsync(Encoding.ASCII.GetBytes(
+                        $"HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {body.Length}\r\nConnection: close\r\n\r\n{body}"), ct);
+                }
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            await _stop.CancelAsync();
+            _listener.Stop();
+            await _serve;
+            _stop.Dispose();
+        }
     }
 
     private async Task<int> Run(string file, IEnumerable<string> args, string? packages = null, bool success = true, string? expectedOutput = null, string? commandLine = null)

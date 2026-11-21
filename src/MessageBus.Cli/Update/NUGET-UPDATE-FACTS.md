@@ -21,9 +21,9 @@ MBUS_REAL_DOTNET_TESTS=1 dotnet test --project tests/MessageBus.Cli.Tests \
 
 `tests/MessageBus.Cli.Tests/Update/RealDotnetUpdateTests.cs` is an xunit manual harness. It skips
 unless explicitly opted in, and still skips when a recognized CI environment marker is enabled.
-A normal test run skips it. Each process has a bounded wait. It strips inherited `MBUS_*` values,
-uses its own settings and a synthetic API key, and points MCP at the closed loopback port
-`http://127.0.0.1:1`; it never contacts the real messagebus service or machine key store.
+A normal test run skips the manual probe. Each process has a bounded wait. It strips inherited
+`MBUS_*` values, uses its own settings and a synthetic API key, and points MCP at a loopback
+fixture that answers discovery. The probe uses only the fixture's endpoint and profile.
 Packing may restore build dependencies using the checkout's normal NuGet configuration; **tool
 install/update/recovery** use a generated local-only config and isolated `NUGET_PACKAGES`.
 

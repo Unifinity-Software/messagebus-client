@@ -73,6 +73,8 @@ public sealed record RunIsolationOptions
     /// </summary>
     public Func<TaskDelivery, bool>? UseOwnerGit { get; init; }
 
+    internal bool WindowsService { get; init; }
+
     /// <summary>Where each run's agent sends its own telemetry, with a credential for that run alone (the original issue).</summary>
     public IRunTelemetrySource Telemetry { get; init; } = new NoRunTelemetry();
 
@@ -226,7 +228,9 @@ public sealed class RunIsolation : IRunSandbox
                 ? $"Network: allowed connections go through this runner's proxy ({upstream.Describe()}), except hosts in its NO_PROXY."
                 : $"Network: {options.UpstreamProblem}.");
         }
-        if (options.RunTools)
+        if (options.WindowsService)
+            limits.Add(WindowsServiceLimit);
+        else if (options.RunTools)
         {
             limits.Add(options.KeyStore == "file" ? MachineKeyLimit(os.Mac is not null || os.Linux is not null, "file") : os.Linux is not null
                 ? "This machine's key: runs can't read mbus's settings folder, but a program that asks your desktop keyring for the key by name may still get it."
@@ -313,9 +317,13 @@ public sealed class RunIsolation : IRunSandbox
     /// <summary>For the Runners page's Run isolation line (one short sentence).</summary>
     public string Description => _aciProblem is not null ? "ACI task execution is blocked."
         : _aci is not null ? "Protected ACI sandbox: isolated files and processes, brokered public egress."
+        : _options.WindowsService ? "Basic isolation with a separate Windows service account."
         : Level == IsolationLevel.OsSandbox
         ? "OS sandbox: runs can't reach your personal files or other runs, and write only in their worktree."
         : "Own worktree and settings for each run, with no secrets from this machine.";
+
+    internal const string WindowsServiceLimit =
+        "Windows ACLs govern access to each user's profile. Task processes share the service identity and can access its files and DPAPI-protected secrets.";
 
     /// <summary>For the Runners page's Credentials line (short sentences).</summary>
     public string CredentialsDescription => _options.RunTools

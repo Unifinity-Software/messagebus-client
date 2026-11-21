@@ -34,6 +34,19 @@ public static class RunnerUpdateSetup
             return null;
         }
         ability = new RunnerUpdateAbility { CanUpdate = true, Via = RunnerInstallKind.Standalone };
+        if (host.WindowsService is { } service)
+        {
+            if (DotnetToolInstall.Running is not { ToolsPath: not null, Global: false, Package: { } package } worker)
+            {
+                ability = Off("The Windows runner service worker's private .NET tool package identity could not be verified.");
+                return null;
+            }
+            ability = new() { CanUpdate = true, Via = RunnerInstallKind.DotnetTool };
+            log.WriteLine("Updates: the Windows service supervisor updates the private .NET tool after the worker exits.");
+            return new DotnetToolUpdater(worker, host.ConfigDirectory, service.Dotnet, log,
+                record ?? RunnerUpdateRecord.In(host.ConfigDirectory), package.Version, host.Time)
+                { MinimumServiceVersion = service.HostVersion };
+        }
         if (DotnetToolInstall.Running is { } installedTool)
         {
             var manager = host.RunnerServices();

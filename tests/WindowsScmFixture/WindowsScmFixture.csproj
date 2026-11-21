@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>mbus.ScmFixture</AssemblyName>
+    <IsPackable Condition="'$(ScmFixturePack)' == 'true'">true</IsPackable>
+    <PackAsTool Condition="'$(ScmFixturePack)' == 'true'">true</PackAsTool>
+    <ToolCommandName>mbus</ToolCommandName>
+    <PackageId Condition="'$(ScmFixturePack)' == 'true'">MessageBus.Ai.Cli</PackageId>
+    <InformationalVersion>0.0.0-scm-fixture</InformationalVersion>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/MessageBus.Cli/MessageBus.Cli.csproj" />
+  </ItemGroup>
+</Project>

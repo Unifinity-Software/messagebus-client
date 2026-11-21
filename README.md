@@ -20,6 +20,41 @@ mbus runner install
 shows each file it changes first. `mbus runner install` keeps the machine available for tasks. Update later with
 `dotnet tool update --global MessageBus.Ai.Cli`, or with **Update now** on the dashboard's Runners page.
 
+### Windows runners that start at boot
+
+For personal PCs, `mbus runner install` sets up a Scheduled Task that starts when you sign in.
+To use a dedicated standard user with the Scheduled Task, sign in as that user once, run `mbus login`
+and `mbus runner env --save`, and run `mbus runner install` under that account. Give it only the
+repository access it needs. It must remain signed in. Windows fast user switching keeps that session available.
+
+`mbus runner install --service --server https://app.messagebus.ai` installs a delayed-start Windows service
+that can run before anyone signs in. From an elevated terminal, use a published mbus .NET tool, a machine-wide
+.NET SDK in Program Files, and Git and the agent CLIs on the machine PATH. Set `MBUS_API_KEY` or
+`MBUS_API_KEY_FILE` to a runner-scoped key for the selected server. The service creates its own identity and
+discards the bootstrap key after enrollment. `--print` previews the install without changing the machine.
+
+The default identity is `NT SERVICE\mbus-runner`. On a domain-joined host, `--account DOMAIN\name$`
+selects a dedicated gMSA. Provision it on the host, authorize the host to retrieve its password, and grant it
+**Log on as a service**. **Do not add the runner account to Backup Operators.** Its backup and restore
+privileges bypass file ACLs. Virtual accounts can authenticate to Windows network resources as the computer
+account. Keep the computer account and any gMSA out of groups that can read developer data.
+
+Set tokens with `mbus runner env --save --service` from an elevated terminal. The supported variables are
+`CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY` for Claude Code, `OPENAI_API_KEY` or `CODEX_API_KEY`
+for Codex, and `COPILOT_GITHUB_TOKEN` for GitHub Copilot CLI. Each also accepts a `_FILE` variable
+containing the path to a token file. Use `mbus doctor --service` to check enrollment and configured token
+names, and `mbus runner env --clear --service` to remove stored agent tokens. Use a workspace integration
+that issues per-run repository tokens.
+
+The protected host in Program Files supervises a private worker installation in ProgramData. The worker drains
+before updates, and the supervisor can restore the previous installer package offline. The Runners page
+reports Basic isolation with a separate service account. Windows ACLs govern access to developer files.
+Processes in a run share the service's account, so they can read that account's state and use its DPAPI
+secrets. The network proxy applies to programs that use it.
+
+`mbus runner uninstall --service` drains the worker and removes the service and its local state. The associated
+machine record can be removed separately from the Runners page.
+
 Help center: [messagebus.ai/docs](https://messagebus.ai/docs).
 
 ## OpenCode with LM Studio

@@ -27,10 +27,20 @@ internal static class RunnerServiceCommand
         var print = new Option<bool>("--print") { Description = "Show what would be registered and the commands it runs, and change nothing." };
         var force = new Option<bool>("--force") { Description = "Install even when the mbus set up before is a newer version." };
         var keyStore = new Option<string?>("--key-store") { Description = "On macOS: file or keychain. Persist where this machine keeps its key." };
-        var install = new Command("install", "Start the runner whenever you sign in to this computer, and again after each update.") { slots, workDir, print, force, keepAwake, codexSandbox, agentTools, keyStore };
+        var installService = WindowsServiceOption();
+        var account = new Option<string?>("--account") { Description = @"With --service, use a provisioned DOMAIN\gmsa$ account." };
+        var install = new Command("install", "Start the runner at sign-in, or configure a dedicated Windows service.") { slots, workDir, print, force, keepAwake, codexSandbox, agentTools, keyStore, installService, account };
         install.SetAction(async (parse, ct) =>
         {
             if (Security.RunContext.IsInsideRun(host.GetEnvironmentVariable)) throw new CliException(Security.RunContext.KeyRefused);
+            if (parse.GetValue(installService))
+            {
+                if (!OperatingSystem.IsWindows()) throw WindowsOnly();
+                if (parse.GetValue(force) || new[] { workDir, keepAwake, codexSandbox, agentTools, keyStore, slots }.Any(option => parse.GetValue(option) is not null))
+                    throw new CliException("The dedicated Windows service uses its own work directory, key store, and runner settings.");
+                return await WindowsServiceCommands.InstallAsync(host, parse.GetValue(account), parse.GetValue(options.Server), parse.GetValue(print), ct);
+            }
+            if (parse.GetValue(account) is not null) throw new CliException("--account requires --service.");
             var context = CommandContext.Load(host, parse, options);
             var choice = parse.GetValue(keyStore)?.Trim().ToLowerInvariant();
             if (choice is not null && (choice is not ("file" or "keychain") || !OperatingSystem.IsMacOS()))
@@ -187,9 +197,15 @@ internal static class RunnerServiceCommand
         runner.Subcommands.Add(install);
 
         var uninstallPrint = new Option<bool>("--print") { Description = "Show the commands it would run, and change nothing." };
-        var uninstall = new Command("uninstall", "Stop starting the runner when you sign in, and stop it now. Running tasks go back to the queue.") { uninstallPrint };
+        var uninstallService = WindowsServiceOption();
+        var uninstall = new Command("uninstall", "Remove the runner's automatic start and stop it now. Running tasks go back to the queue.") { uninstallPrint, uninstallService };
         uninstall.SetAction(async (parse, ct) =>
         {
+            if (parse.GetValue(uninstallService))
+            {
+                if (!OperatingSystem.IsWindows()) throw WindowsOnly();
+                return await WindowsServiceCommands.UninstallAsync(host, parse.GetValue(uninstallPrint), ct);
+            }
             var context = CommandContext.Load(host, parse, options);
             var plan = PlanFor(host, context, []);
             if (parse.GetValue(uninstallPrint))
@@ -266,15 +282,21 @@ internal static class RunnerServiceCommand
         // unit you write yourself starts the runner).
         var save = new Option<bool>("--save") { Description = "Store the agent sign-in variables set in this shell, replacing the stored ones." };
         var clear = new Option<bool>("--clear") { Description = "Delete the stored agent sign-ins." };
-        var env = new Command("env", "Show which agent sign-ins (such as CLAUDE_CODE_OAUTH_TOKEN) are stored for the runner's agents: names only, never values.") { save, clear };
+        var envService = WindowsServiceOption();
+        var env = new Command("env", "Show which agent sign-ins (such as CLAUDE_CODE_OAUTH_TOKEN) are stored for the runner's agents: names only, never values.") { save, clear, envService };
         env.SetAction(async (parse, ct) =>
         {
-            var context = CommandContext.Load(host, parse, options);
-            var stored = context.Store.AgentEnvironment;
             if (parse.GetValue(save) && parse.GetValue(clear))
             {
                 throw new CliException("Use --save or --clear, not both.");
             }
+            if (parse.GetValue(envService))
+            {
+                if (!OperatingSystem.IsWindows()) throw WindowsOnly();
+                return await WindowsServiceCommands.EnvironmentAsync(host, parse.GetValue(save), parse.GetValue(clear), ct);
+            }
+            var context = CommandContext.Load(host, parse, options);
+            var stored = context.Store.AgentEnvironment;
             if (parse.GetValue(clear))
             {
                 await host.Out.WriteLineAsync(stored.Delete()
@@ -301,6 +323,13 @@ internal static class RunnerServiceCommand
         });
         runner.Subcommands.Add(env);
     }
+
+    internal static Option<bool> WindowsServiceOption() => new("--service")
+    {
+        Description = "Use the dedicated Windows runner service.",
+    };
+
+    internal static CliException WindowsOnly() => new("--service is available only on Windows.");
 
     /// <summary>Says which agent sign-ins the service has (names only, never values) and how to change them.</summary>
     private static async Task WriteSignInsAsync(CliHost host, IEnumerable<string> names, bool kept, string path, ServicePlatform platform, Hosting.MbusOnPath mbus)

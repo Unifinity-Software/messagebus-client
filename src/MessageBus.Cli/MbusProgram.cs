@@ -7,6 +7,17 @@ public static class MbusProgram
     public static async Task<int> RunAsync(string[] args)
     {
         var imageManaged = Hosting.CliHost.IsRunnerImage;
+        if (!imageManaged && OperatingSystem.IsWindows() && args is [var serviceCommand]
+            && serviceCommand is Runner.Service.WindowsRunnerService.HostCommand or Runner.Service.WindowsRunnerService.WorkerCommand or Runner.Service.WindowsRunnerService.ApplyCommand)
+        {
+            // SCM must own the actual dispatcher process. Its protected entry point never hands off.
+            try { return await Runner.Service.WindowsRunnerService.RunAsync(serviceCommand); }
+            catch (CliException ex)
+            {
+                await Console.Error.WriteLineAsync(ex.Message);
+                return ex.ExitCode;
+            }
+        }
         if (args is [Update.DotnetToolUpdater.PrivateCommand, var mode, var directory])
         {
             if (!imageManaged)

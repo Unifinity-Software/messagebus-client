@@ -1,5 +1,6 @@
 using System.IO.Compression;
 using System.Xml.Linq;
+using MessageBus.Cli.Agents;
 using MessageBus.Cli.Runner.Service;
 using MessageBus.Cli.Tests.Runner;
 using MessageBus.Cli.Update;
@@ -403,17 +404,22 @@ public sealed class DotnetToolUpdaterTests : IDisposable
     }
 
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task Detached_applier_refuses_a_saved_archive_with_changed_payload(bool recovery)
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task Detached_applier_refuses_a_saved_archive_with_changed_payload(bool recovery, bool service)
     {
+        if (service && !OperatingSystem.IsWindows()) return;
         var directory = Temp("mbus-update-saved-checksum-");
         var tools = Path.Combine(directory, "tools");
         var install = DotnetToolInstallTests.Install(tools);
         var entry = DotnetToolInstallTests.WriteRecoverableTool(install, "installed program");
         File.WriteAllText(Path.Combine(tools, OperatingSystem.IsWindows() ? "mbus.exe" : "mbus"), "shim");
-        var updater = new DotnetToolUpdater(install, directory, Path.Combine(directory, "unused-dotnet"), TextWriter.Null,
-            RunnerUpdateRecord.In(directory), "1.0.0", TimeProvider.System, () => ProcessTable.Empty, entryAssembly: entry);
+        var dotnet = Path.Combine(directory, "unused-dotnet");
+        var updater = new DotnetToolUpdater(install, directory, dotnet, TextWriter.Null,
+            RunnerUpdateRecord.In(directory), "1.0.0", TimeProvider.System, () => ProcessTable.Empty, entryAssembly: entry)
+            { MinimumServiceVersion = service ? "1.0.0" : null };
         Assert.True(await updater.InstallAsync(new() { Version = "2.0.0" }, TestContext.Current.CancellationToken));
         var root = Path.Combine(directory, "update");
         ChangeArchivePayload(Directory.GetFiles(Path.Combine(root, "recovery"), "*.nupkg").Single());
@@ -422,11 +428,20 @@ public sealed class DotnetToolUpdaterTests : IDisposable
         if (recovery)
         {
             // Simulate interrupted recovery with an unstartable shim.
-            File.Delete(Path.Combine(root, OperatingSystem.IsWindows() ? "pending.cmd" : "pending.sh"));
+            File.Delete(Path.Combine(root, service ? "pending.service" : OperatingSystem.IsWindows() ? "pending.cmd" : "pending.sh"));
             DotnetToolUpdater.Write(attemptPath, attempt with { RecoveryTries = 1 });
         }
 
-        Assert.Equal(0, await DotnetToolUpdater.RunApplierAsync(recovery ? "start" : "apply", root));
+        var exit = service
+            ? await DotnetToolUpdater.RunServiceApplierAsync(root, tools, dotnet, () => ProcessTable.Empty, (executable, args, _, _) =>
+            {
+                Assert.True(recovery);
+                Assert.Equal(install.Shim, executable);
+                Assert.Equal(["--version"], args);
+                return Task.FromResult<CommandResult?>(null);
+            })
+            : await DotnetToolUpdater.RunApplierAsync(recovery ? "start" : "apply", root);
+        Assert.Equal(0, exit);
         var result = DotnetToolUpdater.Read<ToolUpdateResult>(Path.Combine(root, "result.json"))!;
         Assert.Equal(RunnerUpdateOutcome.NotInstalled, result.Outcome);
         Assert.Contains("does not match its recorded SHA-512 checksum", result.Reason);
