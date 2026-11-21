@@ -74,6 +74,14 @@ public sealed class ReverseConnectionClient(ReverseConnectionClientOptions optio
     public async Task<ReverseConnectionStop> RunAsync(CancellationToken cancellationToken)
     {
         options.KeepAlive.Validate();
+        using var handshake = new HttpMessageInvoker(new SocketsHttpHandler
+        {
+            AllowAutoRedirect = false,
+            UseCookies = false,
+            Credentials = null,
+            PreAuthenticate = false,
+            DefaultProxyCredentials = null,
+        });
         var listener = new SocketListener();
         var app = BuildServer(listener);
         ReverseConnectionStop stop;
@@ -81,7 +89,7 @@ public sealed class ReverseConnectionClient(ReverseConnectionClientOptions optio
         {
             await app.StartAsync(cancellationToken).ConfigureAwait(false);
             Report(new ReverseConnectionStatus(ReverseConnectionState.Connecting));
-            stop = await KeepConnectedAsync(listener, cancellationToken).ConfigureAwait(false);
+            stop = await KeepConnectedAsync(listener, handshake, cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -104,14 +112,14 @@ public sealed class ReverseConnectionClient(ReverseConnectionClientOptions optio
         return stop;
     }
 
-    private async Task<ReverseConnectionStop> KeepConnectedAsync(SocketListener listener, CancellationToken cancellationToken)
+    private async Task<ReverseConnectionStop> KeepConnectedAsync(SocketListener listener, HttpMessageInvoker handshake, CancellationToken cancellationToken)
     {
         var time = options.TimeProvider;
         var attempt = 0;
         while (true)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var outcome = await ConnectAsync(cancellationToken).ConfigureAwait(false);
+            var outcome = await ConnectAsync(handshake, cancellationToken).ConfigureAwait(false);
             string reason;
             TimeSpan? minimumDelay = null;
             int? closeCode = null;
@@ -206,7 +214,7 @@ public sealed class ReverseConnectionClient(ReverseConnectionClientOptions optio
         }
     }
 
-    private async Task<ConnectOutcome> ConnectAsync(CancellationToken cancellationToken)
+    private async Task<ConnectOutcome> ConnectAsync(HttpMessageInvoker handshake, CancellationToken cancellationToken)
     {
         var uri = options.ConnectUri;
         var webSocket = new ClientWebSocket();
@@ -220,9 +228,22 @@ public sealed class ReverseConnectionClient(ReverseConnectionClientOptions optio
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeout.Token);
         try
         {
+            var request = new ConnectRequest(uri, settings);
+            async Task Connect(CancellationToken ct)
+            {
+                await webSocket.ConnectAsync(uri, handshake, ct).ConfigureAwait(false);
+            }
             if (options.PrepareRequest is { } prepare)
-                await prepare(new ConnectRequest(uri, settings), linked.Token).ConfigureAwait(false);
-            await webSocket.ConnectAsync(uri, linked.Token).ConfigureAwait(false);
+                await prepare(request, linked.Token).ConfigureAwait(false);
+            if (options.ExecuteConnect is { } execute)
+                await execute(request, Connect, linked.Token).ConfigureAwait(false);
+            else
+                await Connect(linked.Token).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (options.IsTerminalPreparationException?.Invoke(ex) == true)
+        {
+            webSocket.Dispose();
+            return new ConnectOutcome.Refused(null, ex.Message);
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
@@ -259,6 +280,8 @@ public sealed class ReverseConnectionClient(ReverseConnectionClientOptions optio
     private static ConnectOutcome Classify(ClientWebSocket webSocket)
     {
         var status = (int)webSocket.HttpStatusCode;
+        if (status is >= 300 and <= 399)
+            return new ConnectOutcome.Refused(status, "WebSocket redirects are refused; credentials were not replayed.");
         if (status < 400)
             return new ConnectOutcome.Retry("Couldn't reach the server.", null); // DNS, TCP or TLS failed.
 
@@ -371,6 +394,6 @@ public sealed class ReverseConnectionClient(ReverseConnectionClientOptions optio
 
         public sealed record Retry(string Reason, TimeSpan? RetryAfter) : ConnectOutcome;
 
-        public sealed record Refused(int StatusCode, string Reason) : ConnectOutcome;
+        public sealed record Refused(int? StatusCode, string Reason) : ConnectOutcome;
     }
 }

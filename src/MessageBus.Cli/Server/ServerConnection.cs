@@ -58,7 +58,7 @@ public static class ServerConnection
     }
 
     // A selected destination is not permission to reuse an identity or workspace from another endpoint.
-    private static void DemandStoredCredentialScope(CliSettings settings)
+    internal static void DemandStoredCredentialScope(CliSettings settings)
     {
         if (settings.Stored.MachineId is null && settings.Stored.WorkspaceId is null) return;
         if (settings.Server is null || settings.Stored.Server is null

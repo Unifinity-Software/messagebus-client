@@ -68,8 +68,8 @@ internal static class RunnerKeyEnrollment
         using var key = pending is null ? MachineKey.Create()
             : MachineKey.FromPem(context.Store.LoadKeyPem() ?? throw new CliException("The runner enrollment checkpoint has no machine key. Restore its persisted identity."));
         var inventory = await AgentScanner.BuildInventoryAsync(host, settings.Stored.MachineId, settings.Location, ct).ConfigureAwait(false);
-        using var anonymous = ServerConnection.CreateAnonymousClient(host, server);
-        var enrolled = await ServerConnection.EnrollAsync(anonymous, server, new AuthenticationHeaderValue(AuthSchemes.ApiKey, apiKey),
+        using var enrollment = ServerConnection.CreateAuthenticatedClient(host, settings, context.Store, "runner");
+        var enrolled = await ServerConnection.EnrollAsync(enrollment, server, new AuthenticationHeaderValue(AuthSchemes.ApiKey, apiKey),
             new MachineEnrollRequest { PublicKey = key.PublicKeyBase64, Name = settings.MachineName, Location = settings.Location, Inventory = inventory }, ct).ConfigureAwait(false);
 
         context.Store.SaveKeyPem(key.ExportPrivateKeyPem());

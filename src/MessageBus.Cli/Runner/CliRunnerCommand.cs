@@ -295,6 +295,16 @@ namespace MessageBus.Cli.Runner
         public HttpClient CreateServiceClient() =>
             ServerConnection.CreateAuthenticatedClient(context.Host, context.Settings, context.Store, "runner");
 
+        public async Task ConnectAsync(ConnectRequest request, Func<CancellationToken, Task> connect, CancellationToken ct)
+        {
+            ServerConnection.DemandStoredCredentialScope(context.Settings);
+            using var gate = new ServerSendGate(context.Host, context.Store, ServerUrl);
+            var signer = context.Settings.ApiKey is null
+                ? ServerConnection.CreateSigner(context.Host, context.Settings, context.Store) : null;
+            await RunnerHandshake.ConnectAsync(gate, request, signer, context.Settings.ApiKey,
+                context.Settings.Stored.WorkspaceId, connect, ct).ConfigureAwait(false);
+        }
+
         public IReadOnlyList<KeyValuePair<string, string>> CreateConnectHeaders(string method, string pathAndQuery)
         {
             var headers = new List<KeyValuePair<string, string>>
@@ -391,12 +401,10 @@ namespace MessageBus.Cli.Runner
             })) with
             {
                 TimeProvider = time,
+                ExecuteConnect = host.ConnectAsync,
+                IsTerminalPreparationException = RunnerHandshake.IsTerminal,
                 PrepareRequest = (request, _) =>
                 {
-                    foreach (var (name, value) in host.CreateConnectHeaders(request.Method, request.PathAndQuery))
-                    {
-                        request.SetHeader(name, value);
-                    }
                     request.SetHeader(MbusHeaders.Session, session);
                     // the original issue: the slots in use now (the dashboard may have changed them), not the starting count.
                     var status = dispatcher.Engine.GetStatus();

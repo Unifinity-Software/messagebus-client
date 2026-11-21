@@ -47,6 +47,18 @@ public interface IRunnerHostContext
     /// <param name="pathAndQuery">Path and query exactly as sent.</param>
     IReadOnlyList<KeyValuePair<string, string>> CreateConnectHeaders(string method, string pathAndQuery);
 
+    /// <summary>
+    /// Authenticates and awaits one actual handshake. Built-in hosts retain the profile security reservation
+    /// through completion; the default adapter preserves existing custom host implementations.
+    /// </summary>
+    Task ConnectAsync(MessageBus.Runner.Transport.ConnectRequest request, Func<CancellationToken, Task> connect,
+        CancellationToken cancellationToken)
+    {
+        foreach (var (name, value) in CreateConnectHeaders(request.Method, request.PathAndQuery))
+            request.SetHeader(name, value);
+        return connect(cancellationToken);
+    }
+
     /// <summary>Full path of a command the way a shell would find it (PATH, PATHEXT, known install folders), or null.</summary>
     string? LocateCommand(string command);
 
