@@ -110,6 +110,7 @@ internal static class RunCodeReturn
         var input = new SettleInput
         {
             ThreadId = task.ThreadId, DeliveryId = delivery.DeliveryId, ReplyOnly = true,
+            Attempt = await TargetCapabilities.SupportsAsync(http, "settleAttemptV1", ct).ConfigureAwait(false) ? delivery.Attempt : null,
             Result = new SettleResult { Status = SettleStatus.Succeeded, Summary = body.Summary, Refs = [new Ref { Kind = "git.commit", Sha = head }] },
             SealedReply = sealedBody.ToSealedBody(),
             Attachments = [attachmentRef],
