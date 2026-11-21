@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using MessageBus.Cli.Agents;
 using MessageBus.Contracts.Machines;
 using MessageBus.Contracts.Messaging;
 using MessageBus.Contracts.Roles;
@@ -73,6 +74,11 @@ public sealed partial class CodexAdapter(
         if (CannotKeepTools(kept) is { } missing)
             return new AgentLaunch([], context.Prompt) { CannotStart = missing };
         var userConfig = Path.Combine(codexHome ?? DefaultHome(), "config.toml");
+        if (context.UsesCodexEnvironmentKey && kept.Count > 0 && MayForwardKey(userConfig))
+            return new AgentLaunch([], context.Prompt)
+            {
+                CannotStart = "Codex's settings may forward CODEX_API_KEY to a retained tool. Remove the key reference from the tool settings or use saved Codex sign-in for this role.",
+            };
         var repositoryServers = RepositoryMcpServers(context.WorkingDirectory, userConfig);
         var collisions = repositoryServers.Where(name => kept.Contains(name, StringComparer.Ordinal)).ToArray();
         if (kept.Count > 0 && (collisions.Length > 0 || RepositorySettingsMayDefineTools(context.WorkingDirectory)))
@@ -155,6 +161,11 @@ public sealed partial class CodexAdapter(
             prompt += "\n" + DotnetPromptNote + "\n";
         }
         args.AddRange(["-c", "features.plugins=false", "-c", "features.apps=false"]);
+        if (context.UsesCodexEnvironmentKey)
+        {
+            // Keep the user's shell filters while replacing the client's key in every command environment.
+            args.AddRange(["-c", CodexAuthentication.ShellKeyOverride]);
+        }
         foreach (var other in OtherMcpServers(userConfig).Union(repositoryServers, StringComparer.Ordinal))
         {
             if (kept.Contains(other, StringComparer.Ordinal))
@@ -173,6 +184,8 @@ public sealed partial class CodexAdapter(
         if (context.McpEnvironment is { } mcpEnvironment)
         {
             var server = "mcp_servers." + Connect.McpServerName.Value;
+            // Task tools receive only their run variables, including when a local mbus MCP config exists.
+            args.AddRange(["-c", $"{server}.env_vars=[]"]);
             if (!mbusServerConfigured)
             {
                 var command = mbus ?? Mcp.McpLaunchCommand.ForCurrentProcess();
@@ -182,7 +195,8 @@ public sealed partial class CodexAdapter(
             }
             foreach (var (name, value) in mcpEnvironment.OrderBy(v => v.Key, StringComparer.Ordinal))
             {
-                args.AddRange(["-c", $"{server}.env.{name}={Connect.CodexTomlConfig.Quote(value)}"]);
+                if (!CodexAuthentication.IsKeyVariable(name))
+                    args.AddRange(["-c", $"{server}.env.{name}={Connect.CodexTomlConfig.Quote(value)}"]);
             }
         }
         if (context.Model is { Length: > 0 } chosen)
@@ -416,6 +430,22 @@ public sealed partial class CodexAdapter(
 
     [GeneratedRegex("""^\s*\[\s*mcp_servers\s*\.\s*(?:"(?<name>[^"]+)"|'(?<name>[^']+)'|(?<name>[A-Za-z0-9_-]+))\s*\]\s*(?:#.*)?$""")]
     private static partial Regex ServerHeader();
+
+    private static bool MayForwardKey(string config)
+    {
+        try
+        {
+            // A server can request the parent's key as an env var or an HTTP header. Refuse
+            // key references (including ones potentially written with TOML Unicode escapes).
+            var settings = File.ReadAllText(config);
+            return settings.Contains(CodexAuthentication.CodexKey, StringComparison.OrdinalIgnoreCase)
+                || settings.Contains(@"\u", StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return true;
+        }
+    }
 
     // Fail closed without interpreting TOML or relying on the inferred project trust settings.
     private static bool RepositorySettingsMayDefineTools(string workingDirectory)

@@ -116,7 +116,8 @@ public sealed class MachineBundles : IDisposable
                         if (message.Envelope.Type == ProgressRequestKinds.GitHistoryMessageType && message.Envelope.ThreadId == delivery.Envelope.ThreadId
                             && message.Envelope.Attachments.FirstOrDefault(a => a.Format == AttachmentFormat.GitBundle) is { } history)
                             path = await FetchAsync(taken.ThreadId, taken.DeliveryId, message.Links, history, Path.Combine(runDirectory, "history.bundle"), ct);
-                        await SettleQuietlyAsync(service, taken, path is not null, ct);
+                        if (taken.Status == DeliveryStatus.Leased)
+                            await SettleQuietlyAsync(service, taken, path is not null, ct);
                     }
                     if (path is not null) return path;
                 }

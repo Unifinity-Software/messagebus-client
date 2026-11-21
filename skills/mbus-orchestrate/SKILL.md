@@ -42,8 +42,8 @@ worker, not the orchestrator: follow [reference/worker.md](reference/worker.md) 
   get a word in. A message from the user outranks the loop: stop before the next `wait`, answer
   it, and do what it asks first, even if tasks are still running. They keep running without you,
   and `wait` picks them up again when you go back. Never hold an answer back until a task group
-  finishes. Run long local commands (a full build or test run) in the background where your client
-  can, so you can still answer while they run. When the user changes the plan, change it: cancel or
+  finishes. Run any authorized long local commands in the background where your client can, so
+  you can still answer while they run. When the user changes the plan, change it: cancel or
   hold the tasks they name, and don't defend the old plan.
 - **Stay quiet while it runs.** Make tool calls without announcing them, and don't retell what a
   worker did. The user sees: the plan (once), a one-line note when a group of tasks finishes or
@@ -114,6 +114,8 @@ worker, not the orchestrator: follow [reference/worker.md](reference/worker.md) 
    ask the user.
    For tasks requiring [approved frontend verification](reference/workflow-steps.md#approved-frontend-verification),
    discover the environment and pin the input revision. Include any verification blocker in the plan.
+   Plan the required builds, full affected suites and acceptance checks with a suitable remote
+   `role:tester` runner by default. Include any required OS, host, toolchain or permissions.
    Show the plan to the user as the task checklist
    ([reference/terminal-output.md](reference/terminal-output.md)), then dispatch. If the work item
    or workflow asks for a person to sign off the design before code is written, send the design
@@ -152,18 +154,32 @@ worker, not the orchestrator: follow [reference/worker.md](reference/worker.md) 
    A waiting reason `owner-runners` means none of the project owner's personal runners matches
    the target: explain the missing runner, role or capability; don't resend elsewhere. Retries, fixes and
    follow-ups keep the project's scope.
-7. **Test the bigger changes, then verify locally.** Once the developers' work is merged, send a
-   `task.test` to `role:tester` with the merged branch attached when the change spans several
-   parts or a review says tests are missing: it adds and runs tests for the change as a whole and
-   returns them as a bundle, which you review and merge like any other. Send it with
-   `excludeAuthors: true` so the code's authors don't test their own work; if that leaves no
-   tester, send it without and say so in one line. Skip it for a small fix whose
-   own tests cover it; if no agent holds the tester role, say so in one line and go on. Apply
-   [approved frontend verification](reference/workflow-steps.md#approved-frontend-verification)
-   when the tester task requires frontend checks. Then, on the
-   merged branch, run the work item's acceptance checks yourself (build, tests). A worker saying
-   "tests pass" is not proof. Fix-ups go back to workers as tasks.
+7. **Verify the integrated commit on a remote runner by default.** When a change spans several
+   parts or review finds a coverage gap, send `task.test` to `role:tester` to add tests that guard
+   the combined behavior. Review and merge its bundle like any other. Prefer `excludeAuthors: true`
+   for this task. If that leaves no tester, relax it only when the workflow permits and say so.
+   A small fix with sufficient coverage can skip test authoring. Required checks still apply.
+
+   Once the relevant changes, including any new tests, are integrated, send a verification-only
+   `task.test` to a suitable remote `role:tester` by default. Run the required builds, full affected
+   suites and acceptance checks on the exact integrated commit. Reuse evidence from a required
+   workflow step when it covers the same check on that SHA and meets the same requirements. Keep
+   all repository, release and user gates, including checks assigned to a particular role, OS or
+   host. Apply [approved frontend verification](reference/workflow-steps.md#approved-frontend-verification)
+   where required.
+
+   Follow the [dispatch and evidence instructions](reference/tool-calls.md#remote-verification-tasks).
+   Match the runner's OS, toolchain and permissions to each check. Confirm the reported environment
+   and tested SHA, and review the commands, exit statuses and counts or logs against the plan.
+   Record missing or incomplete checks as unverified. Send fixes back to workers and redispatch
+   affected checks on the new integrated SHA whenever it changes, including any gates that require
+   evidence on the final commit.
+
+   If no authorized remote runner can execute a required check, report the check and concrete
+   blocker. Ask the user before falling back to a heavy run on their PC. Use a fallback only if
+   it satisfies the applicable requirements, and keep the check blocked until you have valid evidence.
 8. **`complete_project`** `{projectId, summary, status: "completed" | "failed", refs, usage?}`.
+   Mark the project completed only after the required checks pass and the evidence is verified.
    `usage` is this session's own tokens and time; give it if your client shows them to you,
    otherwise leave it out (under Claude Code and Codex the local server reads usage since the session's last automatic report, keeping a checkpoint across wake-ups; unavailable usage is omitted with a notice). Explicit usage is unchanged.
 9. **Report** to the user: per task the role, machine, agent, time, tokens and cost from the tool

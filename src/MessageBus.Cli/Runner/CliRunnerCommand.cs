@@ -147,10 +147,20 @@ namespace MessageBus.Cli.Runner
                             : new Output.TimestampedWriter(host.Error, host.Time, timeOnly: false));
                         await RunnerKeyWait.WaitAsync(loaded.Store.LoadKeyPem, loaded.Store.KeyVault.Description, keyLog, host.Time, ct);
                     }
-                    var context = await RunnerKeyEnrollment.EnsureAsync(loaded, () => CommandContext.Load(host, parse, options), log, onlyRunnerKeys: false, ct) ?? loaded;
+                    var service = host.WindowsService;
+                    var enrolled = await RunnerKeyEnrollment.EnsureAsync(loaded, () => CommandContext.Load(host, parse, options), log,
+                        onlyRunnerKeys: service is not null, ct);
+                    var context = enrolled ?? loaded;
+                    if (OperatingSystem.IsWindows() && service?.Enrollment is not null)
+                    {
+                        if (enrolled is null || context.Settings.Stored.MachineId is null || context.Settings.ApiKey is not null)
+                            throw new CliException("The Windows service could not enroll. Supply a runner-scoped API key for its configured server.");
+                        Service.WindowsServiceEnrollment.Clear(service.Settings);
+                        service.Enrollment = null;
+                    }
                     context.Store.RunnerKeyReads = true;
                     context.Store.KeyReadLog = loaded.Store.KeyReadLog;
-                    runnerOptions = runnerOptions with { KeyStore = context.Store.KeyStoreName };
+                    runnerOptions = runnerOptions with { KeyStore = context.Store.KeyStoreName, WindowsService = service is not null };
                     if (context.Settings.Server is null || !context.Settings.CanAuthenticate(context.Store))
                     {
                         throw ServerConnection.NotSignedIn();
@@ -187,7 +197,8 @@ namespace MessageBus.Cli.Runner
                         await lines.WriteLineAsync(otherMbus);
                     }
                     view?.Advice = mbus.Differs ? mbus.Advice : null;
-                    var exitCode = await RunnerCommand.RunAsync(runnerHost, runnerOptions, new ReverseConnectionTransport(runnerHost, lines, host.Time, updater is not null),
+                    var exitCode = await RunnerCommand.RunAsync(runnerHost, runnerOptions, new ReverseConnectionTransport(runnerHost, lines, host.Time, updater is not null)
+                        { UpdateRequiredReason = host.ImageManaged ? updates.Reason : null },
                         lines, host.Time, ct, updater, http => new RunnerExtensions
                         {
                             Bundles = MachineBundleSource.Create(context, http), Tools = RunToolsServer.Create(context), Connect = connect.RequestAsync,
@@ -198,9 +209,9 @@ namespace MessageBus.Cli.Runner
                             LastUpdate = () => lastUpdate.Load(CliHost.Version),
                             // the original issue: an update this mbus can't install is refused with the reason, and the runner carries on.
                             Updates = updates,
-                            KeepUpdateResult = report => lastUpdate.Save(report, log),
+                            KeepUpdateResult = host.ImageManaged ? null : report => lastUpdate.Save(report, log),
                             RunApprovals = runApprovals,
-                            ToolSetup = new ToolSetupRequests(OperatingSystem.IsMacOS() ? new MacGitSetup(host) : new WindowsGitSetup(host), http,
+                            ToolSetup = service is not null ? null : new ToolSetupRequests(OperatingSystem.IsMacOS() ? new MacGitSetup(host) : new WindowsGitSetup(host), http,
                                 () => engine?.TryPauseForToolSetup(), c => engine?.RescanAsync(c) ?? Task.CompletedTask,
                                 context.Store.Directory, runnerHost.ServerUrl, log, host.Time),
                             // the original issue: the name it signed in under goes stale when the workspace is renamed.
@@ -357,6 +368,8 @@ namespace MessageBus.Cli.Runner
     /// </remarks>
     public sealed class ReverseConnectionTransport(IRunnerHostContext host, TextWriter log, TimeProvider time, bool selfUpdate = false) : IRunnerTransport
     {
+        internal string? UpdateRequiredReason { get; init; }
+
         /// <summary>
         /// A heartbeat sent this soon after connecting may have reached the service before the connection did,
         /// so its "not connected" answer doesn't count.
@@ -443,7 +456,10 @@ namespace MessageBus.Cli.Runner
             {
                 await log.WriteLineAsync(stop.Message).ConfigureAwait(false);
             }
-            if (selfUpdate && stop.CloseCode == Contracts.Runner.RunnerCloseCodes.UpdateRequired)
+            if (stop.CloseCode != Contracts.Runner.RunnerCloseCodes.UpdateRequired) return;
+            if (UpdateRequiredReason is { } reason)
+                await log.WriteLineAsync(reason).ConfigureAwait(false);
+            if (selfUpdate)
             {
                 // the original issue: this mbus is older than the server accepts. Update like an update request: running
                 // tasks finish first (their heartbeats and results go over HTTPS, not this connection).

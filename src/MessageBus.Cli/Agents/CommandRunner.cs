@@ -42,9 +42,10 @@ internal static class CommandRunner
         // Agents that look for a terminal shouldn't wait for one.
         start.Environment["CI"] = "1";
         start.Environment["NO_COLOR"] = "1";
+        CodexAuthentication.RemoveKeys(start.Environment);
         foreach (var (name, value) in environment ?? new Dictionary<string, string>())
         {
-            start.Environment[name] = value;
+            if (!CodexAuthentication.IsKeyVariable(name)) start.Environment[name] = value;
         }
 
         Process process;

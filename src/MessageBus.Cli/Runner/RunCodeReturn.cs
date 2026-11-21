@@ -49,6 +49,7 @@ internal static class RunCodeReturn
                 start.Environment["GIT_NO_REPLACE_OBJECTS"] = "1";
             }
             foreach (var entry in RunCommits.GitEnvironment(run)) start.Environment[entry.Key] = entry.Value;
+            MessageBus.Cli.Agents.CodexAuthentication.RemoveKeys(start.Environment);
             if (!RunCommits.IsLocalRepository(run) || !RunCommits.HasSafeConfigAsync(start.FileName, run).GetAwaiter().GetResult())
                 throw new InvalidOperationException("The run repository is unsafe; keeping it for recovery.");
             foreach (var arg in RunCommits.GitArguments(run).Concat(args)) start.ArgumentList.Add(arg);

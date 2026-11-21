@@ -7,6 +7,10 @@ that keep old and new versions working together.
 
 ## Compatibility rules
 
+For Codex, `signedIn` describes local credential configuration. The existing `agent:codex` capability permits
+dispatch before a model request has verified access. A provider refusal before model use can clear that capability
+and populate `notReady` using the existing machine-not-ready handling.
+
 OpenCode configured-model inventory uses existing fields only. `models`/`defaultModel` may contain configured
 OpenCode IDs (including additional slashes); `modelsPartial` remains true because configuration is not the complete
 catalog. `signedIn: true` can indicate saved cloud authentication or a loaded authless local candidate; it does not
@@ -42,6 +46,11 @@ before starting the runner and restores it on subsequent starts. This adds no se
 Blob access uses the container's managed identity and an exclusive lease; the blob's Azure resource binding is
 a bootstrap ownership check and never authorizes mbus lifecycle management.
 
+The ACI runner uses the existing agent `notReady` and runner `isolation` inventory fields when the protected
+launch check fails. In that state it declines tasks with `machine-not-ready` while keeping control-plane
+connectivity. `isolation.network: "enforced"` describes the approved public IPv4 proxy in a separate task network
+namespace after the launch check passes. There is no new wire field or service prerequisite.
+
 - **JSON** is camelCase, written and read through the source-generated context in
   `src/MessageBus.Contracts/Json/MessageBusJson.cs`, which ignores fields it doesn't know. A new field is optional
   for both sides; an absent field means the old behaviour.
@@ -51,7 +60,7 @@ a bootstrap ownership check and never authorizes mbus lifecycle management.
   service sends it only to a client whose version (`X-Mbus-Client-Version`) or reported capabilities say it can
   handle it.
 - **Minimum version.** The service reports the oldest `mbus` it accepts in the response header
-  `X-Mbus-Min-Client-Version`. A runner older than that is closed with code 4426 and updates itself (see
+  `X-Mbus-Min-Client-Version`. A runner older than that is closed with code 4426 (see
   [Updates](#updates)).
 - **Errors** carry a short machine-readable code in `X-Mbus-Error` (MCP errors: `McpErrorCodes`).
 
@@ -396,6 +405,11 @@ without provenance are accepted only at their original endpoint under affirmativ
 acquire the verified fields. Isolated checkpoints missing those fields refuse. A surviving checkpoint snapshot
 is independent ever-isolated evidence even if the top-level snapshot was stripped.
 
+An SCM-hosted Windows runner uses the same runner-key enrollment, machine authentication and dotnet-tool
+update exchanges. It reports `isolation.level` as `basic`, with a summary that identifies the dedicated Windows
+service account. The account boundary uses Windows ACLs and runs with the service's identity. The existing
+isolation report and update ability fields retain their wire shapes.
+
 Logout resets the machine identity, runner enrollment provenance, bootstrap fingerprints and both active and
 independently staged runner keys inside one explicit profile transaction. It rereads current state and refuses
 before key deletion if an enrollment, checkpoint or key-store publication changed the identity during remote
@@ -515,6 +529,10 @@ its description and input schema. The catalog shared by the service's remote `/m
 `send`, `send_many`, `wait`, `watch`, `inbox`, `progress`, `settle`, `status`, `cancel`, `move`, `ensure_project`,
 `find_project`, `complete_project`, `directory`, `describe_role`, `subscribe`, `fetch_attachment`, `retry`,
 `request_approval`, `wait_approval`, `open_inbox`.
+
+Taking passive replies addressed to a session inbox can auto-complete them. The `inbox` result then
+reports `delivery.status` as `settled`, and the client can still fetch their attachments. Call `settle`
+only for deliveries returned as `leased`.
 
 `fetch_attachment` and `retry` exist only on the local server (`McpToolNames.LocalOnly`): they need this machine's
 keys and git. The local server (`src/MessageBus.Mcp`) is an encrypting proxy to `/mcp`: agents write and read
@@ -719,7 +737,7 @@ Timing and close codes come from the public `Groundhog.Protocol` package: the se
 | 1001 | The service is restarting | Reconnects with backoff |
 | `CredentialRevoked`, `MachineRemoved`, `SessionReplaced` | Revoked, removed from the workspace, or a newer session took over | Stops; never reconnects |
 | `TooManyConnections` | Too many connections for this machine | Reconnects with backoff |
-| 4426 | This `mbus` is older than the service accepts | Updates, then reconnects |
+| 4426 | This `mbus` is older than the service accepts | Self-updating runners update and reconnect. Image-managed runners require redeployment. |
 | 4403 | The machine waits for an admin's approval | Reconnects later with a long backoff |
 
 ## End-to-end encryption
@@ -796,6 +814,11 @@ work, lets running tasks finish, reports each stage on `/api/runner/update-progr
 For a .NET tool, the runner compares the requested release against the normalized NuGet package version from the
 store entry containing its running assembly. It uses package versions for update attempts, recovery and outcome
 reports. The assembly's informational version remains available in the runner's inventory and `mbus --version`.
+
+Image-managed runners report `updates.canUpdate: false` and an `updates.reason` in inventory
+with the replacement image and redeploy instructions. They answer `POST /update` with an
+`ended` progress report and a `not-installed` outcome using that reason. Close code 4426
+requires the operator to redeploy with a supported image.
 
 ## Making a change to the protocol
 

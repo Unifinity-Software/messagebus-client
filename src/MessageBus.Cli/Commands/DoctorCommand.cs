@@ -37,8 +37,17 @@ internal static class DoctorCommand
         command.Options.Add(smoke);
         command.Options.Add(agent);
         command.Options.Add(keep);
+        var service = Runner.Service.RunnerServiceCommand.WindowsServiceOption();
+        command.Options.Add(service);
         command.SetAction(async (parse, ct) =>
         {
+            if (parse.GetValue(service))
+            {
+                if (!OperatingSystem.IsWindows()) throw Runner.Service.RunnerServiceCommand.WindowsOnly();
+                if (parse.GetValue(smoke) || parse.GetValue(agent) is not null || parse.GetValue(keep))
+                    throw new CliException("--service checks the Windows service configuration. Use it without --smoke, --agent or --keep.");
+                return await Runner.Service.WindowsServiceCommands.DoctorAsync(host, ct);
+            }
             var context = CommandContext.Load(host, parse, options);
             if (parse.GetValue(smoke))
             {
@@ -186,6 +195,10 @@ internal static class DoctorCommand
             else if (!agent.SignedIn)
             {
                 Bad(name, "it doesn't look signed in. Fix: sign in to it on this machine, then mbus connect --rescan.");
+            }
+            else if (agent.Kind == AgentKind.Codex)
+            {
+                Note(name, $"{agent.Version ?? "version unknown"}, credentials configured. {CodexAuthentication.VerifyAccess}");
             }
             else
             {

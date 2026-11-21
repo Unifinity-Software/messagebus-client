@@ -49,7 +49,7 @@ internal static partial class AgentScanner
             SignInChecks.ClaudeAsync),
         new(AgentKind.Codex, "codex", "openai",
             (loc, _) => CodexTomlConfig.HasMbus(loc.CodexConfig),
-            (loc, env) => HasAny(env, "OPENAI_API_KEY", "CODEX_API_KEY") || File.Exists(loc.CodexAuth),
+            (loc, _) => File.Exists(loc.CodexAuth),
             SignInChecks.CodexAsync),
         new(AgentKind.Copilot, "copilot", "github",
             (loc, _) => JsonConfigFile.HasEntry(loc.CopilotMcpConfig, "mcpServers"),
@@ -157,6 +157,21 @@ internal static partial class AgentScanner
         if (located is null)
         {
             return new(new DetectedAgent { Kind = spec.Kind, Found = false, Vendor = spec.Vendor }, null);
+        }
+
+        if (host.WindowsService is not null)
+        {
+            var names = Runner.Service.ServiceAgentTokens.For(spec.Kind);
+            if (!names.Any(name => env.Stored.ContainsKey(name)))
+            {
+                var reason = names.Length == 0 ? "This agent has no supported Windows service token configuration."
+                    : "No token is configured. Use mbus runner env --save --service.";
+                return new(new DetectedAgent
+                {
+                    Kind = spec.Kind, Found = true, OnPath = located.OnPath, ExecutablePath = located.Path,
+                    Vendor = spec.Vendor, SignedIn = false, NotReady = reason,
+                }, null);
+            }
         }
 
         string? version = null;

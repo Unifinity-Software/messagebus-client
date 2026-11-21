@@ -57,7 +57,8 @@ public static class RunnerCommand
             {
                 Credentials = new Sandbox.ServiceRepoCredentials(http, log), Telemetry = new Sandbox.ServiceRunTelemetry(http, log), ProbeAgents = probeAgents, ToolVariables = toolPaths,
                 // the original issue: the owner's own projects may use the owner's git sign-in, when they chose it on My account.
-                UseOwnerGit = delivery => engineRef?.Policy.UsesOwnerGit(delivery) == true,
+                UseOwnerGit = options.WindowsService ? null : delivery => engineRef?.Policy.UsesOwnerGit(delivery) == true,
+                WindowsService = options.WindowsService,
                 // the original issue: each run's mbus tools are served from here, and runs can't read mbus's settings folder (macOS).
                 RunTools = parts.Tools is not null,
                 KeyStore = options.KeyStore,
@@ -97,9 +98,15 @@ public static class RunnerCommand
         await using (housekeeping.ConfigureAwait(false))
         await using (engine.ConfigureAwait(false))
         {
+            await using var tokenWatch = options.WindowsService && isolation.SettingsDirectory is { } serviceSettings
+                ? new Service.WindowsServiceTokenWatch(Path.Combine(serviceSettings, Service.AgentEnvironmentStore.ProtectedFileName),
+                    engine.RescanAsync, time, log, cancellationToken)
+                : null;
             // the original issue, the original issue: the dashboard chooses how many run at once (it starts at 1 until the setting arrives).
             var slots = engine.GetStatus();
             await covered.WriteLineAsync($"mbus {RunnerEnvironment.Version} runner on {host.MachineName}{(host.Location is { } l ? $" ({l})" : "")}: {slots.Slots} task(s) at once (the dashboard can set up to {slots.SlotCeiling}), runs in {options.WorkRoot}, server {host.ServerUrl}").ConfigureAwait(false);
+            if (Hosting.CliHost.SourceRevision is { } revision)
+                await covered.WriteLineAsync($"Source revision: {revision}").ConfigureAwait(false);
             if (toolPaths.TryGetValue("PATH", out var runPath))
             {
                 var added = runPath.Split(Path.PathSeparator).Except((host.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator));

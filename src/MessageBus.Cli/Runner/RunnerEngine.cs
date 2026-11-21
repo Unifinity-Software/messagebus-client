@@ -227,6 +227,10 @@ public sealed class RunnerEngine : IAsyncDisposable
             {
                 return Decline(DeclineReason.AgentUnavailable, $"No agent '{delivery.AgentId}' on this machine.");
             }
+            if (_ext.Sandbox.AgentRefusal(agent.Adapter.Kind) is { } isolationNotReady)
+                return Decline(DeclineReason.MachineNotReady, isolationNotReady);
+            if (_ext.Sandbox.UsesPrivateHome && (delivery.Envelope.Target is InboxTarget || delivery.RunEnvironment.KeepAgentTools is { Count: > 0 }))
+                return Decline(DeclineReason.MachineNotReady, "Protected ACI tasks need a fresh harness session without tools from the runner's own home.");
             if (_ext.Readiness?.Admit(delivery, agent.Adapter.Kind) is { } notReady)
             {
                 return Decline(DeclineReason.MachineNotReady, notReady);
@@ -470,6 +474,14 @@ public sealed class RunnerEngine : IAsyncDisposable
     {
         var slots = Volatile.Read(ref _slots);
         var inventory = await _host.BuildInventoryAsync(slots, cancellationToken).ConfigureAwait(false);
+        if (_ext.Sandbox.UsesPrivateHome)
+        {
+            var found = inventory.Agents.Select(agent => agent.Found && _ext.Sandbox.AgentRefusal(agent.Kind) is { } refusal
+                ? agent with { NotReady = refusal } : agent).ToList();
+            var unavailable = found.Where(agent => agent.NotReady is not null)
+                .Select(agent => CapabilityNames.Format(CapabilityNames.AgentPrefix, AgentKinds.Name(agent.Kind))).ToHashSet(StringComparer.Ordinal);
+            inventory = inventory with { Agents = found, Capabilities = [.. inventory.Capabilities.Where(capability => !unavailable.Contains(capability))] };
+        }
         // the original issue: with the stored agent sign-ins, as the agents see them.
         inventory = _ext.Readiness?.Scanned(inventory, new MessageBus.Cli.Agents.SignInEnvironment(_host.GetEnvironmentVariable, _host.AgentEnvironment()).Get) ?? inventory;
         // the original issue: the ceiling and this machine's size, for the dashboard's slot setting and its suggestion.
@@ -716,7 +728,7 @@ public sealed class RunnerEngine : IAsyncDisposable
     private IAgentAdapter? DefaultAdapter(AgentKind kind) => kind switch
     {
         AgentKind.ClaudeCode => new ClaudeCodeAdapter(settingsFile: ClaudeCodeAdapter.SettingsFile(_host.GetEnvironmentVariable, _host.HomeDirectory)),
-        AgentKind.Codex => new CodexAdapter(CodexAdapter.ReadConfiguredModel(CodexHome), Connect.CodexTomlConfig.HasMbus(Path.Combine(CodexHome, "config.toml")), codexHome: CodexHome, getEnvironmentVariable: _host.GetEnvironmentVariable, sandboxOverride: _options.CodexSandbox),
+        AgentKind.Codex => new CodexAdapter(CodexAdapter.ReadConfiguredModel(CodexHome), !_ext.Sandbox.UsesPrivateHome && Connect.CodexTomlConfig.HasMbus(Path.Combine(CodexHome, "config.toml")), codexHome: CodexHome, getEnvironmentVariable: _host.GetEnvironmentVariable, sandboxOverride: _options.CodexSandbox),
         AgentKind.Copilot => new CopilotAdapter(copilotHome: EnvOr("COPILOT_HOME", Path.Combine(_host.HomeDirectory, ".copilot"))),
         AgentKind.OpenCode => OpenCodeAdapter.ForRunner(_agentVersions.GetValueOrDefault(AgentKind.OpenCode), _host.GetEnvironmentVariable, _host.HomeDirectory,
             storedEnvironment: _host.AgentEnvironment),

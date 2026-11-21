@@ -1,4 +1,5 @@
 using System.Globalization;
+using MessageBus.Cli.Agents;
 using MessageBus.Cli.Runner.Agents;
 using MessageBus.Contracts.Machines;
 using MessageBus.Contracts.Messaging;
@@ -126,15 +127,13 @@ internal sealed class SmokeTest(SmokeTestOptions options)
                 ["MBUS_PERMISSION_PROFILE"] = profile.Name,
                 [Hosting.EnvVars.Home] = noMbus,
             };
-            var launch = agent.Adapter.BuildLaunch(new AgentLaunchContext(prompt, workspace.PromptFile, TestCommands.Apply(profile, workspace.WorkTree), workspace.WorkTree,
-                new Dictionary<string, string> { [Hosting.EnvVars.Home] = noMbus }, RunnerSandboxed: options.Sandbox.ConfinesAgents, RunDirectory: workspace.Root,
-                RunnerIsolationEnabled: options.Sandbox.IsolationEnabled));
-            if (launch.CannotStart is { } cannotStart) return new(agent.Kind, cannotStart, [], null, workspace.Root);
-            var agentEnvironment = WithStoredSignIns(environment);
-            foreach (var (name, value) in launch.Environment)
-            {
-                agentEnvironment[name] = value;
-            }
+            string? cannotStart = null;
+            var launch = AgentRun.AgentProcessLaunch(agent.Adapter, options.Sandbox, agent.Executable, workspace, profile,
+                new AgentLaunchContext(prompt, workspace.PromptFile, TestCommands.Apply(profile, workspace.WorkTree), workspace.WorkTree,
+                    new Dictionary<string, string> { [Hosting.EnvVars.Home] = noMbus }),
+                AgentRun.AgentEnvironment(environment, agent.Adapter, new SignInEnvironment(options.GetEnvironmentVariable, options.AgentEnvironment())),
+                agentLaunch => cannotStart = agentLaunch.CannotStart);
+            if (cannotStart is not null) return new(agent.Kind, cannotStart, [], null, workspace.Root);
 
             var parser = agent.Adapter.CreateParser();
             var gate = new object();
@@ -143,14 +142,9 @@ internal sealed class SmokeTest(SmokeTestOptions options)
             IReadOnlyList<string> tail;
             using (var limit = new CancellationTokenSource(options.TimeLimit, options.Time))
             using (var stop = CancellationTokenSource.CreateLinkedTokenSource(limit.Token, cancellationToken))
-            using (var process = AgentProcess.Start(Sandboxed(new ProcessLaunch
-            {
-                FileName = agent.Executable,
-                Arguments = launch.Arguments,
-                WorkingDirectory = workspace.WorkTree,
-                Environment = agentEnvironment,
-                StandardInput = launch.StandardInput,
-            }), line => { lock (gate) { parser.Observe(line); } }, tailLines: 50))
+            using (var process = AgentProcess.Start(launch, line => { lock (gate) { parser.Observe(line); } }, tailLines: 50,
+                filterOutput: agent.Kind == AgentKind.Codex
+                    ? CodexAuthentication.RedactOutput(launch.Environment.GetValueOrDefault(CodexAuthentication.CodexKey)) : null))
             {
                 options.Sandbox.Started(workspace, process.Id);
                 using (stop.Token.Register(process.Kill))
@@ -173,6 +167,15 @@ internal sealed class SmokeTest(SmokeTestOptions options)
 
             if (steps.Count == 0)
             {
+                if (agent.Kind == AgentKind.Codex)
+                {
+                    var diagnostic = (exit != 0 || outcome.ReportedError ? CodexAuthentication.Refusal(outcome, tail) : null)
+                        ?? AgentRun.Readable(outcome.ErrorText) ?? LastLine(tail);
+                    var verified = exit == 0 && !outcome.ReportedError && outcome.Usage is { TokensOut: > 0 };
+                    steps.Add(new SmokeStep("model", verified, verified ? "Codex completed an authenticated model request."
+                        : diagnostic ?? "Codex didn't report a successful model response."));
+                    if (!verified) return Finish();
+                }
                 // The agent's own words only explain a failure; they never decide a step.
                 var said = AgentRun.Readable(outcome.ErrorText) ?? AgentRun.Readable(outcome.FinalText) ?? (exit != 0 ? LastLine(tail) : null);
                 steps.AddRange(await CheckAsync(workspace, project, baseCommit, started, Sandboxed, cancellationToken).ConfigureAwait(false));
@@ -341,20 +344,6 @@ internal sealed class SmokeTest(SmokeTestOptions options)
         {
             return (exit, string.Join("\n", exit == 0 ? lines : git.Tail()).Trim());
         }
-    }
-
-    /// <summary>The run's variables plus the stored agent sign-ins, as <c>AgentRun</c> gives a real run's agent.</summary>
-    private Dictionary<string, string?> WithStoredSignIns(Dictionary<string, string?> environment)
-    {
-        var merged = new Dictionary<string, string?>(environment, environment.Comparer);
-        foreach (var (name, value) in options.AgentEnvironment())
-        {
-            if (string.IsNullOrWhiteSpace(options.GetEnvironmentVariable(name)) && !merged.ContainsKey(name))
-            {
-                merged[name] = value;
-            }
-        }
-        return merged;
     }
 
     private static string? LastLine(IReadOnlyList<string> tail) =>

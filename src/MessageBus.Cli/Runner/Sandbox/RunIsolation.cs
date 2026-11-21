@@ -42,6 +42,10 @@ public static class SandboxEnvVars
 /// <summary>How run isolation is set up on this machine.</summary>
 public sealed record RunIsolationOptions
 {
+    internal bool RequireAciSandbox { get; init; }
+
+    internal string? AciIdentityHost { get; init; }
+
     /// <summary>The selected machine key backend.</summary>
     public string? KeyStore { get; init; }
 
@@ -68,6 +72,8 @@ public sealed record RunIsolationOptions
     /// by the runner from its work policy, true only for the owner's own projects when they chose it.
     /// </summary>
     public Func<TaskDelivery, bool>? UseOwnerGit { get; init; }
+
+    internal bool WindowsService { get; init; }
 
     /// <summary>Where each run's agent sends its own telemetry, with a credential for that run alone (the original issue).</summary>
     public IRunTelemetrySource Telemetry { get; init; } = new NoRunTelemetry();
@@ -113,6 +119,8 @@ public sealed record RunIsolationOptions
     /// <exception cref="FormatException"><see cref="SandboxEnvVars.Isolation"/> has an unknown value.</exception>
     public static RunIsolationOptions FromEnvironment(Func<string, string?> env, string workRoot, string homeDirectory, string? git, string machineName) => new()
     {
+        RequireAciSandbox = MessageBus.Cli.Agents.DeploymentTargets.Details(env) is not null,
+        AciIdentityHost = env(AciSandbox.IdentityHostVariable),
         WorkRoot = workRoot,
         HomeDirectory = homeDirectory,
         Requested = RunnerEnvironment.NonEmpty(env(SandboxEnvVars.Isolation))?.ToLowerInvariant() switch
@@ -154,20 +162,34 @@ public sealed class RunIsolation : IRunSandbox
     private readonly TextWriter _log;
     private readonly MacSandbox? _mac;
     private readonly LinuxSandbox? _linux;
+    private readonly AciSandbox? _aci;
+    private readonly string? _aciProblem;
     private readonly GitIdentity _identity;
     private readonly ConcurrentDictionary<string, RunState> _runs = new(StringComparer.Ordinal);
     private int _jobWarned;
 
-    private RunIsolation(RunIsolationOptions options, TextWriter log, OsSandboxAttempt os, GitIdentity identity)
+    private RunIsolation(RunIsolationOptions options, TextWriter log, OsSandboxAttempt os, GitIdentity identity,
+        AciSandbox? aci = null, string? aciProblem = null)
     {
         _options = options;
         _log = log;
         _mac = os.Mac;
         _linux = os.Linux;
+        _aci = aci;
+        _aciProblem = aciProblem;
         _identity = identity;
-        Level = os.Mac is not null || os.Linux is not null ? IsolationLevel.OsSandbox : IsolationLevel.Basic;
+        Level = aci is not null || os.Mac is not null || os.Linux is not null ? IsolationLevel.OsSandbox : IsolationLevel.Basic;
         SandboxName = os.Name;
         SandboxProblem = os.Tried && Level != IsolationLevel.OsSandbox ? os.Problem : null;
+        if (options.RequireAciSandbox)
+        {
+            NetworkEnforced = aci is not null;
+            Limitations = aci is not null
+                ? ["Filesystem and processes: each launch has a private home, temporary directories and PID namespace. Runner settings and other runs are not mounted.",
+                    "Network: the task has a private network namespace. A per-run proxy limits outbound connections to approved public IPv4 endpoints. The identity storage host, private and platform addresses are denied."]
+                : [aciProblem!];
+            return;
+        }
         var limits = new List<string>();
         if (options.Requested == IsolationLevel.OsSandbox && Level != IsolationLevel.OsSandbox)
         {
@@ -206,7 +228,9 @@ public sealed class RunIsolation : IRunSandbox
                 ? $"Network: allowed connections go through this runner's proxy ({upstream.Describe()}), except hosts in its NO_PROXY."
                 : $"Network: {options.UpstreamProblem}.");
         }
-        if (options.RunTools)
+        if (options.WindowsService)
+            limits.Add(WindowsServiceLimit);
+        else if (options.RunTools)
         {
             limits.Add(options.KeyStore == "file" ? MachineKeyLimit(os.Mac is not null || os.Linux is not null, "file") : os.Linux is not null
                 ? "This machine's key: runs can't read mbus's settings folder, but a program that asks your desktop keyring for the key by name may still get it."
@@ -224,6 +248,12 @@ public sealed class RunIsolation : IRunSandbox
 
     // With nesting enabled Wrap does not take the unsandboxed path for agents with their own sandbox.
     internal bool SupportsVerificationAgent => _linux is { NestingAllowed: true };
+
+    bool IRunSandbox.UsesPrivateHome => _options.RequireAciSandbox;
+
+    string? IRunSandbox.AgentRefusal(AgentKind kind) => _aciProblem ?? _aci?.AgentProblem(kind);
+
+    internal string? AciProblem => _aciProblem;
 
     /// <summary>Whether the OS stops a run from going around its network allow-list (the macOS sandbox, when its start-up check saw it work).</summary>
     public bool NetworkEnforced { get; }
@@ -285,9 +315,15 @@ public sealed class RunIsolation : IRunSandbox
     public string? SandboxProblem { get; }
 
     /// <summary>For the Runners page's Run isolation line (one short sentence).</summary>
-    public string Description => Level == IsolationLevel.OsSandbox
+    public string Description => _aciProblem is not null ? "ACI task execution is blocked."
+        : _aci is not null ? "Protected ACI sandbox: isolated files and processes, brokered public egress."
+        : _options.WindowsService ? "Basic isolation with a separate Windows service account."
+        : Level == IsolationLevel.OsSandbox
         ? "OS sandbox: runs can't reach your personal files or other runs, and write only in their worktree."
         : "Own worktree and settings for each run, with no secrets from this machine.";
+
+    internal const string WindowsServiceLimit =
+        "Windows ACLs govern access to each user's profile. Task processes share the service identity and can access its files and DPAPI-protected secrets.";
 
     /// <summary>For the Runners page's Credentials line (short sentences).</summary>
     public string CredentialsDescription => _options.RunTools
@@ -304,8 +340,8 @@ public sealed class RunIsolation : IRunSandbox
         Credentials = CredentialsDescription,
         Limitations = [.. (SandboxProblem is { } why ? new[] { $"The {SandboxName} isn't used: {why}." } : []), PushLimit, .. Limitations],
         // the original issue: the same in two words, for the Runners page's one-line summary.
-        Level = Level == IsolationLevel.OsSandbox ? "os-sandbox" : "basic",
-        Network = !_options.LimitNetwork ? "open" : NetworkEnforced ? "enforced" : "advisory",
+        Level = _aciProblem is not null ? "off" : Level == IsolationLevel.OsSandbox ? "os-sandbox" : "basic",
+        Network = _aciProblem is not null ? null : !_options.LimitNetwork ? "open" : NetworkEnforced ? "enforced" : "advisory",
     };
 
     /// <summary>
@@ -323,6 +359,15 @@ public sealed class RunIsolation : IRunSandbox
     /// </summary>
     internal static IRunSandbox Create(RunIsolationOptions options, TextWriter log, IProbeRunner? macProbe, IProbeRunner? linuxProbe, string? bubblewrap = null)
     {
+        if (options.RequireAciSandbox)
+        {
+            var aci = AciSandbox.TryCreate(options, out var problem);
+            var result = new RunIsolation(options, log, new(false, "protected ACI sandbox", null, null, null),
+                new GitIdentity("mbus runner", "runner@messagebus.invalid"), aci, aci is null ? problem : null);
+            log.WriteLine($"Run isolation: {result.Description}");
+            foreach (var limit in result.Limitations) log.WriteLine($"  {limit}");
+            return result;
+        }
         if (options.Requested == IsolationLevel.Off)
         {
             log.WriteLine("Run isolation: off. Runs inherit this machine's environment and git settings.");
@@ -382,12 +427,18 @@ public sealed class RunIsolation : IRunSandbox
     /// <inheritdoc />
     public async Task PrepareAsync(RunWorkspace workspace, TaskDelivery delivery, PermissionProfile profile, CancellationToken cancellationToken)
     {
+        if (_options.RequireAciSandbox)
+        {
+            if (_aci is null) throw new IOException(_aciProblem);
+            if (workspace.SessionFolder is not null || workspace.LocalModelEndpoint is not null)
+                throw new IOException("Protected ACI tasks need a fresh worktree and a remote model endpoint.");
+        }
         var snapshot = delivery.Verification;
         var repository = snapshot is not null ? new Uri(snapshot.Remote) : delivery.Envelope.Refs
             .Select(RunWorkspace.RepositoryUrl)
             .Select(url => Uri.TryCreate(url, UriKind.Absolute, out var uri) && uri.Scheme == Uri.UriSchemeHttps ? uri : null)
             .FirstOrDefault(uri => uri is not null);
-        var ownerGit = snapshot is null && _options.UseOwnerGit?.Invoke(delivery) == true;
+        var ownerGit = !_options.RequireAciSandbox && snapshot is null && _options.UseOwnerGit?.Invoke(delivery) == true;
         var credential = repository is null || ownerGit || snapshot is not null ? null : await _options.Credentials.IssueAsync(new RepoCredentialRequest
         {
             DeliveryId = delivery.DeliveryId,
@@ -397,13 +448,23 @@ public sealed class RunIsolation : IRunSandbox
         }, cancellationToken).ConfigureAwait(false);
         var telemetry = await _options.Telemetry.IssueAsync(delivery.DeliveryId, cancellationToken).ConfigureAwait(false);
         RunNetwork? network = null;
-        if (_options.LimitNetwork && profile.Network != NetworkAccess.Open)
+        if (_aci is not null || _options.LimitNetwork && profile.Network != NetworkAccess.Open)
         {
             // the original issue: its own proxy, with the hosts every run may reach plus its repository and its role's hosts.
             IEnumerable<string> hosts = [.. _options.NetworkHosts, .. repository is null ? [] : RunNetwork.RepositoryHosts(repository), .. profile.AllowedHosts];
-            network = _options.SharedNetwork is { } shared
-                ? shared.Register(new HostAllowList(hosts), delivery.DeliveryId)
-                : RunNetwork.Start(new HostAllowList(hosts), _log, delivery.DeliveryId, upstream: _options.Upstream);
+            var allow = new HostAllowList(hosts);
+            if (_aci is not null)
+            {
+                Directory.CreateDirectory(Path.Combine(workspace.Root, "home"));
+                workspace.PrivateSocketDirectory = AciSandbox.CreateSocketDirectory();
+                network = _aci.StartNetwork(workspace.PrivateSocketDirectory, allow, _log, delivery.DeliveryId);
+            }
+            else
+            {
+                network = _options.SharedNetwork is { } shared
+                    ? shared.Register(allow, delivery.DeliveryId)
+                    : RunNetwork.Start(allow, _log, delivery.DeliveryId, upstream: _options.Upstream);
+            }
         }
         else if (_options.LimitNetwork && _options.SharedNetwork is { } shared)
         {
@@ -426,10 +487,17 @@ public sealed class RunIsolation : IRunSandbox
     /// <inheritdoc />
     public ProcessLaunch Wrap(ProcessLaunch launch, RunWorkspace workspace, PermissionProfile profile)
     {
-        var state = _runs.GetOrAdd(workspace.Root, _ => NewState(workspace, null, null, profile.CanPush, null));
-        var environment = RunEnvironmentScrubber.Build(Environment.GetEnvironmentVariables(), _options.PassEnvironment,
+        var state = _options.RequireAciSandbox
+            ? _runs.GetValueOrDefault(workspace.Root) ?? throw new IOException(_aciProblem ?? "The protected ACI task has no prepared sandbox.")
+            : _runs.GetOrAdd(workspace.Root, _ => NewState(workspace, null, null, profile.CanPush, null));
+        var environment = RunEnvironmentScrubber.Build(Environment.GetEnvironmentVariables(), _options.RequireAciSandbox ? [] : _options.PassEnvironment,
             launch.Environment.Concat(state.Variables));
         var wrapped = launch with { Environment = environment };
+        if (_aci is not null && workspace.PrivateSocketDirectory is { } sockets)
+        {
+            return _aci.Wrap(wrapped, workspace.Root, sockets);
+        }
+        if (_options.RequireAciSandbox) throw new IOException("The protected ACI task has no network socket.");
         if (_mac is not null && (_mac.NestingAllowed || !MacSandbox.StartsItsOwnSandbox(launch)))
         {
             wrapped = _mac.Wrap(wrapped, workspace.Root);
@@ -471,6 +539,7 @@ public sealed class RunIsolation : IRunSandbox
     {
         if (!_runs.TryRemove(workspace.Root, out var state))
         {
+            DeletePrivateSocketDirectory(workspace);
             return;
         }
         if (OperatingSystem.IsWindows())
@@ -488,8 +557,16 @@ public sealed class RunIsolation : IRunSandbox
             PosixRunProcesses.EndMarked(state.Marker);
         }
         state.Network?.Dispose();
+        DeletePrivateSocketDirectory(workspace);
         RunGitConfig.Withdraw(workspace.Root);
         RunWorkspace.TryDelete(state.TempDirectory);
+    }
+
+    private static void DeletePrivateSocketDirectory(RunWorkspace workspace)
+    {
+        if (workspace.PrivateSocketDirectory is not { } socketDirectory) return;
+        RunWorkspace.TryDelete(socketDirectory);
+        workspace.PrivateSocketDirectory = null;
     }
 
     private RunState NewState(RunWorkspace workspace, Uri? repository, RepoCredential? credential, bool canPush, RunNetwork? network,
@@ -513,7 +590,7 @@ public sealed class RunIsolation : IRunSandbox
             // run's sandbox doesn't share (only TMPDIR, in the run, is its own); this points them at the run's.
             variables[ChromiumTempVariable] = temp;
         }
-        if (OperatingSystem.IsMacOS() || _linux is not null)
+        if (OperatingSystem.IsMacOS() || _linux is not null || _aci is not null)
         {
             // the original issue: persistent MSBuild/Roslyn processes retain the sandbox of the run that
             // started them. Another run building at the same time must not delegate file access to them.

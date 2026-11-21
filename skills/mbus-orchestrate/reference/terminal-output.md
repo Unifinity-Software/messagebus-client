@@ -79,13 +79,16 @@ review it and merge it yourself (agents don't merge).
   Orchestrator (this session)      -                   claude-code@pc           40 min  610k     $1.20
 
 Workflow steps: design review passed · build passed · code review passed (1 finding fixed) · docs passed
-Checks run here: dotnet build, dotnet test (24 passed), npm test (9 passed), npm run build.
+Remote verification on <full commit SHA> by codex@linux-runner
+dotnet build, dotnet test (24 passed), npm ci, npm test (9 passed), npm run build. All exited 0.
 Wall time 52 min · agent time 1 h 10 min · 186k tokens · est. cost $1.42 · 2 machines, 2 models.
 Project: <projectId> (dashboard, Projects page).
 ```
 
 - Time per task: `result.usage.activeSeconds`. Tokens: `tokensIn + tokensOut`. Cost:
   `estimatedCostUsd`, or "unknown" when absent. Machine: `machineId` mapped through `directory`.
+- Report the tested SHA and runner for verification. Name any blocked check and its concrete
+  blocker. Mark smoke checks by name when reporting them alongside full suites.
 - Totals: the `totals` from `complete_project` (`wallSeconds`, `agentSeconds`, tokens,
   `estimatedCostUsd`, `tasksCostUnknown`, `machines`, `models`). They include this session's own
   line when `complete_project` had a `usage`; if it had none, say the orchestrator isn't counted.

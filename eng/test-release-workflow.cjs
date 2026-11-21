@@ -1,4 +1,5 @@
 const assert = require('node:assert/strict');
+const { spawnSync } = require('node:child_process');
 const { createHash } = require('node:crypto');
 const { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } = require('node:fs');
 const { tmpdir } = require('node:os');
@@ -14,7 +15,10 @@ const run = scripts.map(script => new AsyncFunction('github', 'context', 'core',
 const sha = 'a'.repeat(40);
 const version = '1.2.3-preview.1';
 const tag = `mbus-v${version}`;
-const env = { SHA: sha, VERSION: version, GITHUB_RUN_ATTEMPT: '1' };
+const env = { SHA: sha, VERSION: version, GITHUB_RUN_ATTEMPT: '1',
+  IMAGE_DIGEST: `sha256:${'c'.repeat(64)}`,
+  IMAGE_VERSIONS: `mbus ${version};claude 2.1.0;codex 1.2.3;opencode 1.2.3;copilot 1.2.3`
+};
 const context = { sha, repo: { owner: 'example', repo: 'fixture' } };
 
 test('prepare requires the latest Build and the latest disclosure status on the exact commit', async () => {
@@ -94,11 +98,14 @@ test('release resumes a partial draft and verifies a completed retry without wri
       },
       repos: {
         listReleases: async () => releases,
-        createRelease: async ({ tag_name, draft, prerelease, target_commitish }) => {
+        createRelease: async ({ tag_name, draft, prerelease, target_commitish, body }) => {
           writes.drafts++;
           assert.equal(tag_name, tag);
           assert.ok(draft);
-          const release = { id: 1, tag_name, draft, prerelease, target_commitish };
+          assert.ok(body.includes(`messagebus-runner@${env.IMAGE_DIGEST}`));
+          assert.ok(body.includes(sha));
+          for (const cli of env.IMAGE_VERSIONS.split(';')) assert.ok(body.includes(cli));
+          const release = { id: 1, tag_name, draft, prerelease, target_commitish, body };
           releases.push(release);
           return { data: release };
         },
@@ -130,4 +137,65 @@ test('release resumes a partial draft and verifies a completed retry without wri
   assert.deepEqual(writes, { tags: 1, drafts: 1, uploads: 15, publications: 1 });
   tagSha = 'b'.repeat(40);
   await assert.rejects(execute, /different commit/);
+});
+
+test('runner promotion refuses a conflicting tag and retries an identical private candidate', (t) => {
+  const root = mkdtempSync(join(process.env.RUNNER_TEMP || tmpdir(), 'runner-promotion-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const manifest = '{"schemaVersion":2}';
+  const digest = `sha256:${createHash('sha256').update(manifest).digest('hex')}`;
+  const fixture = join(root, 'manifest');
+  const tagFile = join(root, 'tag');
+  const writes = join(root, 'writes');
+  writeFileSync(fixture, manifest);
+  writeFileSync(writes, '');
+  writeFileSync(join(root, 'skopeo'), `#!/usr/bin/env bash
+set -euo pipefail
+case "$*" in
+  'login '*) cat >/dev/null ;;
+  'inspect --raw oci-archive:'*|'inspect --raw oci:'*) cat "$FIXTURE" ;;
+  'inspect --raw --authfile '*) cat "$TAG_FILE" 2>/dev/null || { echo 'manifest unknown' >&2; exit 1; } ;;
+  'inspect --raw --no-creds '*)
+    [[ "$PUBLIC" == true ]] || exit 1
+    cat "$TAG_FILE"
+    ;;
+  'copy --all --preserve-digests --dest-authfile '*)
+    echo push >>"$WRITES"
+    cp "$FIXTURE" "$TAG_FILE"
+    ;;
+  "copy --all --preserve-digests --src-no-creds docker://ghcr.io/unifinity-software/messagebus-runner@$EXPECTED oci:"*)
+    [[ "$PUBLIC" == true ]] || exit 1
+    ;;
+  '--override-os linux --override-arch amd64 inspect --config '*)
+    printf '{"os":"linux","architecture":"amd64"}'
+    ;;
+  *) printf 'Unexpected skopeo request: %s\\n' "$*" >&2; exit 1 ;;
+esac
+`, { mode: 0o755 });
+
+  const execute = (isPublic, expected = digest) => {
+    const result = spawnSync('bash', [join(__dirname, 'promote-runner-image.sh'), fixture, expected, version], {
+      encoding: 'utf8',
+      env: {
+        ...process.env, PATH: `${root}:${process.env.PATH}`, RUNNER_TEMP: root,
+        GITHUB_ACTOR: 'fixture', GH_TOKEN: 'fixture', PUBLIC: String(isPublic),
+        FIXTURE: fixture, TAG_FILE: tagFile, WRITES: writes, EXPECTED: expected
+      }
+    });
+    assert.ifError(result.error);
+    return result;
+  };
+  const corrupt = execute(true, `sha256:${'0'.repeat(64)}`);
+  assert.equal(corrupt.status, 1, corrupt.stderr);
+  assert.equal(readFileSync(writes, 'utf8'), '', corrupt.stderr);
+  writeFileSync(tagFile, 'different digest');
+  const conflict = execute(true);
+  assert.match(conflict.stderr, /already points to/);
+  assert.equal(conflict.status, 1);
+  assert.equal(readFileSync(writes, 'utf8'), '');
+  rmSync(tagFile);
+  assert.match(execute(false).stderr, /not publicly readable/);
+  const retry = execute(true);
+  assert.equal(retry.status, 0, retry.stderr);
+  assert.equal(readFileSync(writes, 'utf8'), 'push\n');
 });

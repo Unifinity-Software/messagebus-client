@@ -8,10 +8,23 @@
 #   docker build -f docker/runner/Dockerfile -t messagebus-runner .
 
 ARG NODE_VERSION=24
+ARG MBUS_RELEASE_VERSION
+ARG MBUS_SOURCE_REVISION
 
 # ── mbus, self-contained for the image's architecture ─────────────────────────
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 ARG TARGETARCH
+ARG MBUS_RELEASE_VERSION
+ARG MBUS_SOURCE_REVISION
+RUN if [ -n "$MBUS_RELEASE_VERSION" ]; then \
+      [ "$(printf '%s\n' "$MBUS_RELEASE_VERSION" | grep -Ex '[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?')" = "$MBUS_RELEASE_VERSION" ] \
+        && [ -n "$MBUS_SOURCE_REVISION" ] \
+        || { echo "Supply a release version and a full Git SHA for a release image." >&2; exit 1; }; \
+    fi \
+ && if [ -n "$MBUS_SOURCE_REVISION" ]; then \
+      [ "$(printf '%s\n' "$MBUS_SOURCE_REVISION" | grep -Ex '[0-9a-f]{40}')" = "$MBUS_SOURCE_REVISION" ] \
+        || { echo "MBUS_SOURCE_REVISION must be a full Git SHA." >&2; exit 1; }; \
+    fi
 WORKDIR /src
 COPY global.json Directory.Build.props Directory.Build.targets Directory.Packages.props ./
 COPY src/ src/
@@ -22,26 +35,31 @@ COPY global.json skill[s] skills/
 RUN rm -f skills/global.json \
  && find src -type d \( -name bin -o -name obj -o -name node_modules \) -prune -exec rm -rf {} + \
  && case "${TARGETARCH:-amd64}" in arm64) rid=linux-arm64 ;; *) rid=linux-x64 ;; esac \
+ && set -- \
+ && if [ -n "$MBUS_SOURCE_REVISION" ]; then set -- "$@" "-p:SourceRevisionId=$MBUS_SOURCE_REVISION"; fi \
+ && if [ -n "$MBUS_RELEASE_VERSION" ]; then set -- "$@" "-p:Version=$MBUS_RELEASE_VERSION" -p:MbusReleaseBuild=true; fi \
  && dotnet publish src/MessageBus.Cli.Tool/MessageBus.Cli.Tool.csproj -c Release -r "$rid" --self-contained \
-      -p:PublishSingleFile=true -p:DebugType=none -o /out
+      -p:PublishSingleFile=true -p:DebugType=none -p:MbusImageManaged=true "$@" -o /out
 
 # ── runtime: Node (the agent CLIs are npm packages) plus mbus ─────────────────
-FROM node:${NODE_VERSION}-bookworm-slim
+FROM node:${NODE_VERSION}-trixie-slim
 
-# Agent CLI versions. "latest" picks up the newest release at build time; pin them (for example
-# --build-arg CLAUDE_CODE_VERSION=2.1.0) for repeatable images.
-ARG CLAUDE_CODE_VERSION=latest
-ARG CODEX_VERSION=latest
-ARG OPENCODE_VERSION=latest
-ARG COPILOT_VERSION=latest
+# Keep the release harness versions exact. Custom builds can override them.
+ARG CLAUDE_CODE_VERSION=2.1.330
+ARG CODEX_VERSION=0.171.0
+ARG OPENCODE_VERSION=1.19.6
+ARG COPILOT_VERSION=1.0.114
+ARG NPM_VERSION=12.2.3
 
 # git and ssh for the code the agents work on, ICU for .NET, tini to pass signals to mbus.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates git openssh-client libicu72 tini \
+ && apt-get upgrade -y \
+ && apt-get install -y --no-install-recommends ca-certificates git openssh-client libicu76 tini bubblewrap netcat-openbsd \
  && rm -rf /var/lib/apt/lists/*
 
-# npm 11 skips install scripts unless allowed; these two fetch each CLI's native binary.
-RUN npm install -g --no-fund --no-audit --allow-scripts=@anthropic-ai/claude-code,opencode-ai \
+# Allow the two install scripts that fetch each CLI's native binary.
+RUN npm install -g --no-fund --no-audit --ignore-scripts "npm@${NPM_VERSION}" \
+ && npm install -g --no-fund --no-audit --allow-scripts=@anthropic-ai/claude-code,opencode-ai \
       "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
       "@openai/codex@${CODEX_VERSION}" \
       "opencode-ai@${OPENCODE_VERSION}" \
@@ -64,6 +82,12 @@ WORKDIR /home/runner/work
 # The image is updated by rebuilding it, so the agents don't update themselves inside it.
 ENV DISABLE_AUTOUPDATER=1 \
     MBUS_SECRETS_DIR=/run/secrets
+
+ARG MBUS_RELEASE_VERSION
+ARG MBUS_SOURCE_REVISION
+LABEL org.opencontainers.image.source="https://github.com/Unifinity-Software/messagebus-client" \
+      org.opencontainers.image.version="$MBUS_RELEASE_VERSION" \
+      org.opencontainers.image.revision="$MBUS_SOURCE_REVISION"
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/mbus-entrypoint"]
 CMD ["runner"]

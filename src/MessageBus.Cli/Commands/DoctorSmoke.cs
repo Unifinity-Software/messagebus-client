@@ -98,8 +98,9 @@ internal static class DoctorSmoke
         // the original issue: advice names this mbus by its full path when the mbus on PATH is another one.
         var mbus = Hosting.MbusOnPath.For(host);
         var results = new List<SmokeResult>();
-        foreach (var agent in agents)
+        foreach (var installed in agents)
         {
+            var agent = sandbox.AgentRefusal(installed.Kind) is { } refusal ? installed with { NotReady = refusal } : installed;
             if (agent.NotReady is null)
             {
                 console.MarkupLineInterpolated($"[grey]Starting {AgentKinds.DisplayName(agent.Kind)}…[/]");

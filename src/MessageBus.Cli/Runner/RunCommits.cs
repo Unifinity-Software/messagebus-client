@@ -67,6 +67,7 @@ internal sealed class RunCommits
         };
         foreach (var arg in GitArguments(workspace, "config", "--no-includes", "--null", "--file", Path.Combine(workspace.WorkTree, ".git", "config"), "--list")) start.ArgumentList.Add(arg);
         foreach (var entry in GitEnvironment(workspace)) start.Environment[entry.Key] = entry.Value;
+        MessageBus.Cli.Agents.CodexAuthentication.RemoveKeys(start.Environment);
         using var process = System.Diagnostics.Process.Start(start)!;
         process.StandardInput.Close();
         var output = process.StandardOutput.ReadToEndAsync();

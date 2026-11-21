@@ -114,5 +114,6 @@ internal static class RunToolsServer
                 start.Environment[name] = value;
             }
         }
+        CodexAuthentication.RemoveKeys(start.Environment);
     }
 }

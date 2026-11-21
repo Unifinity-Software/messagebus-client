@@ -10,6 +10,7 @@ internal static class ToolInstallerProcess
         using var process = new Process { StartInfo = new ProcessStartInfo(executable) { UseShellExecute = false, CreateNoWindow = true,
             RedirectStandardOutput = true, RedirectStandardError = true, RedirectStandardInput = true } };
         foreach (var argument in arguments) process.StartInfo.ArgumentList.Add(argument);
+        MessageBus.Cli.Agents.CodexAuthentication.RemoveKeys(process.StartInfo.Environment);
         if (!process.Start()) throw new CliException("The approved installer could not start.");
         process.StandardInput.Close();
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
