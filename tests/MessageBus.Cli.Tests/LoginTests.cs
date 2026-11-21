@@ -232,7 +232,8 @@ public sealed class LoginTests
         var config = JsonDocument.Parse(File.ReadAllText(Path.Combine(machine.MbusFolder, "config.json"))).RootElement;
         Assert.Equal(FakeServer.Url, config.GetProperty("server").GetString());
         Assert.Equal("mch_test", config.GetProperty("machineId").GetString());
-        var keyFile = Path.Combine(machine.MbusFolder, "machine-key.pem");
+        var generation = config.GetProperty("machineKeyGeneration").GetString();
+        var keyFile = Path.Combine(machine.MbusFolder, $"machine-key.{generation}.pem");
         var sessionFile = Path.Combine(machine.MbusFolder, "cli-session.json");
         // The test machine's key store (the file on macOS), so the check doesn't move the test key into the login Keychain.
         Assert.Contains("PRIVATE KEY", new ConfigStore(machine.MbusFolder, machine.Env.GetValueOrDefault(ConfigStore.KeyStoreVariable)).LoadKeyPem());
@@ -240,7 +241,7 @@ public sealed class LoginTests
         if (OperatingSystem.IsWindows())
         {
             Assert.False(File.Exists(keyFile));
-            Assert.DoesNotContain("PRIVATE KEY", File.ReadAllText(Path.Combine(machine.MbusFolder, "machine-key.dpapi")));
+            Assert.DoesNotContain("PRIVATE KEY", File.ReadAllText(Path.Combine(machine.MbusFolder, $"machine-key.{generation}.dpapi")));
         }
         else
         {

@@ -41,7 +41,11 @@ public sealed record CliSettings
         // the original issue: a runner that enrolled itself with this (runner) key signs as its machine instead.
         if (apiKey is not null && stored.MachineId is not null && server is not null && stored.Server is not null
             && ServerEndpoint.Parse(server.AbsoluteUri) == ServerEndpoint.Parse(stored.Server)
-            && stored.EnrolledWithApiKey == Runner.RunnerKeyEnrollment.Fingerprint(apiKey))
+            && stored.EnrolledWithApiKey == Runner.RunnerKeyEnrollment.Fingerprint(apiKey)
+            && (stored.RunnerEnrollmentBinding is { } provenance
+                ? provenance.Matches(ServerEndpoint.Parse(server.AbsoluteUri), stored.ServerBinding,
+                    Runner.RunnerKeyEnrollment.Fingerprint(apiKey), stored.KeyFingerprint)
+                : stored.ServerBinding is null))
         {
             apiKey = null;
         }

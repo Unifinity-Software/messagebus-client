@@ -19,7 +19,7 @@ public sealed partial class ConfigStore
     internal Action<string>? BindingWriteBoundary { get; set; }
 
     /// <summary>A lock-held context with explicitly scoped operations; concurrent operations are rejected.</summary>
-    public sealed class ProfileSecurityTransaction
+    public sealed partial class ProfileSecurityTransaction
     {
         private readonly ConfigStore _store;
         private readonly object _operation = new();
@@ -148,7 +148,20 @@ public sealed partial class ConfigStore
         {
             if (ReadOptionalProfileFile(BindingTransitionPath) is not null)
                 throw new ServerBindingException("An interrupted binding transition requires profile restoration; credentials refused.");
+            if (ReadOptionalProfileFile(EnrollmentTransitionPath) is not null)
+                throw new ServerBindingException("An interrupted identity publication requires profile restoration; credentials refused.");
             var config = ReadConfig();
+            ValidateKeyGeneration(config.MachineKeyGeneration);
+            if (config.RunnerEnrollmentBinding is { } runner)
+            {
+                var endpoint = ServerEndpoint.Parse(runner.SelectedEndpoint);
+                if (runner.Version != 1 || runner.SelectedEndpoint != endpoint.Value || config.Server is null
+                    || ServerEndpoint.Parse(config.Server) != endpoint
+                    || runner.MachineKeyFingerprint != config.KeyFingerprint
+                    || runner.ApiKeyFingerprint != (config.PendingRunnerEnrollment ?? config.EnrolledWithApiKey))
+                    throw new ServerBindingException("Invalid runner enrollment provenance.");
+                CheckSnapshotScope(runner.ServerBinding, runner.SelectedEndpoint);
+            }
             var session = ReadSession();
             var ledgerJson = ReadOptionalProfileFile(ServerBindingsPath);
             var ledgerExists = ledgerJson is not null;
@@ -173,7 +186,7 @@ public sealed partial class ConfigStore
                 }
             }
             var evidence = ledger.Bindings.Select(e => ServerBindingExpectation.Create(e.Key, e.Value.Binding)).ToList();
-            foreach (var snapshot in new[] { config.ServerBinding, session?.ServerBinding }.OfType<ServerBindingSnapshot>())
+            foreach (var snapshot in new[] { config.ServerBinding, config.RunnerEnrollmentBinding?.ServerBinding, session?.ServerBinding }.OfType<ServerBindingSnapshot>())
             {
                 if (!ledgerExists || !ledger.Bindings.TryGetValue(snapshot.Endpoint.Origin, out var pin) || pin.Binding != snapshot.Binding)
                     throw new ServerBindingException("Saved binding has no matching ledger; restore the profile before using credentials.");
@@ -250,6 +263,18 @@ public sealed partial class ConfigStore
                 if (property.Name != "serverBinding") throw new ServerBindingException("Ambiguous saved binding field.");
                 ValidateSnapshotJson(property.Value);
             }
+            else if (string.Equals(property.Name, "runnerEnrollmentBinding", StringComparison.OrdinalIgnoreCase))
+            {
+                if (property.Name != "runnerEnrollmentBinding") throw new ServerBindingException("Ambiguous runner enrollment field.");
+                ValidateObject(property.Value);
+                var fields = property.Value.EnumerateObject().Select(p => p.Name).ToHashSet(StringComparer.Ordinal);
+                if (!new[] { "version", "selectedEndpoint", "apiKeyFingerprint", "machineKeyFingerprint" }.All(fields.Contains)
+                    || fields.Any(f => f is not ("version" or "selectedEndpoint" or "apiKeyFingerprint" or "machineKeyFingerprint" or "serverBinding")))
+                    throw new ServerBindingException("Incomplete or unknown runner enrollment provenance.");
+                if (property.Value.TryGetProperty("serverBinding", out var binding)) ValidateSnapshotJson(binding);
+            }
+            else if (string.Equals(property.Name, "machineKeyGeneration", StringComparison.OrdinalIgnoreCase)
+                && property.Name != "machineKeyGeneration") throw new ServerBindingException("Ambiguous key generation field.");
         }
     }
 

@@ -54,7 +54,13 @@ public static class ServerConnection
         {
             return null;
         }
-        return new MachineRequestSigner(MachineKey.FromPem(pem), machineId, host.Time);
+        var key = MachineKey.FromPem(pem);
+        if (settings.Stored.KeyFingerprint is { } fingerprint && key.Fingerprint != fingerprint)
+        {
+            key.Dispose();
+            throw new ServerBindingException("The saved machine key does not match this identity.");
+        }
+        return new MachineRequestSigner(key, machineId, host.Time);
     }
 
     // A selected destination is not permission to reuse an identity or workspace from another endpoint.
@@ -112,9 +118,80 @@ public static class ServerConnection
         return await ReadAsync<MachineEnrollResponse>(response, ct);
     }
 
+    /// <summary>Enrollment with an intentionally supplied credential, gated before attaching headers or enrollment content.</summary>
+    internal static async Task<(MachineEnrollResponse Response, ServerBindingSnapshot? Binding)> EnrollSuppliedAsync(
+        CliHost host, ConfigStore store, Uri server, AuthenticationHeaderValue credential,
+        Func<Task<MachineEnrollRequest>> body, CancellationToken ct, ConfigStore.ProfileSecurityTransaction? transaction = null,
+        Action<PreparedServerSend>? validate = null)
+    {
+        using var gate = new ServerSendGate(host, store, server);
+        var destination = new Uri(CliSettings.BaseAddress(server), Relative(ApiRoutes.MachineEnroll));
+        var prepared = await gate.PrepareSendAsync(destination, ct, transaction);
+        validate?.Invoke(prepared);
+        using var request = new HttpRequestMessage(HttpMethod.Post, destination);
+        // No enrollment content or credential is attached until current anonymous validation succeeds.
+        request.Content = Json(await body());
+        using var client = CreateAnonymousClient(host, server);
+        using var response = await prepared.ConsumeAsync(destination, async _ =>
+        {
+            request.Headers.Authorization = credential;
+            try
+            {
+                var result = await SendAsync(client, request, server, ct);
+                if ((int)result.StatusCode is >= 300 and <= 399)
+                {
+                    result.Dispose();
+                    throw new ServerBindingException("Enrollment redirects are refused; credentials were not replayed.");
+                }
+                return result;
+            }
+            finally { request.Headers.Authorization = null; }
+        }, ct, transaction);
+        return (await ReadEnrollAsync(response, ct), prepared.Binding);
+    }
+
     /// <summary>An enrollment request with no credential yet (the caller adds the person's sign-in).</summary>
     internal static HttpRequestMessage EnrollRequest(MachineEnrollRequest body) =>
         new(HttpMethod.Post, Relative(ApiRoutes.MachineEnroll)) { Content = Json(body) };
+
+    // Prove the newly enrolled key before publishing it over the previous profile identity. No stored
+    // machine/workspace or key loader participates, and the explicit transaction stays held through send.
+    internal static async Task PutEnrollmentInventoryAsync(CliHost host, ConfigStore store, Uri server, MachineKey key,
+        string machineId, string workspaceId, MachineInventory inventory, ServerBindingSnapshot? binding,
+        ConfigStore.ProfileSecurityTransaction transaction, CancellationToken ct)
+    {
+        using var gate = new ServerSendGate(host, store, server);
+        var destination = new Uri(CliSettings.BaseAddress(server), Relative(ApiRoutes.MachineInventory));
+        var prepared = await gate.PrepareSendAsync(destination, ct, transaction);
+        if (prepared.Binding != binding) throw new ServerBindingException("The enrollment authority changed before proving the new key.");
+        using var request = new HttpRequestMessage(HttpMethod.Put, destination) { Content = Json(inventory with { MachineId = machineId }) };
+        var bytes = await request.Content.ReadAsByteArrayAsync(ct);
+        using var client = CreateAnonymousClient(host, server);
+        var signer = new MachineRequestSigner(key, machineId, host.Time);
+        using var response = await prepared.ConsumeAsync(destination, async authorization =>
+        {
+            request.Headers.TryAddWithoutValidation(MbusHeaders.Workspace, workspaceId);
+            foreach (var (name, value) in signer.CreateHeaders(authorization, request, bytes))
+                request.Headers.TryAddWithoutValidation(name, value);
+            try
+            {
+                var result = await SendAsync(client, request, server, ct);
+                if ((int)result.StatusCode is >= 300 and <= 399)
+                {
+                    result.Dispose();
+                    throw new ServerBindingException("Enrollment proof redirects are refused; credentials were not replayed.");
+                }
+                return result;
+            }
+            finally
+            {
+                request.Headers.Authorization = null;
+                request.Headers.Remove(MbusHeaders.Workspace);
+                request.Headers.Remove(MbusHeaders.Signature);
+            }
+        }, ct, transaction);
+        await EnsureSuccessAsync(response, "prove the enrolled machine key", ct);
+    }
 
     /// <summary>The enrolled machine from an enrollment answer; throws <see cref="CliException"/> when it was refused.</summary>
     internal static async Task<MachineEnrollResponse> ReadEnrollAsync(HttpResponseMessage response, CancellationToken ct)

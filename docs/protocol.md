@@ -276,8 +276,51 @@ Approved tokens may be saved only by the collecting sign-in with that same prepa
 fresh validation and a current ledger check inside the session transaction; changed or stripped discovery cannot
 relabel already-issued tokens. These are source integrations, not runtime verification or release readiness.
 
-Remaining required work is explicit: anonymous caller-key and enrollment-token probes, environment-runner factories/checkpoint
-reuse, WebSocket connect/reconnect and terminal refusal classification, attachment transfer/query credentials
+`LoginCommand` enrollment-token POST and runner caller-key probes now prepare/consume the shared gate before
+attaching their supplied Authorization header. Enrollment content is built only after fresh anonymous validation.
+Both use credential-free transports with redirects disabled, reject every 3xx and clear the per-request credential
+on exit. No saved workspace or machine header is attached to these fresh bootstrap requests. A changed selected
+origin, canonical alias or base path does not inherit the old machine ID or inventory ID. A manually supplied
+public discovery stamp is not enrollment provenance. All held profile operations pass the explicit transaction;
+they never call ordinary `Load`/`Save` or reacquire the profile lock.
+
+Runner provenance is additive source-generated config JSON: `runnerEnrollmentBinding` has `version:1`,
+`selectedEndpoint` (normalized API URL including base path and trailing slash), `apiKeyFingerprint` (the existing
+16 lowercase hex fingerprint), `machineKeyFingerprint` (full public-key SHA-256), and optional `serverBinding`
+(the immutable isolated snapshot; absent only for affirmative never-pinned legacy). The existing
+`pendingRunnerEnrollment` and `enrolledWithApiKey` fingerprint strings retain their names and meaning. Reuse
+requires the exact endpoint, tuple, API-key fingerprint and loaded machine-key fingerprint. A lost enrollment
+response leaves a durable checkpoint and key; restart reuses that key only in the same scope. Old checkpoints
+without provenance are accepted only at their original endpoint under affirmative never-pinned legacy, then
+acquire the verified fields. Isolated checkpoints missing those fields refuse. A surviving checkpoint snapshot
+is independent ever-isolated evidence even if the top-level snapshot was stripped.
+
+Identity finalization rereads config and current binding inside the explicit profile transaction. Token enrollment
+retains its actual send binding. Browser enrollment captures a pre-send binding and conservatively refuses if
+the final fresh binding differs; a concurrent legacy-to-isolated promotion cannot relabel that enrollment.
+Concurrent profile changes refuse rather than publishing a stale `Stored` record. New identities clear old
+runner bootstrap/checkpoint provenance. The first inventory proves the newly enrolled key with only its returned
+machine/workspace and actual binding, before publishing the identity; a refused proof preserves the old profile
+or leaves the pending runner checkpoint. File and Windows DPAPI enrollment stage and verify a separate immutable
+key file, then atomically publish its optional `machineKeyGeneration` (32 lowercase hex filename component),
+key-store choice, identity and actual binding in `config.json`. Existing profiles without this field keep the
+original filenames. A generation uses `machine-key.<generation>.pem` or `machine-key.<generation>.dpapi`.
+The old key is retained for recovery and is never overwritten by staging. Failed staging or cancellation before
+publication leaves the old config/key/trust. Publication failure restores the old config; an indeterminate
+publication retains both key files and `identity-publication.pending` (the previous non-secret config), which
+blocks all credential use until explicit profile restoration. Old generation keys are recovery data, not disposable
+build artifacts; this checkpoint does not automatically remove them. Ordinary config saves cannot publish a new
+key generation or silently erase the current generation.
+
+Key stores without a supported separate staging slot (including Keychain and arbitrary custom vaults) refuse
+new enrollment before key replacement, with separate private file-profile guidance. No silent plaintext fallback,
+profile permission repair or keychain migration is performed by enrollment. Legacy trust requiring a separate
+import also refuses before replacement. Runner bootstrap refuses to overwrite an active identity or a different
+server's profile while publishing a pending checkpoint; use a separate private durable home for that fresh runner.
+These conservative restrictions require native UX/compatibility review and are not a claim that all platform
+login workflows are complete.
+
+Remaining required work is explicit: full native verification of enrollment/checkpoint lifecycle, attachment transfer/query credentials
 and all separate MCP/script/dead-letter transfer clients, public signed update-feed transport and diagnostics.
 `CreateAnonymousClient` now restricts its raw HTTP transport, but is not itself a per-send credential gate.
 The old three-argument signer remains available for compatibility and is not evidence of gated WS integration.
@@ -478,9 +521,9 @@ without credential-bearing default headers. It checks the exact selected endpoin
 the configured API key, and revalidates discovery/binding for each request. Trusted
 `MBUS_SERVER_BINDING` provisioning requires explicit writable `MBUS_HOME` before discovery or
 caller probes; deployment remains responsible for mounting that home durably. Runner-key
-enrollment POSTs also use this gated transport. Enrollment checkpoint and previously enrolled
-API-key reuse still require a separate endpoint/binding/key-fingerprint lifecycle review; this
-transport checkpoint does not establish that those flows or the regional acceptance matrix are
+enrollment POSTs also use this gated transport. The bounded login/runner lifecycle above adds exact
+endpoint/binding/key-fingerprint provenance and restrictive staging; native validation and independent
+combined lifecycle review remain required. This checkpoint does not establish that the regional acceptance matrix is
 complete. Native runtime, old-server and combined review gates remain required before release.
 
 1. The runner opens an outbound WebSocket to `/api/runner/connect` with subprotocol `mbus.v1`, signed as its machine,

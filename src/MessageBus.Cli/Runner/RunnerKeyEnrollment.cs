@@ -4,109 +4,162 @@ using System.Text;
 using System.Text.Json;
 using MessageBus.Cli.Agents;
 using MessageBus.Cli.Commands;
+using MessageBus.Cli.Configuration;
 using MessageBus.Cli.Hosting;
 using MessageBus.Cli.Security;
 using MessageBus.Cli.Server;
 using MessageBus.Contracts.Http;
 using MessageBus.Contracts.Machines;
 using MessageBus.Contracts.Security;
-using MessageBus.Mcp;
 
 namespace MessageBus.Cli.Runner;
 
-/// <summary>
-/// A runner container started with a runner API key in <c>MBUS_API_KEY</c> (the original issue): on its first start it makes this
-/// machine's key, enrolls with the API key as a shared runner named <c>MBUS_MACHINE_NAME</c> and saves both in mbus's
-/// settings folder (keep it on a volume). From then on it signs as that machine and doesn't send the API key at all
-/// (<see cref="Configuration.CliConfig.EnrolledWithApiKey"/>), so revoking the key stops new runners, not this one.
-/// </summary>
+/// <summary>Bootstraps and resumes a runner only at its exact issuing endpoint with the same persisted key.</summary>
 internal static class RunnerKeyEnrollment
 {
-    /// <summary>Which API key a machine enrolled with, without keeping the key: the start of its SHA-256, lower-case hex.</summary>
+    /// <summary>Which API key enrolled a runner, without storing the key.</summary>
     public static string Fingerprint(string apiKey) => Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(apiKey.Trim())))[..16];
 
-    /// <summary>
-    /// Enrolls this machine with <c>MBUS_API_KEY</c> unless it already has with that key, then reports its agent scan
-    /// signed as the new machine. Returns the settings to carry on with, or null when it didn't enroll (no API key, or
-    /// already enrolled with it).
-    /// </summary>
-    /// <param name="context">The command's settings.</param>
-    /// <param name="reload">Reads the settings again (after they are saved).</param>
-    /// <param name="log">Status lines.</param>
-    /// <param name="onlyRunnerKeys">Ask the server first and leave any other kind of key alone (<c>mbus login</c>); otherwise the server's refusal is the answer.</param>
-    /// <param name="ct">Stops it.</param>
-    /// <exception cref="CliException">The server refused (not a runner key, revoked, expired).</exception>
+    private sealed record EnrollmentResult(bool Used, MachineEnrollResponse? Enrolled = null, MachineInventory? Inventory = null);
+
+    /// <summary>Validates an existing runner or durably checkpoints and enrolls a new runner using an explicitly supplied API key.</summary>
     public static async Task<CommandContext?> EnsureAsync(CommandContext context, Func<CommandContext> reload, TextWriter log, bool onlyRunnerKeys, CancellationToken ct)
     {
         var host = context.Host;
         var apiKey = host.GetEnvironmentVariable(EnvVars.ApiKey)?.Trim();
-        // CliSettings drops the API key once this machine has enrolled with it.
-        if (string.IsNullOrEmpty(apiKey) || (context.Settings.ApiKey is null && context.Store.HasKey) || context.Settings.Server is not { } server)
+        if (string.IsNullOrEmpty(apiKey) || context.Settings.Server is not { } server) return null;
+        var endpoint = ServerEndpoint.Parse(server.AbsoluteUri);
+        var fingerprint = Fingerprint(apiKey);
+        var result = await context.Store.WithProfileSecurityLockAsync(async transaction =>
         {
-            return null;
-        }
-        var settings = context.Settings with { ApiKey = apiKey };
-        if (onlyRunnerKeys && !await IsRunnerKeyAsync(context, settings, ct).ConfigureAwait(false))
-        {
-            return null;
-        }
+            var current = transaction.Load();
+            var sameEndpoint = current.Server is not null && ServerEndpoint.Parse(current.Server) == endpoint;
+            using var gate = new ServerSendGate(host, context.Store, server);
+            var destination = new Uri(CliSettings.BaseAddress(server), ServerConnection.Relative(ApiRoutes.MachineEnroll));
 
-        await log.WriteLineAsync($"Signing this runner in with the API key from {EnvVars.ApiKey}...").ConfigureAwait(false);
-        // Validate old trust before enrolling or replacing this machine's identity.
-        try
-        {
-            KeyTrust.BindLegacy(context.Store.Directory, settings.Stored.Server ?? CommandContext.ServerText(server));
-        }
-        catch (InvalidDataException ex)
-        {
-            throw new CliException(string.Join(" ", ex.Message.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)));
-        }
+            if (current.MachineId is not null && sameEndpoint && current.EnrolledWithApiKey == fingerprint)
+            {
+                using var existing = MachineKey.FromPem(transaction.LoadEnrollmentKeyPem()
+                    ?? throw new ServerBindingException("The enrolled runner has no persisted machine key."));
+                var prepared = await gate.PrepareSendAsync(destination, ct, transaction);
+                DemandProvenance(current, endpoint, prepared.Binding, fingerprint, existing.Fingerprint, pending: false);
+                await prepared.ConsumeAsync(destination, _ => Task.FromResult(true), ct, transaction);
+                // Old, never-pinned profiles acquire provenance only at the same exact endpoint after key verification.
+                current = transaction.Load();
+                transaction.Save(current with { KeyFingerprint = existing.Fingerprint,
+                    RunnerEnrollmentBinding = Provenance(endpoint, prepared.Binding, fingerprint, existing.Fingerprint) });
+                return new EnrollmentResult(true);
+            }
 
-        var pending = settings.Stored.PendingRunnerEnrollment;
-        if (pending is not null && (pending != Fingerprint(apiKey) || settings.Stored.MachineId is not null))
-            throw new CliException("The saved runner enrollment checkpoint does not match this sign-in. Restore the original bootstrap configuration.");
-        using var key = pending is null ? MachineKey.Create()
-            : MachineKey.FromPem(context.Store.LoadKeyPem() ?? throw new CliException("The runner enrollment checkpoint has no machine key. Restore its persisted identity."));
-        var inventory = await AgentScanner.BuildInventoryAsync(host, settings.Stored.MachineId, settings.Location, ct).ConfigureAwait(false);
-        using var enrollment = ServerConnection.CreateAuthenticatedClient(host, settings, context.Store, "runner");
-        var enrolled = await ServerConnection.EnrollAsync(enrollment, server, new AuthenticationHeaderValue(AuthSchemes.ApiKey, apiKey),
-            new MachineEnrollRequest { PublicKey = key.PublicKeyBase64, Name = settings.MachineName, Location = settings.Location, Inventory = inventory }, ct).ConfigureAwait(false);
+            // A new runner checkpoint must not replace an already active identity or another server's profile.
+            if (current.MachineId is not null || current.WorkspaceId is not null || current.Server is not null && !sameEndpoint)
+                throw new ServerBindingException("New runner enrollment requires a separate private MBUS_HOME; the existing server identity was preserved.");
 
-        context.Store.SaveKeyPem(key.ExportPrivateKeyPem());
-        context.Store.Save(settings.Stored with
-        {
-            Server = CommandContext.ServerText(server),
-            MachineId = enrolled.Machine.MachineId,
-            WorkspaceId = enrolled.Machine.WorkspaceId,
-            WorkspaceName = enrolled.WorkspaceName,
-            MachineName = enrolled.Machine.Name,
-            Location = enrolled.Machine.Location ?? settings.Location,
-            KeyFingerprint = key.Fingerprint,
-            EnrolledAt = enrolled.Machine.EnrolledAt,
-            EnrolledWithApiKey = Fingerprint(apiKey),
-            PendingRunnerEnrollment = null,
-        });
+            var pending = current.PendingRunnerEnrollment;
+            if (pending is not null && pending != fingerprint)
+                throw new ServerBindingException("The runner checkpoint belongs to another bootstrap key; restore its original configuration.");
+            using var key = pending is null ? MachineKey.Create()
+                : MachineKey.FromPem(transaction.LoadEnrollmentKeyPem()
+                    ?? throw new ServerBindingException("The runner checkpoint has no persisted machine key."));
+            var initial = await gate.PrepareSendAsync(destination, ct, transaction);
+            if (pending is not null) DemandProvenance(current, endpoint, initial.Binding, fingerprint, key.Fingerprint, pending: true);
+            if (onlyRunnerKeys && !await IsRunnerKeyAsync(context, server, apiKey, initial.Binding, transaction, ct))
+                return new EnrollmentResult(false);
+
+            await log.WriteLineAsync($"Signing this runner in with the API key from {EnvVars.ApiKey}...");
+            var inventory = await AgentScanner.BuildInventoryAsync(host, null, context.Settings.Location, ct);
+            current = transaction.Load();
+            var checkpoint = current with
+            {
+                Server = CommandContext.ServerText(server), ServerBinding = initial.Binding,
+                PendingRunnerEnrollment = fingerprint, KeyFingerprint = key.Fingerprint,
+                RunnerEnrollmentBinding = Provenance(endpoint, initial.Binding, fingerprint, key.Fingerprint),
+            };
+            if (pending is null)
+                checkpoint = transaction.CommitEnrollment(current, checkpoint, key.ExportPrivateKeyPem(), ct);
+            else
+                transaction.Save(checkpoint);
+
+            // The key and checkpoint are durable before POST. A lost response resumes this exact key and scope.
+            var (enrolled, binding) = await ServerConnection.EnrollSuppliedAsync(host, context.Store, server,
+                new AuthenticationHeaderValue(AuthSchemes.ApiKey, apiKey),
+                () => Task.FromResult(new MachineEnrollRequest { PublicKey = key.PublicKeyBase64,
+                    Name = context.Settings.MachineName, Location = context.Settings.Location, Inventory = inventory }),
+                ct, transaction, prepared => DemandProvenance(checkpoint, endpoint, prepared.Binding, fingerprint, key.Fingerprint, pending: true));
+            var final = await gate.PrepareSendAsync(destination, ct, transaction);
+            if (final.Binding != binding) throw new ServerBindingException("The runner authority changed before identity publication.");
+            await final.ConsumeAsync(destination, _ => Task.FromResult(true), ct, transaction);
+            await ServerConnection.PutEnrollmentInventoryAsync(host, context.Store, server, key,
+                enrolled.Machine.MachineId, enrolled.Machine.WorkspaceId, inventory, binding, transaction, ct);
+            current = transaction.Load();
+            transaction.Save(current with
+            {
+                ServerBinding = binding, MachineId = enrolled.Machine.MachineId, WorkspaceId = enrolled.Machine.WorkspaceId,
+                WorkspaceName = enrolled.WorkspaceName, MachineName = enrolled.Machine.Name,
+                Location = enrolled.Machine.Location ?? context.Settings.Location, EnrolledAt = enrolled.Machine.EnrolledAt,
+                EnrolledWithApiKey = fingerprint, PendingRunnerEnrollment = null,
+            });
+            return new EnrollmentResult(true, enrolled, inventory);
+        }, ct);
+
+        if (!result.Used) return null;
         var signed = reload();
-        // The first signed request: proves the saved key works, and files the scan under the new machine.
-        using (var client = ServerConnection.CreateAuthenticatedClient(host, signed.Settings, signed.Store, "runner"))
+        if (result.Enrolled is { } enrolledResult)
         {
-            await ServerConnection.PutInventoryAsync(client, server, inventory with { MachineId = enrolled.Machine.MachineId }, ct).ConfigureAwait(false);
+            await log.WriteLineAsync($"This machine is {enrolledResult.Machine.Name}, a shared runner in the {enrolledResult.WorkspaceName} workspace."
+                + (enrolledResult.Machine.PendingApproval ? " A workspace admin must approve it before it takes work." : ""));
         }
-        await log.WriteLineAsync($"This machine is {enrolled.Machine.Name}, a shared runner in the {enrolled.WorkspaceName} workspace."
-            + (enrolled.Machine.PendingApproval ? " A workspace admin must approve it before it takes work." : "")).ConfigureAwait(false);
         return signed;
     }
 
-    /// <summary>Whether the key holds the runner scope (<see cref="ApiRoutes.Caller"/>).</summary>
-    private static async Task<bool> IsRunnerKeyAsync(CommandContext context, Configuration.CliSettings settings, CancellationToken ct)
+    private static RunnerEnrollmentBinding Provenance(ServerEndpoint endpoint, ServerBindingSnapshot? binding, string apiFingerprint, string keyFingerprint) => new()
+    { SelectedEndpoint = endpoint.Value, ServerBinding = binding, ApiKeyFingerprint = apiFingerprint, MachineKeyFingerprint = keyFingerprint };
+
+    private static void DemandProvenance(CliConfig config, ServerEndpoint endpoint, ServerBindingSnapshot? currentBinding,
+        string apiFingerprint, string keyFingerprint, bool pending)
     {
-        using var client = ServerConnection.CreateAuthenticatedClient(context.Host, settings, context.Store, "cli");
-        using var response = await client.GetAsync(ServerConnection.Relative(ApiRoutes.Caller), ct).ConfigureAwait(false);
-        if (!response.IsSuccessStatusCode)
+        if (config.Server is null || ServerEndpoint.Parse(config.Server) != endpoint
+            || config.KeyFingerprint is { } expectedKey && expectedKey != keyFingerprint)
+            throw new ServerBindingException("The runner identity/checkpoint differs from the selected endpoint or persisted key.");
+        if (config.RunnerEnrollmentBinding is { } provenance)
         {
-            return false;
+            if (!provenance.Matches(endpoint, currentBinding, apiFingerprint, keyFingerprint))
+                throw new ServerBindingException("The runner identity/checkpoint authority or key fingerprints changed.");
         }
-        using var body = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false));
+        else if (config.ServerBinding is not null || currentBinding is not null)
+            throw new ServerBindingException("An isolated runner requires its original enrollment provenance; restore the checkpoint.");
+        // Old checkpoint format is accepted only under affirmative legacy at its original endpoint.
+        if (pending && config.PendingRunnerEnrollment != apiFingerprint
+            || !pending && config.EnrolledWithApiKey != apiFingerprint)
+            throw new ServerBindingException("The bootstrap key does not match the runner identity/checkpoint.");
+    }
+
+    private static async Task<bool> IsRunnerKeyAsync(CommandContext context, Uri server, string apiKey,
+        ServerBindingSnapshot? binding, ConfigStore.ProfileSecurityTransaction transaction, CancellationToken ct)
+    {
+        using var gate = new ServerSendGate(context.Host, context.Store, server);
+        var destination = new Uri(CliSettings.BaseAddress(server), ServerConnection.Relative(ApiRoutes.Caller));
+        var prepared = await gate.PrepareSendAsync(destination, ct, transaction);
+        if (prepared.Binding != binding) throw new ServerBindingException("The server authority changed before the caller probe.");
+        using var client = ServerConnection.CreateAnonymousClient(context.Host, server);
+        using var request = new HttpRequestMessage(HttpMethod.Get, destination);
+        using var response = await prepared.ConsumeAsync(destination, async _ =>
+        {
+            request.Headers.Authorization = new AuthenticationHeaderValue(AuthSchemes.ApiKey, apiKey);
+            try
+            {
+                var answer = await client.SendAsync(request, ct);
+                if ((int)answer.StatusCode is >= 300 and <= 399)
+                {
+                    answer.Dispose();
+                    throw new ServerBindingException("Caller redirects are refused; the API key was not replayed.");
+                }
+                return answer;
+            }
+            finally { request.Headers.Authorization = null; }
+        }, ct, transaction);
+        if (!response.IsSuccessStatusCode) return false;
+        using var body = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
         return body.RootElement.TryGetProperty("scopes", out var scopes) && scopes.ValueKind == JsonValueKind.Array
             && scopes.EnumerateArray().Any(s => s.GetString() == ApiKeyScopes.Runner);
     }

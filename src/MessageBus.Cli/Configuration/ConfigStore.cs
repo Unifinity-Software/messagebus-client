@@ -14,8 +14,10 @@ public sealed partial class ConfigStore
     /// <summary><c>os</c> (the default: DPAPI on Windows, the Keychain on macOS) or <c>file</c> (the owner-only PEM file everywhere).</summary>
     public const string KeyStoreVariable = "MBUS_KEY_STORE";
 
-    private readonly Security.FileKeyVault _keyFile;
+    private Security.FileKeyVault _keyFile;
     private readonly Security.IMachineKeyVault? _osVault;
+    private string? _keyGeneration;
+    private readonly string? _initialKeyStore;
 
     // Runner reads check the actual keychain lock state before using the trusted tool.
     internal bool RunnerKeyReads { get; set; }
@@ -36,8 +38,10 @@ public sealed partial class ConfigStore
         _environment = environment;
         _keyFile = new Security.FileKeyVault(Path.Combine(directory, CliConfig.MachineKeyFile), WriteOwnerOnly);
         _osVault = osVault;
+        _initialKeyStore = keyStore;
         var choice = Load().KeyStore ?? keyStore;
         KeyVault = string.Equals(choice?.Trim(), "file", StringComparison.OrdinalIgnoreCase) ? _keyFile : PlatformVault() ?? _keyFile;
+        SelectKeyGeneration(Load());
     }
 
     /// <summary>The folder.</summary>
@@ -72,6 +76,8 @@ public sealed partial class ConfigStore
         if (choice is not ("file" or "keychain")) throw new CliException("Choose --key-store file or keychain.");
         var target = KeyStoreName == choice ? KeyVault : choice == "file" ? _keyFile : PlatformVault() ?? throw new CliException("The Keychain is unavailable on this computer.");
         var config = Load();
+        if (config.MachineKeyGeneration is not null && choice == "keychain" && !OperatingSystem.IsWindows())
+            throw new Server.ServerBindingException("This staged identity cannot be moved to a nontransactional Keychain store. Keep its file store or enroll in a separate private profile.");
         if (config.KeyStore == choice && KeyStoreName == choice) return new KeyStoreChange(null, choice, target, null);
         if (config.MachineId is null && !HasKey) return new KeyStoreChange(this, choice, target, null);
         // the original issue: the file first when it holds this machine's key, so a locked Keychain (with an older copy, say) doesn't
@@ -214,7 +220,8 @@ public sealed partial class ConfigStore
     {
         if (OperatingSystem.IsWindows())
         {
-            return new Security.DpapiKeyVault(Path.Combine(Directory, CliConfig.ProtectedMachineKeyFile), WriteOwnerOnly);
+            return new Security.DpapiKeyVault(Path.Combine(Directory, _keyGeneration is { } generation
+                ? $"machine-key.{generation}.dpapi" : CliConfig.ProtectedMachineKeyFile), WriteOwnerOnly);
         }
         if (OperatingSystem.IsMacOS() && File.Exists(Security.SecurityTool.Path))
         {
@@ -254,6 +261,9 @@ public sealed partial class ConfigStore
     private void SaveConfigLocked(CliConfig config)
     {
         var state = ReadBindingState();
+        if (config.MachineKeyGeneration is not null && config.MachineKeyGeneration != state.Config.MachineKeyGeneration)
+            throw new Server.ServerBindingException("Only an enrollment transaction may publish a new machine key generation.");
+        config = config with { MachineKeyGeneration = config.MachineKeyGeneration ?? state.Config.MachineKeyGeneration };
         config = config with { ServerBinding = MergeSnapshot(state.Config.ServerBinding, config.ServerBinding, config.Server, state.Ledger) };
         BindingWriteBoundary?.Invoke("before-config-save");
         var previousServer = state.Config.Server;
@@ -298,6 +308,7 @@ public sealed partial class ConfigStore
     /// </summary>
     public string? LoadKeyPem()
     {
+        SelectKeyGeneration(Load());
         if (_environment is not null && Security.RunContext.IsInsideRun(_environment))
         {
             throw new CliException(Security.RunContext.KeyRefused);
@@ -363,13 +374,21 @@ public sealed partial class ConfigStore
     }
 
     /// <summary>Whether a machine key is saved here (without decrypting it).</summary>
-    public bool HasKey => File.Exists(KeyPath) || (!ReferenceEquals(KeyVault, _keyFile) && SafeHasProtectedKey());
+    public bool HasKey
+    {
+        get
+        {
+            SelectKeyGeneration(Load());
+            return File.Exists(KeyPath) || (!ReferenceEquals(KeyVault, _keyFile) && SafeHasProtectedKey());
+        }
+    }
 
     private bool SafeHasProtectedKey()
     {
         if (KeyVault is Security.DpapiKeyVault)
         {
-            return File.Exists(Path.Combine(Directory, CliConfig.ProtectedMachineKeyFile));
+            return File.Exists(Path.Combine(Directory, _keyGeneration is { } generation
+                ? $"machine-key.{generation}.dpapi" : CliConfig.ProtectedMachineKeyFile));
         }
         if (KeyVault is Security.IKeychainVault keychain)
         {
