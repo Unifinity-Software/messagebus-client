@@ -214,6 +214,7 @@ public static class MessageBusJson
 [JsonSerializable(typeof(StatusResult))]
 [JsonSerializable(typeof(ThreadBrief))]
 [JsonSerializable(typeof(RetargetInput))]
+[JsonSerializable(typeof(McpCatalogFeatures))]
 [JsonSerializable(typeof(RetargetResult))]
 [JsonSerializable(typeof(RetargetMetadata))]
 [JsonSerializable(typeof(MoveInput))]
