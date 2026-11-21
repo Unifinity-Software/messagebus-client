@@ -45,6 +45,12 @@ internal static class LoginCommand
 
     private static async Task<int> RunAsync(CommandContext context, LoginChoices choices, Func<CommandContext> reload, CancellationToken ct)
     {
+        try { return await RunCoreAsync(context, choices, reload, ct); }
+        catch (ServerBindingException ex) { throw new CliException(ex.Message, 1, ex); }
+    }
+
+    private static async Task<int> RunCoreAsync(CommandContext context, LoginChoices choices, Func<CommandContext> reload, CancellationToken ct)
+    {
         var host = context.Host;
         var settings = context.Settings;
         var server = settings.Server ?? throw new CliException("Which server? Run: mbus login --server <url>", 2);
@@ -53,13 +59,19 @@ internal static class LoginCommand
         var machineName = string.IsNullOrWhiteSpace(choices.Name) ? settings.MachineName : choices.Name.Trim();
         var console = context.Console;
 
-        using var anonymous = ServerConnection.CreateAnonymousClient(host, server);
-        var info = await ServerConnection.GetServerInfoAsync(anonymous, server, ct);
+        await context.Store.WithProfileSecurityLockAsync(tx => { tx.DemandEnrollmentTrust(); return Task.FromResult(true); }, ct);
+
+        // The first observation establishes the same durable floor as every subsequent send.
+        // It also uses the dedicated credential-free discovery transport, including proxy policy.
+        using var discovery = new ServerSendGate(host, context.Store, server);
+        var initialDiscovery = await discovery.PrepareSendAsync(new Uri(CliSettings.BaseAddress(server), "api/server"), ct);
+        var info = initialDiscovery.Discovery.Info;
         console.MarkupLineInterpolated($"Server: [bold]{serverText}[/] (messagebus.ai {info.Version ?? "unknown version"})");
 
         // the original issue: a runner API key enrolls this machine as a shared runner, once; any other key is used as it is.
         if (!string.IsNullOrWhiteSpace(host.GetEnvironmentVariable(EnvVars.ApiKey)) && settings.ApiKey is null && context.Store.HasKey)
         {
+            await Runner.RunnerKeyEnrollment.EnsureAsync(context, reload, host.Out, onlyRunnerKeys: true, ct);
             console.MarkupLineInterpolated($"[green]Signed in.[/] This machine is the shared runner [bold]{settings.Stored.MachineName}[/], enrolled with the API key from {EnvVars.ApiKey}.");
             return 0;
         }
@@ -74,8 +86,9 @@ internal static class LoginCommand
 
         // Signing in again to the same server keeps the machine's id, so the dashboard shows one machine.
         var stored = settings.Stored;
-        var changedServer = stored.Server is { } oldServer && KeyTrust.NormalizeServer(oldServer) != KeyTrust.NormalizeServer(serverText);
+        var changedServer = stored.Server is { } oldServer && ServerEndpoint.Parse(oldServer) != ServerEndpoint.Parse(serverText);
         var previousMachineId = changedServer ? null : stored.MachineId;
+        await context.Store.WithProfileSecurityLockAsync(tx => { tx.DemandStagedEnrollment(); return Task.FromResult(true); }, ct);
         using var key = MachineKey.Create();
         MachineInventory? inventory = null;
         string? entraDeviceId = null;
@@ -87,6 +100,7 @@ internal static class LoginCommand
                 inventory = await AgentScanner.BuildInventoryAsync(host, previousMachineId, location, ct);
                 entraDeviceId = await EntraDevice.IdAsync(ct);
             }
+            await context.Store.WithProfileSecurityLockAsync(tx => { tx.DemandEnrollmentTrust(); return Task.FromResult(true); }, ct);
             return new MachineEnrollRequest
             {
                 WorkspaceId = string.IsNullOrWhiteSpace(choices.Workspace) ? null : choices.Workspace.Trim(),
@@ -100,48 +114,45 @@ internal static class LoginCommand
             };
         }
 
-        // Validate old trust before enrolling or replacing this machine's identity.
-        try
-        {
-            KeyTrust.BindLegacy(context.Store.Directory, stored.Server ?? serverText);
-        }
-        catch (InvalidDataException ex)
-        {
-            throw new CliException(string.Join(" ", ex.Message.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)));
-        }
-
         MachineEnrollResponse enrolled;
+        ServerBindingSnapshot? enrollmentBinding;
         var enrollToken = choices.Token ?? host.GetEnvironmentVariable(EnvVars.EnrollToken);
         if (!string.IsNullOrWhiteSpace(enrollToken))
         {
-            enrolled = await ServerConnection.EnrollAsync(anonymous, server,
-                new AuthenticationHeaderValue(AuthSchemes.EnrollmentToken, enrollToken.Trim()), await EnrollBodyAsync(), ct);
+            (enrolled, enrollmentBinding) = await ServerConnection.EnrollSuppliedAsync(host, context.Store, server,
+                new AuthenticationHeaderValue(AuthSchemes.EnrollmentToken, enrollToken.Trim()), EnrollBodyAsync, ct);
         }
         else
         {
-            enrolled = await EnrollSignedInAsync(context, info, machineName, location, choices.OpenBrowser, EnrollBodyAsync, ct);
+            (enrolled, enrollmentBinding) = await EnrollSignedInAsync(context, info, machineName, location, choices.OpenBrowser, EnrollBodyAsync, ct);
         }
 
-        context.Store.SaveKeyPem(key.ExportPrivateKeyPem());
-        var config = stored with
+        var config = await context.Store.WithProfileSecurityLockAsync(async transaction =>
         {
-            Server = serverText,
-            MachineId = enrolled.Machine.MachineId,
-            WorkspaceId = enrolled.Machine.WorkspaceId,
-            WorkspaceName = enrolled.WorkspaceName,
-            MachineName = enrolled.Machine.Name,
-            Location = enrolled.Machine.Location ?? location,
-            KeyFingerprint = key.Fingerprint,
-            EnrolledAt = enrolled.Machine.EnrolledAt,
-        };
-        context.Store.Save(config);
+            using var gate = new ServerSendGate(host, context.Store, server);
+            var target = new Uri(CliSettings.BaseAddress(server), "api/machines/enroll");
+            var prepared = await gate.PrepareSendAsync(target, ct, transaction);
+            if (prepared.Binding != enrollmentBinding) throw new ServerBindingException("The enrollment authority changed before identity publication.");
+            await prepared.ConsumeAsync(target, _ => Task.FromResult(true), ct, transaction);
+            var current = transaction.Load();
+            if (current with { ServerBinding = stored.ServerBinding } != stored)
+                throw new ServerBindingException("The profile changed during enrollment; its identity was preserved.");
+            await ServerConnection.PutEnrollmentInventoryAsync(host, context.Store, server, key,
+                enrolled.Machine.MachineId, enrolled.Machine.WorkspaceId, inventory!, enrollmentBinding, transaction, ct);
+            return transaction.CommitEnrollment(current, current with
+            {
+                Server = serverText, ServerBinding = enrollmentBinding,
+                MachineId = enrolled.Machine.MachineId, WorkspaceId = enrolled.Machine.WorkspaceId,
+                WorkspaceName = enrolled.WorkspaceName, MachineName = enrolled.Machine.Name,
+                Location = enrolled.Machine.Location ?? location, KeyFingerprint = key.Fingerprint,
+                EnrolledAt = enrolled.Machine.EnrolledAt, EnrolledWithApiKey = null,
+                PendingRunnerEnrollment = null, RunnerEnrollmentBinding = null,
+                PendingRunnerIdentity = null,
+            }, key.ExportPrivateKeyPem(), ct);
+        }, ct);
 
-        // The first signed request: proves the saved key works, and files the scan under the new id.
+        // The key was proved before publication, so failure could not replace the previous identity.
         var signedSettings = CliSettings.Resolve(host, config, serverText) with { ApiKey = null };
-        using (var client = ServerConnection.CreateAuthenticatedClient(host, signedSettings, context.Store, "cli"))
-        {
-            await ServerConnection.PutInventoryAsync(client, server, inventory! with { MachineId = config.MachineId! }, ct);
-        }
 
         console.MarkupLineInterpolated($"[green]Signed in.[/] This machine is [bold]{config.MachineName}[/] in the [bold]{config.WorkspaceName}[/] workspace.");
         if (enrolled.Machine.PendingApproval)
@@ -181,7 +192,7 @@ internal static class LoginCommand
     /// Enrolls with the person's mbus sign-in: the saved one if it still works, else a new one
     /// approved in the browser. A person in several workspaces who named none is shown the choices.
     /// </summary>
-    private static async Task<MachineEnrollResponse> EnrollSignedInAsync(CommandContext context, ServerInfoResponse info, string machineName,
+    private static async Task<(MachineEnrollResponse Response, ServerBindingSnapshot? Binding)> EnrollSignedInAsync(CommandContext context, ServerInfoResponse info, string machineName,
         string? location, bool openBrowser, Func<Task<MachineEnrollRequest>> body, CancellationToken ct)
     {
         var session = new CliSession(context.Host, context.Store, context.Settings.Server!);
@@ -195,14 +206,18 @@ internal static class LoginCommand
             await BrowserSignIn.SignInAsync(context, session, info, machineName, location, openBrowser, ct);
         }
 
+        // Capture before the session's independently gated send. A legacy-to-isolated transition during
+        // the send is conservatively refused by finalization instead of guessing the issuing authority.
+        using var gate = new ServerSendGate(context.Host, context.Store, context.Settings.Server!);
+        var prepared = await gate.PrepareSendAsync(new Uri(CliSettings.BaseAddress(context.Settings.Server!), "api/machines/enroll"), ct);
         var request = await body();
-        var response = await session.SendAsync(() => ServerConnection.EnrollRequest(request), ct);
+        var response = await session.SendEnrollmentAsync(() => ServerConnection.EnrollRequest(request), ct);
         if (response is null)
         {
             // The saved sign-in had ended (expired, or signed out from My account): sign in again.
             context.Console.MarkupLine("[yellow]Your saved sign-in has ended.[/]");
             await BrowserSignIn.SignInAsync(context, session, info, machineName, location, openBrowser, ct);
-            response = await session.SendAsync(() => ServerConnection.EnrollRequest(request), ct)
+            response = await session.SendEnrollmentAsync(() => ServerConnection.EnrollRequest(request), ct)
                 ?? throw new CliException("The server didn't accept the new sign-in. Run mbus login again.");
         }
 
@@ -212,7 +227,7 @@ internal static class LoginCommand
             {
                 throw await ChooseWorkspaceAsync(session, ct);
             }
-            return await ServerConnection.ReadEnrollAsync(response, ct);
+            return (await ServerConnection.ReadEnrollAsync(response, ct), prepared.Binding);
         }
     }
 
@@ -229,14 +244,20 @@ internal static class LoginCommand
     /// <summary>Container mode: the API key is the credential, so only the settings and the scan are needed.</summary>
     private static async Task<int> SaveForApiKeyAsync(CommandContext context, Uri server, string machineName, string? location, CancellationToken ct)
     {
-        var config = context.Settings.Stored with { Server = CommandContext.ServerText(server), MachineName = machineName, Location = location };
-        context.Store.Save(config);
-        var inventory = await AgentScanner.BuildInventoryAsync(context.Host, config.MachineId, location, ct);
-        var settings = CliSettings.Resolve(context.Host, config, config.Server);
-        using (var client = ServerConnection.CreateAuthenticatedClient(context.Host, settings, context.Store, "cli"))
+        var supplied = new CliConfig { Server = CommandContext.ServerText(server), MachineName = machineName, Location = location };
+        var inventory = await AgentScanner.BuildInventoryAsync(context.Host, null, location, ct);
+        await context.Store.WithProfileSecurityLockAsync(async transaction =>
         {
-            await ServerConnection.PutInventoryAsync(client, server, inventory, ct);
-        }
+            transaction.DemandEnrollmentTrust();
+            var binding = await ServerConnection.PutApiKeyEnrollmentInventoryAsync(context.Host, context.Store, server,
+                context.Settings.ApiKey!, inventory, transaction, ct);
+            transaction.DemandEnrollmentTrust();
+            var current = transaction.Load();
+            if (current with { ServerBinding = context.Settings.Stored.ServerBinding } != context.Settings.Stored)
+                throw new ServerBindingException("The profile changed during API-key login; its identity was preserved.");
+            transaction.Save(supplied with { KeyStore = current.KeyStore, ServerBinding = binding });
+            return true;
+        }, ct);
         context.Console.MarkupLineInterpolated($"[green]Using the API key from {EnvVars.ApiKey}.[/] Saved the server for this machine ({machineName}).");
         context.WriteAgents(inventory.Agents);
         return 0;

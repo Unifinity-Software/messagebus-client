@@ -332,7 +332,7 @@ public sealed class LocalBundleTests
 
     private static LocalServerOptions ToolOptions(TestMachine machine, HttpClient http) => new()
     {
-        Http = http, Links = http, WorkspaceId = "ws_test", ConfigDirectory = machine.Home, Time = machine.Time,
+        Http = http, Links = machine.Server.Links, WorkspaceId = "ws_test", ConfigDirectory = machine.Home, Time = machine.Time,
         Input = Stream.Null, Output = Stream.Null, TempDirectory = machine.Home,
     };
 

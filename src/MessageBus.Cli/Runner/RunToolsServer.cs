@@ -14,7 +14,7 @@ namespace MessageBus.Cli.Runner;
 /// </summary>
 internal static class RunToolsServer
 {
-    private static readonly HttpClient Links = new() { Timeout = TimeSpan.FromHours(1) };
+    private static readonly HttpClient Links = MessageBus.Attachments.Client.AttachmentTransfers.CreateHttpClient();
 
     /// <summary>The run tools for this machine; null when it has no workspace to serve tools in.</summary>
     public static IRunTools? Create(CommandContext context)

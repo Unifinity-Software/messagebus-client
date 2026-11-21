@@ -14,6 +14,8 @@ public static class MbusHeaders
     public const string Nonce = "X-Mbus-Nonce";
     /// <summary>The device-key signature of a machine request, base64url.</summary>
     public const string Signature = "X-Mbus-Signature";
+    /// <summary>Machine signature domain version; isolated requests require exactly one value, <c>2</c>.</summary>
+    public const string SignatureVersion = "X-Mbus-Signature-Version";
     /// <summary>The <c>mbus</c> version making the request (CLI, MCP server or runner).</summary>
     public const string ClientVersion = "X-Mbus-Client-Version";
     /// <summary>Which part of <c>mbus</c> is calling: <c>cli</c>, <c>mcp</c> or <c>runner</c>.</summary>

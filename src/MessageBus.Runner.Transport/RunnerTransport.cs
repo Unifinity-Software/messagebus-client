@@ -30,7 +30,7 @@ public static class RunnerTransport
     public static ReverseConnectionClientOptions ClientOptions(Uri serverAddress, Action<WebApplication> mapRoutes) => new()
     {
         ServerAddress = serverAddress,
-        ConnectPath = RunnerProtocol.ConnectPath,
+        ConnectPath = serverAddress.AbsolutePath.TrimEnd('/') + RunnerProtocol.ConnectPath,
         SubProtocol = RunnerProtocol.SubProtocol,
         MapRoutes = mapRoutes,
         ConfigureServices = services => services.ConfigureHttpJsonOptions(json => MessageBusJson.Configure(json.SerializerOptions)),

@@ -22,7 +22,7 @@ public sealed class ProposalAuthorityTests
         using var http = new HttpClient(machine.Server, disposeHandler: false) { BaseAddress = new Uri(FakeServer.Url + "/") };
         var pipes = new PipeRunTools((request, stream, ct) => LocalServer.RunAsync(new LocalServerOptions
         {
-            Http = http, Links = http, WorkspaceId = "ws_test", MachineId = "mch_test", ConfigDirectory = machine.MbusFolder,
+            Http = http, Links = machine.Server.Links, WorkspaceId = "ws_test", MachineId = "mch_test", ConfigDirectory = machine.MbusFolder,
             Input = stream, Output = stream, Delivery = request.Delivery, ProposalAuthority = request.ProposalAuthority,
             Scope = RunToolScope.For(request.Delivery, workspace.Root) with { Tools = null, ProposalAuthority = request.ProposalAuthority },
         }, ct), TextWriter.Null);

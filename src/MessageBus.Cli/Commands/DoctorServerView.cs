@@ -1,5 +1,6 @@
 using System.Text.Json;
 using MessageBus.Cli.Agents;
+using MessageBus.Cli.Configuration;
 using MessageBus.Cli.Output;
 using MessageBus.Cli.Runner;
 using MessageBus.Cli.Server;
@@ -14,7 +15,7 @@ namespace MessageBus.Cli.Commands;
 /// <summary>
 /// What the server says about this machine, for <c>mbus doctor</c> (the original issue): its record (online or not, the version it
 /// last reported, tasks at once, when its runner was last connected), its agents' roles (the original issue) and the workspace's
-/// release channel. Three reads at once, a few seconds at most; nothing when this machine isn't signed in. Not when it
+/// release channel. Anonymous identity discovery, then three authenticated reads at once when signed in, a few seconds at most. Not when it
 /// was last seen: the server counts every signed request, this one too; when its runner was last connected is kept apart.
 /// The workspace's current name comes with the release channel (the original issue) and is kept for the header.
 /// </summary>
@@ -28,25 +29,45 @@ internal sealed record DoctorServerView(MachineInfo? Machine, RunnerReleasePolic
     /// <summary>When the server was asked, to say how long ago the runner was connected.</summary>
     public DateTimeOffset AskedAt { get; init; }
 
+    // A diagnostic observation never authorizes a later request. Each authenticated read still
+    // prepares and consumes its own fresh send through ServerConnection's shared gate.
+    internal ServerDiscovery? Discovery { get; init; }
+    internal ServerBindingSnapshot? PreparedBinding { get; init; }
+    internal ServerBinding? PersistedBinding { get; init; }
+
+    /// <summary>A security refusal blocks readiness; an optional server-view lookup failure only warns.</summary>
+    internal bool BindingRefused { get; init; }
+
     /// <summary>Asks the server, when this machine is signed in to one.</summary>
     public static async Task<DoctorServerView> AskAsync(CommandContext context, CancellationToken ct)
     {
         var settings = context.Settings;
-        if (settings.Server is null || !settings.CanAuthenticate(context.Store)
-            || settings.Stored.MachineId is not { } machineId || settings.Stored.WorkspaceId is not { } workspace)
+        if (settings.Server is null)
         {
             return new(null, null, null);
         }
-        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        cts.CancelAfter(Timeout);
+        using var timeout = new CancellationTokenSource(Timeout, context.Host.Time);
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeout.Token);
+        PreparedServerSend? observation = null;
+        ServerBinding? persistedBinding = null;
         try
         {
+            var endpoint = ServerEndpoint.Parse(settings.Server.AbsoluteUri);
+            var floor = await context.Store.WithProfileSecurityLockAsync(tx => Task.FromResult(tx.LoadBindingFloor()), cts.Token).ConfigureAwait(false);
+            if (!floor.Readable) throw new ServerBindingException("The saved binding floor is unreadable.");
+            persistedBinding = floor.Bindings.FirstOrDefault(pin => pin.TransportOrigin == endpoint.Origin)?.Binding;
+            using var gate = new ServerSendGate(context.Host, context.Store, settings.Server);
+            observation = await gate.PrepareSendAsync(new Uri(CliSettings.BaseAddress(settings.Server), "api/server"), cts.Token).ConfigureAwait(false);
+            if (!settings.CanAuthenticate(context.Store)
+                || settings.Stored.MachineId is not { } machineId || settings.Stored.WorkspaceId is not { } workspace)
+                return new(null, null, null) { Discovery = observation.Discovery, PreparedBinding = observation.Binding, PersistedBinding = persistedBinding };
             using var http = ServerConnection.CreateAuthenticatedClient(context.Host, settings, context.Store, "cli");
             var ws = Uri.EscapeDataString(workspace);
             var id = Uri.EscapeDataString(machineId);
             var machine = GetAsync(http, $"{ApiRoutes.Machines.Replace("{workspaceId}", ws, StringComparison.Ordinal)}/{id}", cts.Token);
             var policy = PolicyAsync(http, cts.Token);
             var agents = AgentsAsync(http, cts.Token);
+            await Task.WhenAll(machine, policy, agents).ConfigureAwait(false);
             var info = await machine.ConfigureAwait(false) is { } m ? MessageBusJson.Deserialize<MachineInfo>(m) : null;
             var work = await policy.ConfigureAwait(false);
             context.Store.RememberWorkspaceName(workspace, work?.WorkspaceName);
@@ -55,11 +76,25 @@ internal sealed record DoctorServerView(MachineInfo? Machine, RunnerReleasePolic
             {
                 Agents = await agents.ConfigureAwait(false),
                 AskedAt = context.Host.Time.GetUtcNow(),
+                Discovery = observation.Discovery,
+                PreparedBinding = observation.Binding,
+                PersistedBinding = persistedBinding,
             };
+        }
+        catch (ServerBindingException)
+        {
+            ct.ThrowIfCancellationRequested();
+            return new(null, null, "Server binding validation refused. Restore the saved binding or enroll explicitly at the selected endpoint; credentials were not retried.")
+            { Discovery = observation?.Discovery, PreparedBinding = observation?.Binding, PersistedBinding = persistedBinding, BindingRefused = true };
         }
         catch (Exception ex) when (ex is HttpRequestException or JsonException || (ex is OperationCanceledException && !ct.IsCancellationRequested))
         {
-            return new(null, null, ex is OperationCanceledException ? $"no answer within {Timeout.TotalSeconds:0} seconds." : ex.Message, Suspended: ex is WorkspaceSuspendedException);
+            ct.ThrowIfCancellationRequested();
+            var problem = ex is OperationCanceledException ? $"no answer within {Timeout.TotalSeconds:0} seconds." : ex.Message;
+            // Until discovery and durable preparation finish, readiness is unknown. A timeout
+            // here is a binding refusal too; only subsequent optional lookups may warn.
+            return new(null, null, observation is null ? "Server binding validation refused: " + problem : problem, Suspended: ex is WorkspaceSuspendedException)
+            { Discovery = observation?.Discovery, PreparedBinding = observation?.Binding, PersistedBinding = persistedBinding, BindingRefused = observation is null };
         }
     }
 
@@ -113,7 +148,7 @@ internal sealed record DoctorServerView(MachineInfo? Machine, RunnerReleasePolic
     {
         if (Problem is { } problem)
         {
-            yield return new("Server's view", problem, SummaryTone.Bad, Suspended ? "suspended:" : "couldn't ask:");
+            yield return new("Server's view", problem, BindingRefused || Suspended ? SummaryTone.Bad : SummaryTone.Note, Suspended ? "suspended:" : "couldn't ask:");
             yield break;
         }
         if (Machine is not { } machine)

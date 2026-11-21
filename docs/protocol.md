@@ -82,6 +82,355 @@ Other request headers: `X-Mbus-Workspace` (when the path doesn't name the worksp
 `X-Mbus-Client` (`cli`, `mcp` or `runner`), `X-Mbus-Agent` (the agent behind an MCP call), `X-Mbus-Request-Id`, and
 W3C `traceparent` / `tracestate`.
 
+### Frozen isolated machine domain (bounded HTTP integration; full runtime verification pending)
+
+`MachineRequestSigningV2` is a separate additive builder. The existing `MachineRequestSigning.CanonicalString`
+and v1 wire remain unchanged. The normal `ServerConnection.CreateAuthenticatedClient` HTTP pipeline now uses
+the binding APIs below and signs v2 for complete isolated discovery. Other credential paths still require the
+integration listed below. This bounded source checkpoint makes no regional availability or release-readiness claim.
+
+Isolated discovery retains `product: "messagebus.ai"`, optional `capabilities: string[]` and all existing tokens.
+The descriptive shape is `stamp:{stampId,geography,azureRegion,url,aliases}`. The security extension is exactly
+`signIn.authority:{version:1,stampId,issuer,audience}` with sibling
+`signIn.machineSignature:{version:2,required:true}`. Issuer and audience equal the normalized canonical stamp
+origin and agree with `stamp.url` and `stampId`. Unknown unrelated additive properties are ignored.
+
+Both security descriptors absent, with no expected or surviving isolated pin, means legacy v1 at the exact
+selected endpoint, even when descriptive stamp metadata is present. Presence of either descriptor, including
+explicit null, requires the complete valid consistent isolated bundle. Duplicate or ambiguously cased security
+properties, malformed fields, partial bundles and unsupported versions refuse. Use `ServerDiscoveryParser`,
+which tracks JSON property presence before generated deserialization; nullable DTO values alone cannot decide
+this. Discovery failures and redirects are never evidence of legacy support.
+
+The v2 header is exactly one `X-Mbus-Signature-Version: 2`. Missing, lower, unknown, duplicate and comma-joined
+values cannot select v2. ES256 signs UTF-8 without BOM, IEEE P1363 fixed 64-byte `r||s`, encoded as canonical
+unpadded base64url. The signed input is exactly these ten fields joined by one LF, with no final LF:
+
+1. Literal `mbus-machine-v2`.
+2. Normalized canonical credential authority origin.
+3. Exact stamp ID (`ca`, `eu` or `us`).
+4. Exact enrolled machine ID.
+5. Actual exact `X-Mbus-Workspace` value, or an empty field only when the header is absent.
+6. Invariant uppercase HTTP method.
+7. Actual escaped origin-form raw path and query, including the selected base prefix and original query order.
+8. Canonical nonnegative decimal Unix seconds, without leading zeros except `0`.
+9. Exactly 22 canonical unpadded base64url characters representing 16 random nonce bytes.
+10. Lowercase 64-character hex SHA-256 of the exact transmitted body bytes.
+
+Reject control/whitespace/delimiter injection in identifiers and headers, empty present workspace headers,
+invalid method tokens, absolute/network-path targets, fragments and malformed percent escapes. Do not decode,
+sort, slash-collapse or re-encode the signed raw target, normalize the body, or compress content after signing.
+The service must use its actual raw target and immutable local canonical authority/stamp, never Host or an
+unsigned requester-provided authority. Proxies must preserve the exact signed target. Retain the existing
+five-minute skew and local replay checks; validate provenance, placement and authorization before any nonce,
+Seen, audit or endpoint mutation. V2 cannot be reinterpreted as v1 by stripping its version header.
+
+`ProtocolOrigin` normalizes scheme, IDNA host and effective port; removes default ports/root slash; preserves
+nondefault ports; rejects userinfo, paths, queries, fragments, whitespace, backslashes, trailing DNS dots,
+escaped hosts and scoped IPv6. Isolated policy requires HTTPS except exact loopback HTTP under explicit local
+fixture policy. `ServerEndpoint` separately retains escaped API base scope with a trailing separator. Equal
+canonical authority does not make different selected origins or base paths interchangeable for saved credentials.
+Its destination-scope check refuses encoded path separators, encoded traversal and nested escapes rather than
+granting a scope that server-side path decoding could change. Query escapes remain untouched.
+Attachment API routes and relative transfer links resolve under the selected escaped base path and are
+passed to the destination gate as escaped absolute URIs, preserving their path and signed query escapes.
+
+`ServerBindingPolicy.Evaluate` is a pure decision over one current anonymous observation, selected endpoint,
+an explicit complete `ServerBindingFloor` and optional trusted local expectation. It never authorizes a send.
+Unknown/corrupt binding state refuses. Any origin-keyed ledger entry or surviving credential/checkpoint ever-pin
+establishes the isolated floor. Missing/lower/malformed/conflicting discovery cannot erase it. Integration must
+read all state under the existing single profile security lock, reconcile and durably persist the ledger and
+credential snapshots before first credential transmission, and preserve the floor through every writer, logout,
+refresh, expiry and failure. The persistence APIs implement storage; the shared gate below integrates normal
+machine/API-key HTTP sends. It does not yet cover every credential category.
+
+`ConfigStore.WithProfileSecurityLockAsync` supplies an explicit `ProfileSecurityTransaction` using the existing
+`cli-session.lock` and process semaphore. `LoadBindingFloor()` rereads the independent `server-bindings.json`
+ledger and both saved files under that lock. `PrepareBinding(selected, discovery, expected)` evaluates the pure
+policy, durably publishes the origin pin first, attaches matching exact-endpoint snapshots to reused config and
+session credentials, then returns an immutable `ServerBindingSnapshot` for new credentials. A returned snapshot
+is storage evidence, not permission to send; callers still need current discovery for each actual send. Existing
+session-lock callbacks receive that explicit context and use its `Load`, `Save`, `LoadSession`, `SaveSession`
+and `DeleteSession` operations, including through awaited helpers. Concurrent operations through the same
+context are rejected before reading or writing state. Ordinary store methods acquire the profile lock. The
+published `WithSessionLockAsync<T>(Func<Task<T>>, CancellationToken)` signature remains as an obsolete
+compatibility overload: within its callback, ordinary `Load`, `Save`, `LoadSession`, `SaveSession` and
+`DeleteSession` on that exact store route to the held context's guarded operations, including after awaits.
+Inherited children share its operation guard; overlapping or completed-context operations refuse before
+state access. This routing never grants unguarded ownership. Outside that compatibility scope, ordinary
+operations always acquire the lock. New callbacks pass the explicit context to nested helpers, including
+send preparation and consumption. Acquiring another transaction inside a compatibility callback refuses
+with migration guidance. Context use after release refuses, and the HTTP send gate rejects a context
+belonging to another store.
+
+The ledger root is `{schemaVersion:1,bindings:{"<normalized transport origin>":<snapshot>}}`. Each snapshot has
+exactly `version:1`, `selectedEndpoint`, `stampId`, `authorityVersion:1`, `issuer`, `audience`,
+`minimumMachineSignatureVersion:2` and `machineSignatureRequired:true`. The ledger key establishes the floor for
+every base path on that origin; its snapshot endpoint does not grant reuse of credentials at another base path.
+Optional `serverBinding` on `CliConfig` (including its pending runner enrollment checkpoint) and `CliSessionFile`
+uses the same snapshot schema. Absent fields in valid never-pinned old profiles remain optional. A missing
+ledger with a surviving snapshot, inconsistent endpoint/tuple, duplicate security member, unsupported schema,
+unreadable file or malformed session refuses; malformed sessions no longer silently become absent sign-ins.
+
+Every config/session writer rereads and merges the floor. Rotation, clearing pending enrollment, unrelated
+settings and local sign-out retain it; session deletion never removes the ledger. Files use owner-only temporary
+creation, disk flush and same-directory atomic replacement, with directory metadata flush on Unix and
+write-through replacement on Windows. New dedicated profile directories are created with private permissions.
+Isolated preparation validates existing directory ownership and privacy and refuses unsuitable directories
+without changing their mode or ACL. Windows permits the current user, SYSTEM and local administrators;
+Unix requires current-user ownership and no group/other permission bits; macOS also refuses ACL grants to
+other principals without modifying the ACL. Directory symlink/reparse aliases
+are refused, including aliases in parent components. Existing valid private profiles need no permission repair.
+`server-bindings.pending` is durably published before a multi-file transition. Any interruption retaining that
+marker refuses further state use until profile restoration; normal commands never delete it to reset a pin.
+Failure before preparation returns must not permit credentials. Local owner deletion/rollback of all state or an
+older binary ignoring the fence remains outside this protection. Native filesystem/crash verification is still
+required; compiling the fault-boundary fixtures is not runtime durability evidence.
+
+The trusted local `MBUS_SERVER_BINDING` JSON object is parsed by `ServerBindingExpectation.Parse`:
+
+```json
+{"version":1,"transportOrigin":"https://eu.stamps.example.test","stampId":"eu","issuer":"https://eu.stamps.example.test","audience":"https://eu.stamps.example.test","authorityVersion":1,"minimumMachineSignatureVersion":2,"machineSignatureRequired":true}
+```
+
+It strengthens a floor and cannot replace a conflicting pin. For alias transport it supplies an explicit exact
+local transport-to-canonical mapping; current discovery must also list that selected alias. Discovery aliases
+alone never authorize a new mapping or credential migration. The canonical signing authority stays separate
+from the selected alias transport. Changing selected origin/base requires fresh explicit credential binding.
+
+First contact with no provisioned or surviving pin cannot distinguish an old server from a response with its
+entire isolated advertisement stripped. Isolated automation must provision the exact expected binding and a
+durable writable `MBUS_HOME`, validated before credential probes. This is trusted local deployment input, not a
+new server-signed manifest. No geography, availability, residency or initial stripping detection can be inferred
+from descriptive metadata or this core. All credential paths still require fresh anonymous validation before
+each actual send, no stale-context fallback, no credential redirects and no host/v1 retry. Full native client
+tests, real HTTP/WS/proxy and persistence fixtures, combined independent review and client-first publication must
+precede server package pin/enforcement. Public update-feed release-key verification remains unchanged.
+
+`ProfileSecurityTransaction.ValidateProvisioning(selected, expectedJson, durableHome)` validates the trusted
+expected tuple against the selected origin and current floor, requires an explicit absolute home matching this
+store, and verifies owner-only durable write access before future caller probes. The caller passes the returned
+expectation to `PrepareBinding`; neither API reads process environment or discovers a server. A writable path
+cannot prove that a container volume survives replacement: provisioning must still enforce the persistent mount.
+
+### Per-send HTTP gate and remaining integration
+
+`ServerSendGate(host, store, server)` owns a separate anonymous `HttpClient` without default headers. The optional
+additive `CliHost.CreateDiscoveryHttpHandler` supplies its transport; when omitted, a fresh raw handler from
+`CreateHttpHandler` is used. These are trusted transport factories, never an existing authenticated client.
+Built-in HTTP handlers disable redirects, cookies, preauthentication, server credentials and default proxy
+credentials. Custom injected handlers must uphold the same policy and must not inject credentials or follow
+redirects. The real host has separate explicit discovery and API factories. The overload taking `ConfigStore`,
+server URI, anonymous handler factory and environment reader is the seam for hosts without `CliHost`.
+Anonymous discovery, public release and attachment transports preserve explicit/system proxy routing and bypass
+decisions through a per-transport credential-stripping proxy adapter. They neither read nor mutate the routing
+proxy's credentials; proxy URI userinfo is removed too. HTTP 407 and HTTPS CONNECT 407 are terminal, including
+Basic, Negotiate and NTLM challenges. A proxy requiring authentication cannot serve these anonymous transports.
+Authenticated API transports retain their existing explicit/system proxy behavior.
+
+`DemandDestination(finalUri)` checks the exact selected origin/base scope before metadata or authentication is
+attached. `PrepareSendAsync(finalUri, cancellationToken, optionalLockHeldTransaction)` checks the destination,
+validates supplied `MBUS_SERVER_BINDING` and explicit matching writable `MBUS_HOME`, fetches current anonymous
+`GET <base>/api/server`, strictly parses the successful response and calls `PrepareBinding` under the existing
+profile security lock. Every actual send repeats discovery; no TTL, stale fallback or legacy choice on failure
+exists. Discovery failure, redirect, downgrade and persistence failure produce terminal `ServerBindingException`.
+
+The returned `PreparedServerSend` carries the selected endpoint, strictly parsed current `Discovery` (for
+approval/destination checks), and optional durably prepared snapshot. It is
+single-use: `ConsumeAsync(finalUri, sendCallback, cancellationToken, optionalLockHeldTransaction)` reacquires the
+profile lock and rereads the ledger and every surviving snapshot immediately before consumption. It evaluates
+the prepared discovery against that current floor and requires an isolated snapshot to retain its durable pin.
+Thus a pin published by another process also blocks a queued legacy send, without any shared generation counter.
+Successful isolated preparation invalidates outstanding legacy contexts in this process; failed preparation
+invalidates all outstanding contexts for that profile/origin. These counters only refuse; they never grant sends.
+
+The consumption callback receives a scoped `ServerSendAuthorization`. The additive
+`MachineRequestSigner.CreateHeaders(authorization, actualRequest, bodyBytes)` signs only once inside that callback,
+checking its lifetime, current generation and final destination. It uses the canonical issuer/stamp plus the
+actual single workspace header and final escaped URI. Legacy results delegate to the unchanged three-argument
+v1 signer. This replaces the earlier checkpoint's standalone `Consume` and prepared-context signer overload:
+headers must not escape the lock scope for a later send. A snapshot alone never grants a send.
+
+Buffer content before consumption. The normal handler buffers machine and API-key request bodies outside the
+lock, then attaches credentials/signatures and awaits the actual transport send inside the callback. The process
+semaphore and exclusive profile file lock remain held until the transport returns response headers or fails.
+Consequently a competing durable pin either commits before the final floor read (legacy refuses), or waits
+until that send finishes. Response-body reading occurs after the scope. This serializes sends per profile and
+can delay other profile operations by the request timeout; callbacks must not acquire another profile lock or
+call ordinary store methods. The dedicated anonymous discovery transport never enters this callback.
+
+Callers already holding a session/profile transaction pass that explicit same-store context to preparation and
+consumption. Omitting or substituting the preparation transaction refuses instead of trying to reacquire it.
+No ambient ownership is inferred. The transaction reserves its operation guard across the callback, rejects
+overlapping reads/writes/pins, and outer completion waits for any already-running send before releasing the lock.
+An authorization expires when its callback ends. Request version headers remain selected solely by discovery.
+Bytes already sent cannot be recalled; remote configuration can change independently of the local lock, and
+server enforcement remains necessary. This does not authorize cached discovery or later reuse of signed headers.
+
+`ServerConnection.CreateAuthenticatedClient` rejects reuse of a stored machine/workspace at another selected
+endpoint/base before loading the machine key or reading its workspace for headers. `CreateSigner` enforces
+the same scope before key loading. Equal API-key fingerprints only select the old machine signer at the exact
+saved endpoint. The normal HTTP transport disables redirects and rejects all 3xx responses without replay.
+
+Integrated callers are the normal client returned to CLI machine/inventory/key operations, doctor authenticated
+probes, local MCP and script API operations, runner REST/tool services, and attachment-link API requests that
+use that client. Factory use supplies this gate; separate transports do not inherit it automatically.
+
+`CliSession` now uses the same gate for device start/poll, access-token sends (including workspaces and
+enrollment as the signed-in person), each 401 retry, refresh and logout. Its public constructor,
+`AccessTokenAsync`, `SendAsync` and `LogoutAsync` signatures remain unchanged. Even a still-fresh saved token
+requires current anonymous validation before return; the actual request independently validates again.
+Final destinations are resolved and checked against the exact selected endpoint/base before any refresh or
+credential attachment. Bodies are buffered before consumption; access headers are attached only inside the
+lock-held send and cleared on exit. All sign-in 3xx responses refuse without replay. Refresh, logout and
+approved-session persistence pass their explicit same-store transaction to nested gate operations rather than
+reacquiring the profile lock. Refresh rotation preserves the prepared snapshot. Refused or unavailable logout
+reports only local forgetting, and session deletion retains the independent ever-isolated ledger.
+
+Browser approval is checked before device start, including `--no-browser`. Require an absolute HTTP(S) URI
+without userinfo, fragment, backslash, whitespace or control characters, and reject an existing `code` query
+parameter. Existing unrelated query parameters are retained when adding the escaped user code. Current discovery
+must still report the same approval address at start. In isolated mode its origin must be the canonical authority
+or the exact selected alias already accepted by local provisioning/persisted binding and server configuration;
+another advertised alias grants no permission. Never-pinned legacy servers retain explicit split-port and tunnel
+approval addresses after the basic URI checks. The start's exact binding is retained for every device poll.
+Each device flow and collected approval retains one immutable issuing record. A `CliSession` refuses overlapping
+start, poll or approval-save operations before acquiring the profile lock; await each operation in sequence or
+use independent instances for independent flows. Starting another flow invalidates the prior collected approval.
+Approved tokens may be saved only by the collecting sign-in with that same prepared endpoint/authority, after
+fresh validation and a current ledger check inside the session transaction; changed or stripped discovery cannot
+relabel already-issued tokens. These are source integrations, not runtime verification or release readiness.
+
+`LoginCommand` prepares its initial `/api/server` observation through the same strict, credential-free discovery
+gate at the exact selected endpoint. That first positive isolated observation durably establishes the floor before
+display or approval; later stripped discovery cannot fall back to legacy, even on an unprovisioned clean profile.
+Partial, null or unsupported initial security bundles refuse immediately. Actual credential sends still obtain
+their own fresh prepared observation; the initial descriptive response never authorizes a later send.
+The initial discovery uses the dedicated anonymous factory (or the anonymous-restricted fallback), so proxy
+challenges cannot acquire inherited API proxy credentials.
+
+`LoginCommand` enrollment-token POST and runner caller-key probes now prepare/consume the shared gate before
+attaching their supplied Authorization header. Enrollment content is built only after fresh anonymous validation.
+Both use credential-free transports with redirects disabled, reject every 3xx and clear the per-request credential
+on exit. No saved workspace or machine header is attached to these fresh bootstrap requests. A changed selected
+origin, canonical alias or base path does not inherit the old machine ID or inventory ID. A manually supplied
+public discovery stamp is not enrollment provenance. All held profile operations pass the explicit transaction;
+they never call ordinary `Load`/`Save` or reacquire the profile lock.
+
+Runner provenance is additive source-generated config JSON: `runnerEnrollmentBinding` has `version:1`,
+`selectedEndpoint` (normalized API URL including base path and trailing slash), `apiKeyFingerprint` (the existing
+16 lowercase hex fingerprint), `machineKeyFingerprint` (full public-key SHA-256), and optional `serverBinding`
+(the immutable isolated snapshot; absent only for affirmative never-pinned legacy). The existing
+`pendingRunnerEnrollment` and `enrolledWithApiKey` fingerprint strings retain their names and meaning. Reuse
+requires the exact endpoint, tuple, API-key fingerprint and loaded machine-key fingerprint. A lost enrollment
+response leaves a durable checkpoint and key; restart reuses that key only in the same scope. Old checkpoints
+without provenance are accepted only at their original endpoint under affirmative never-pinned legacy, then
+acquire the verified fields. Isolated checkpoints missing those fields refuse. A surviving checkpoint snapshot
+is independent ever-isolated evidence even if the top-level snapshot was stripped.
+
+Logout resets the machine identity, runner enrollment provenance, bootstrap fingerprints and both active and
+independently staged runner keys inside one explicit profile transaction. It rereads current state and refuses
+before key deletion if an enrollment, checkpoint or key-store publication changed the identity during remote
+logout. Unrelated current settings, the selected generation/backend and all server binding snapshots and ledger
+entries survive the reset. No staged replacement becomes selected as a side effect of logout. A subsequent login
+can enroll a fresh identity, and an isolated profile still refuses stripped discovery after restart.
+
+Identity finalization rereads config and current binding inside the explicit profile transaction. Token enrollment
+retains its actual send binding. Browser enrollment captures a pre-send binding and conservatively refuses if
+the final fresh binding differs; a concurrent legacy-to-isolated promotion cannot relabel that enrollment.
+Concurrent profile changes refuse rather than publishing a stale `Stored` record. New identities clear old
+runner bootstrap/checkpoint provenance. The first inventory proves the newly enrolled key with only its returned
+machine/workspace and actual binding, before publishing the identity; a refused proof preserves the old profile
+or leaves the pending runner checkpoint. File, Windows DPAPI and macOS Keychain enrollment stage and verify a separate immutable
+key file, then atomically publish its optional `machineKeyGeneration` (32 lowercase hex filename component),
+key-store choice, identity and actual binding in `config.json`. Existing profiles without this field keep the
+original filenames. A generation uses `machine-key.<generation>.pem` or `machine-key.<generation>.dpapi`.
+The old key is retained for recovery and is never overwritten by staging. Failed staging or cancellation before
+publication leaves the old config/key/trust. Publication failure restores the old config; an indeterminate
+publication retains both key files and `identity-publication.pending` (the previous non-secret config), which
+blocks all credential use until explicit profile restoration. Old generation keys are recovery data, not disposable
+build artifacts; this checkpoint does not automatically remove them. Ordinary config saves cannot publish a new
+key generation or silently erase the current generation.
+
+Keychain generations use independent accounts: the legacy `mbus-<home-hash>` account remains unchanged;
+new items append `-<generation>`. Both tool-backed and Developer ID providers select the item from the
+published config generation after restart. `IGenerationMachineKeyVault` is an additive local vault seam;
+custom vaults without separate staging support still refuse replacement. File-to-Keychain movement also
+publishes a generation selector after readback. A matching leftover PEM is checked against the saved
+fingerprint before enrollment key reads consult any OS vault; recovery neither migrates nor writes it.
+Public key reads (including recovery migration), saves, deletion and existence checks hold the same profile
+transaction through selector capture and every vault operation. Explicit transaction callers use its guarded
+key methods; the published session callback routes through that same guard. Saving an earlier PEM refuses
+when it does not match the current registered fingerprint. Every prepared backend migration captures the
+profile, including identity, generation and backend, then compares it again before publication and old-copy
+deletion. A stale preparation refuses commit and relinquishes cleanup rights; abandon never removes a target
+subsequently selected by another migration or enrollment. A file needed for OS-save recovery is retained unless
+the selected protected vault still verifies. Target readback is rechecked before publication.
+Enrollment validates the complete current or legacy trust structure without writes, rejecting missing/null nested
+maps and records, malformed key/signer values, duplicate fields and ambiguous casing. The actual caller-key probe
+and API-key inventory send revalidate current trust after their own discovery/content awaits, inside the explicit
+reserved profile transaction immediately before attaching credentials. Browser/saved-session enrollment uses
+the same final check before attaching `MbusCli`, including the renewed-sign-in and 401 refresh retry paths.
+Ordinary public session sends retain their existing semantics. No ambient trust authorization is reused.
+Legacy workspace-only trust is validated before enrollment and imported at its saved source origin during
+identity publication, with rollback on a failed publication. No silent plaintext fallback or permission repair occurs.
+
+An intentional fresh runner bootstrap may replace an occupied profile. Its optional `pendingRunnerIdentity`
+contains `keyGeneration`, `keyStore`, and `binding` (the runner provenance above). The active server, machine,
+workspace, bootstrap fingerprint and key selector stay active while this separate key/checkpoint is pending.
+Response loss or refused new-key proof retains both identities' local key material. Restart requires the same
+pending endpoint, authority, API-key fingerprint and machine-key fingerprint. Only successful enrollment and
+proof atomically select the pending generation with the new identity and clear pending metadata. Pending
+binding snapshots also establish the ever-isolated floor. A previously consumed source bootstrap still cannot
+move its old identity to another endpoint. Native platform execution and complete compatibility gates remain required.
+
+Attachment transfer/query credentials now use the same current-discovery and durable-floor gate as the selected API.
+`AttachmentTransfers.Bind(api, send)` is an additive caller-owned authorization seam in Attachments.Client;
+it has no CLI dependency and changes no existing constructors or MCP options. Registration follows the API client
+through CLI, local MCP, scripts, dead-letter resealing, runner bundle downloads, kept answers and return uploads.
+The built-in CLI and environment-runner API factories register it before returning their clients. Custom API
+factories must register their own binding-aware callback if they require isolated enforcement; absence of a
+callback retains legacy link behavior and makes no isolated/residency claim. The callback validates the actual
+resolved destination, performs fresh anonymous discovery at the selected API, rereads the durable floor, and
+awaits the actual transfer send inside `ConsumeAsync`'s profile reservation. For downloads this covers the
+single credential-bearing request through response headers; body streaming and hash verification then continue
+without retaining the profile reservation. A supplied cached delivery link
+does not bypass discovery. No extra catalogue request or mandatory link field is introduced.
+
+Transfers use separate long-timeout clients with redirects, cookies and ambient/default credentials disabled.
+`AttachmentTransfers.CreateHttpClient()` provides and privately registers this transport. Supplied link clients
+must come from that factory: unknown clients (including default/native/delegating handler pipelines) refuse before
+contact in both isolated and legacy mode. A custom API binding callback cannot authorize an unknown transfer client.
+Reusing the API client or supplying default request headers refuses before transmission rather than clearing a caller's shared state.
+All 3xx responses are terminal, including same-origin and explicitly configured alias redirects. Transfer
+status and initial-send errors do not expose response bodies, signed queries or underlying transport diagnostics. Relative links resolve
+against the selected API base; absolute issued links retain their authority and query. Unsafe schemes, userinfo,
+fragments, backslashes and HTTPS downgrades refuse. Isolated transfers require the exact selected transport origin
+and base-path scope; discovery aliases, canonical rewrites and Blob suffixes grant no exception. Never-pinned
+legacy/custom servers retain direct HTTPS SAS links (and explicitly selected HTTP custom/local transport), with
+the same separate credential-free/no-redirect client. Encryption, streaming hash/size checks and cancellation
+remain in the attachment pipeline.
+
+Doctor obtains a separate current anonymous observation through the shared preparation gate for diagnostics.
+It distinguishes the selected API endpoint/base path, transport origin, saved and provisioned canonical authority,
+validated authority/stamp, server-reported geography and the runner's execution-location label. Never-pinned
+legacy/custom/tunnel endpoints report hosting as unknown even when descriptive metadata names a region.
+The observation does not authorize the subsequent machine/policy/agent reads: each still prepares and consumes
+its own fresh gated send. A binding refusal reports restoration/re-enrollment advice and makes doctor not ready;
+there is no credential connectivity probe or alternate-host retry. Discovery can persist a restrictive pin.
+Ordinary machine/policy/agent lookup HTTP or JSON failures after successful binding validation remain diagnostic
+warnings; they do not alone make doctor not ready. Failure or timeout before the initial anonymous
+observation and durable preparation complete blocks readiness, including on a never-pinned profile;
+it is not evidence of legacy behavior. The eight-second diagnostic deadline uses the host clock,
+and caller cancellation propagates. Workspace suspension remains blocking.
+
+Remaining required work is explicit: full native verification of enrollment/checkpoint lifecycle, attachment
+factory/real transport fixtures and the doctor/public-feed paths. Compiled fixture source is not runtime evidence.
+`CreateAnonymousClient` now restricts its raw HTTP transport, but is not itself a per-send credential gate.
+The old three-argument signer remains available for compatibility and is not evidence of gated WS integration.
+Native full suites, real isolated HTTPS/WS/proxy fixtures, remaining transport integration, independent combined
+review and client-first publication are required before server enforcement or any regional availability claim.
+
 ## REST routes the client calls
 
 `ApiRoutes` in `src/MessageBus.Contracts/Http/Http.cs` lists them. The client uses: enrollment and the machine's own
@@ -254,6 +603,33 @@ runner interprets every drain request as a manual drain. A managed request ignor
 
 Defined in `src/MessageBus.Contracts/Runner/RunnerProtocol.cs`; the transport is `src/MessageBus.Runner.Transport`.
 
+Built-in CLI and environment runners obtain fresh anonymous discovery and reconcile the durable
+binding floor before every WebSocket connect or reconnect. `IRunnerHostContext.ConnectAsync`
+and `ReverseConnectionClientOptions.ExecuteConnect` wrap the actual handshake in a single-send
+authorization, retaining the profile security reservation until the upgrade completes. The older
+header factory and `PrepareRequest` signatures remain available for existing integrations; custom
+hosts must implement the asynchronous wrapper to participate in durable binding enforcement.
+Preparation runs before that wrapper, so v2 signs the actual workspace header, GET target and
+empty body. Only the transport scheme is mapped from wss to https (ws to http for legacy);
+the canonical signing authority comes from the validated binding, with no host substitution.
+The selected API path prefix is retained in the default runner connect path.
+
+The WebSocket handshake uses the .NET 10 `ConnectAsync(Uri, HttpMessageInvoker, CancellationToken)`
+over an explicitly cookie-free, credential-free handler with redirects disabled. Any 3xx response
+stops the connection without replay. Binding/protocol/durable-state refusals are terminal;
+discovery network failures may retry only the same selected endpoint, with no credential send or
+v1/host fallback. Existing subprotocol, keepalive and server close-code behavior is unchanged.
+
+The independent environment runner's HTTP factory now uses the shared authenticated pipeline,
+without credential-bearing default headers. It checks the exact selected endpoint before applying
+the configured API key, and revalidates discovery/binding for each request. Trusted
+`MBUS_SERVER_BINDING` provisioning requires explicit writable `MBUS_HOME` before discovery or
+caller probes; deployment remains responsible for mounting that home durably. Runner-key
+enrollment POSTs also use this gated transport. The bounded login/runner lifecycle above adds exact
+endpoint/binding/key-fingerprint provenance and restrictive staging; native validation and independent
+combined lifecycle review remain required. This checkpoint does not establish that the regional acceptance matrix is
+complete. Native runtime, old-server and combined review gates remain required before release.
+
 1. The runner opens an outbound WebSocket to `/api/runner/connect` with subprotocol `mbus.v1`, signed as its machine,
    with `X-Mbus-Session` (its process's session id) and `X-Mbus-Slots` (free slots).
 2. HTTP/2 runs over that socket with the **service as the HTTP client**: the service calls the runner's routes
@@ -326,6 +702,23 @@ Defined in `src/MessageBus.Contracts/Releases`. `mbus` installs updates two ways
   `manifest.json` and its detached signature `manifest.json.sig` (ECDSA P-256, base64 or base64url, DER or P1363),
   `manifest-<version>.json` for pinned versions, and the files the manifest names with their size and SHA-256. Only
   a manifest signed with the release key built into that `mbus` is installed.
+
+Public feed selection stays `MBUS_UPDATE_FEED` > workspace mirror > selected API base plus
+`api/releases/{channel}/`. A mirror is an explicit artifact source, never a credential authority or API fallback.
+The CLI uses a dedicated public transport, separate from both API and anonymous discovery pipelines, with no
+cookies, ambient/proxy credentials, default headers or redirects. Every 3xx (including same-origin) is terminal.
+HTTP(S) source URLs cannot contain userinfo, query, fragment, whitespace or backslashes. Explicit HTTP custom/local
+feeds remain supported; the release signature remains mandatory. Payloads stream through the existing size/hash
+checks. TLS validation, the existing release public key, exact signed manifest bytes, pinned-version and downgrade
+checks are unchanged. Public stamp metadata and mirror configuration never authorize sending profile credentials.
+Callers constructing `HttpReleaseSource` must supply `HttpReleaseSource.CreateHttpClient()`; arbitrary clients and
+factory clients with added default headers refuse before contact. The constructor signature remains available.
+
+The current signed manifest contains version/channel/publication time and RID/name/size/SHA-256 file entries.
+It does **not** sign a mirror origin, stamp or credential authority. A valid signature authenticates those release
+bytes and payload hashes, not the identity or location of the mirror serving them. No origin field, advertised
+release key or mandatory manifest extension is introduced. Requiring cryptographic mirror-origin identity would
+need a separately frozen additive signed-metadata contract and publisher support.
 
 The service asks a runner to update with `POST /update` on the runner connection (`UpdateRequest`: version or
 `latest`, whether it is pinned, the channel, a mirror, and how the runner is installed). The runner takes no new

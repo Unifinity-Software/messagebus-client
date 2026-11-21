@@ -25,8 +25,15 @@ internal static class LogoutCommand
             var signedIn = context.Store.LoadSession() is not null;
             var removed = await RemoveFromServerAsync(context, ct);
             var ended = await EndSignInAsync(context, ct);
-            context.Store.DeleteKey();
-            context.Store.Save(stored with { MachineId = null, WorkspaceId = null, WorkspaceName = null, KeyFingerprint = null, EnrolledAt = null });
+            try
+            {
+                await context.Store.WithProfileSecurityLockAsync(transaction =>
+                {
+                    transaction.ResetIdentity(stored);
+                    return Task.FromResult(true);
+                }, ct);
+            }
+            catch (ServerBindingException ex) { throw new CliException(ex.Message, 1, ex); }
             context.Console.MarkupLine(stored.MachineId is null && !signedIn
                 ? "This machine wasn't signed in."
                 : removed && ended
@@ -54,7 +61,7 @@ internal static class LogoutCommand
             await ServerConnection.RemoveMachineAsync(client, server, workspaceId, machineId, ct);
             return true;
         }
-        catch (CliException ex)
+        catch (Exception ex) when (ex is CliException or ServerBindingException)
         {
             context.Console.MarkupLineInterpolated($"[yellow]Couldn't tell the server: {ex.Message}[/]");
             return false;
@@ -74,8 +81,7 @@ internal static class LogoutCommand
                 context.Console.MarkupLineInterpolated($"[yellow]Couldn't end your sign-in on the server: {problem}[/]");
             }
         }
-        // A sign-in saved for another server is forgotten all the same.
-        context.Store.DeleteSession();
+        // The final identity reset also forgets any sign-in when no server was selected.
         return ended;
     }
 }

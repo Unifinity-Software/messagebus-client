@@ -1,6 +1,7 @@
 using System.Net.Http.Headers;
 using MessageBus.Contracts.Http;
 using MessageBus.Contracts.Security;
+using MessageBus.Cli.Server;
 
 namespace MessageBus.Cli.Security;
 
@@ -16,8 +17,9 @@ internal sealed class AuthenticatingHandler : DelegatingHandler
     private readonly string? _workspaceId;
     private readonly string _component;
     private readonly string _version;
+    private readonly ServerSendGate _gate;
 
-    private AuthenticatingHandler(HttpMessageHandler inner, MachineRequestSigner? signer, string? apiKey, string? workspaceId, string component, string version)
+    private AuthenticatingHandler(HttpMessageHandler inner, MachineRequestSigner? signer, string? apiKey, string? workspaceId, string component, string version, ServerSendGate gate)
         : base(inner)
     {
         _signer = signer;
@@ -25,16 +27,20 @@ internal sealed class AuthenticatingHandler : DelegatingHandler
         _workspaceId = workspaceId;
         _component = component;
         _version = version;
+        _gate = gate;
     }
 
-    public static AuthenticatingHandler WithMachineKey(HttpMessageHandler inner, MachineRequestSigner signer, string? workspaceId, string component, string version) =>
-        new(inner, signer, null, workspaceId, component, version);
+    public static AuthenticatingHandler WithMachineKey(HttpMessageHandler inner, MachineRequestSigner signer, string? workspaceId, string component, string version, ServerSendGate gate) =>
+        new(inner, signer, null, workspaceId, component, version, gate);
 
-    public static AuthenticatingHandler WithApiKey(HttpMessageHandler inner, string apiKey, string? workspaceId, string component, string version) =>
-        new(inner, null, apiKey, workspaceId, component, version);
+    public static AuthenticatingHandler WithApiKey(HttpMessageHandler inner, string apiKey, string? workspaceId, string component, string version, ServerSendGate gate) =>
+        new(inner, null, apiKey, workspaceId, component, version, gate);
 
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {
+        var uri = request.RequestUri ?? throw new ServerBindingException("The request has no destination.");
+        _gate.DemandDestination(uri);
+        var prepared = await _gate.PrepareSendAsync(uri, cancellationToken).ConfigureAwait(false);
         request.Headers.TryAddWithoutValidation(MbusHeaders.ClientVersion, _version);
         request.Headers.TryAddWithoutValidation(MbusHeaders.ClientComponent, _component);
         if (_workspaceId is not null && !request.Headers.Contains(MbusHeaders.Workspace))
@@ -42,32 +48,47 @@ internal sealed class AuthenticatingHandler : DelegatingHandler
             request.Headers.TryAddWithoutValidation(MbusHeaders.Workspace, _workspaceId);
         }
 
-        if (_apiKey is not null)
+        // Buffer before taking the consumption lock, for keys as well as machine signatures. No
+        // asynchronous content work may leave a legacy authorization queued after the final floor read.
+        byte[] body = [];
+        if (request.Content is { } content)
         {
-            request.Headers.Authorization = new AuthenticationHeaderValue(AuthSchemes.ApiKey, _apiKey);
+            body = await content.ReadAsByteArrayAsync(cancellationToken).ConfigureAwait(false);
+            var copy = new ByteArrayContent(body);
+            foreach (var header in content.Headers)
+                copy.Headers.TryAddWithoutValidation(header.Key, header.Value);
+            request.Content = copy;
         }
-        else if (_signer is not null)
+        return await prepared.ConsumeAsync(request.RequestUri!, async authorization =>
         {
-            // The signature covers the exact body bytes, so read them once and send those same bytes.
-            byte[] body = [];
-            if (request.Content is { } content)
+            if (_apiKey is not null)
             {
-                body = await content.ReadAsByteArrayAsync(cancellationToken).ConfigureAwait(false);
-                var copy = new ByteArrayContent(body);
-                foreach (var header in content.Headers)
+                request.Headers.Authorization = new AuthenticationHeaderValue(AuthSchemes.ApiKey, _apiKey);
+            }
+            else if (_signer is not null)
+            {
+                // Version comes only from current discovery, never the caller's version header.
+                request.Headers.Remove(MbusHeaders.SignatureVersion);
+                foreach (var (name, value) in _signer.CreateHeaders(authorization, request, body))
                 {
-                    copy.Headers.TryAddWithoutValidation(header.Key, header.Value);
+                    request.Headers.Remove(name);
+                    request.Headers.TryAddWithoutValidation(name, value);
                 }
-                request.Content = copy;
             }
-            var uri = request.RequestUri ?? throw new InvalidOperationException("The request has no address.");
-            foreach (var (name, value) in _signer.CreateHeaders(request.Method.Method, uri.PathAndQuery, body))
-            {
-                request.Headers.Remove(name);
-                request.Headers.TryAddWithoutValidation(name, value);
-            }
-        }
 
-        return await base.SendAsync(request, cancellationToken).ConfigureAwait(false);
+            var response = await base.SendAsync(request, cancellationToken).ConfigureAwait(false);
+            if ((int)response.StatusCode is >= 300 and <= 399)
+            {
+                response.Dispose();
+                throw new ServerBindingException("Authenticated redirects are refused; no credentials were replayed.");
+            }
+            return response;
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing) _gate.Dispose();
+        base.Dispose(disposing);
     }
 }

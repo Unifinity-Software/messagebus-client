@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using MessageBus.Contracts.Http;
 using MessageBus.Contracts.Security;
+using MessageBus.Cli.Server;
 
 namespace MessageBus.Cli.Security;
 
@@ -63,6 +64,47 @@ public sealed class MachineRequestSigner(MachineKey key, string machineId, TimeP
 {
     /// <summary>The enrolled machine's id.</summary>
     public string MachineId { get; } = machineId;
+
+    /// <summary>
+    /// Signs inside a lock-held actual-send callback using the final escaped URI, exact body bytes and actual workspace header.
+    /// Uses authority-bound v2 only for a durable isolated binding; affirmative never-pinned legacy retains exact v1.
+    /// </summary>
+    public IReadOnlyList<KeyValuePair<string, string>> CreateHeaders(ServerSendAuthorization authorization,
+        HttpRequestMessage request, ReadOnlySpan<byte> body)
+    {
+        var destination = request.RequestUri ?? throw new ServerBindingException("Missing final request destination.");
+        authorization.DemandSigning(destination);
+        if (authorization.Binding is not { } snapshot) return CreateHeaders(request.Method.Method, destination.PathAndQuery, body);
+        string? workspace = null;
+        if (request.Headers.TryGetValues(MbusHeaders.Workspace, out var values))
+        {
+            var headers = values.ToArray();
+            if (headers.Length != 1 || headers[0].Length == 0)
+                throw new ServerBindingException("The actual workspace header must have exactly one nonempty value.");
+            workspace = headers[0];
+        }
+        var timestamp = time.GetUtcNow().ToUnixTimeSeconds();
+        var nonce = Base64Url.EncodeToString(RandomNumberGenerator.GetBytes(16));
+        var bodyHash = Convert.ToHexStringLower(SHA256.HashData(body));
+        string canonical;
+        try
+        {
+            canonical = MachineRequestSigningV2.CanonicalString(snapshot.Issuer, snapshot.StampId, MachineId,
+                workspace, request.Method.Method, destination.PathAndQuery, timestamp, nonce, bodyHash);
+        }
+        catch (ArgumentException ex)
+        {
+            throw new ServerBindingException("The actual request cannot be represented in the isolated signature domain.", ex);
+        }
+        return
+        [
+            new("Authorization", $"{AuthSchemes.Machine} {MachineId}"),
+            new(MbusHeaders.SignatureVersion, MachineRequestSigningV2.Version),
+            new(MbusHeaders.Timestamp, timestamp.ToString(System.Globalization.CultureInfo.InvariantCulture)),
+            new(MbusHeaders.Nonce, nonce),
+            new(MbusHeaders.Signature, key.Sign(Encoding.UTF8.GetBytes(canonical))),
+        ];
+    }
 
     /// <summary>
     /// Headers for a request: <c>Authorization: MbusMachine &lt;id&gt;</c>, timestamp, nonce and signature.

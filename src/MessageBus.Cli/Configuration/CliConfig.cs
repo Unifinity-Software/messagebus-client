@@ -9,6 +9,15 @@ namespace MessageBus.Cli.Configuration;
 /// </summary>
 public sealed record CliConfig
 {
+    /// <summary>Exact endpoint and isolated floor for this identity, including a pending runner enrollment.</summary>
+    public Server.ServerBindingSnapshot? ServerBinding { get; init; }
+
+    /// <summary>Immutable key-file generation published with this identity; absent in older profiles.</summary>
+    public string? MachineKeyGeneration { get; init; }
+
+    /// <summary>Exact issuing scope and key fingerprints for pending or completed runner enrollment.</summary>
+    public RunnerEnrollmentBinding? RunnerEnrollmentBinding { get; init; }
+
     /// <summary>The persisted machine key store: file or keychain; null uses the platform default.</summary>
     public string? KeyStore { get; init; }
 
@@ -45,6 +54,9 @@ public sealed record CliConfig
     /// <summary>Bootstrap checkpoint: the runner API-key fingerprint whose pre-saved machine key must be reused until enrollment completes.</summary>
     public string? PendingRunnerEnrollment { get; init; }
 
+    /// <summary>A replacement runner's durable key and provenance, separate from the active identity.</summary>
+    public PendingRunnerIdentity? PendingRunnerIdentity { get; init; }
+
     /// <summary>The settings file's name.</summary>
     public const string FileName = "config.json";
 
@@ -55,13 +67,48 @@ public sealed record CliConfig
     public const string ProtectedMachineKeyFile = "machine-key.dpapi";
 }
 
+/// <summary>A staged runner replacement; contains no private key or bootstrap credential.</summary>
+public sealed record PendingRunnerIdentity
+{
+    /// <summary>The independent persisted machine key generation.</summary>
+    public required string KeyGeneration { get; init; }
+    /// <summary>The staged key backend.</summary>
+    public required string KeyStore { get; init; }
+    /// <summary>The exact endpoint, authority and key fingerprints.</summary>
+    public required RunnerEnrollmentBinding Binding { get; init; }
+}
+
+/// <summary>Durable runner enrollment provenance. No credential or private key is stored here.</summary>
+public sealed record RunnerEnrollmentBinding
+{
+    /// <summary>Checkpoint format version.</summary>
+    public int Version { get; init; } = 1;
+    /// <summary>Exact normalized API endpoint, including base path.</summary>
+    public required string SelectedEndpoint { get; init; }
+    /// <summary>Issuing isolated tuple, absent only for affirmative never-pinned legacy.</summary>
+    public Server.ServerBindingSnapshot? ServerBinding { get; init; }
+    /// <summary>Fingerprint of the intentionally supplied bootstrap API key.</summary>
+    public required string ApiKeyFingerprint { get; init; }
+    /// <summary>Fingerprint of the persisted enrollment machine key.</summary>
+    public required string MachineKeyFingerprint { get; init; }
+
+    internal bool Matches(Server.ServerEndpoint endpoint, Server.ServerBindingSnapshot? binding, string apiKeyFingerprint, string? machineKeyFingerprint) =>
+        Version == 1 && SelectedEndpoint == endpoint.Value && ServerBinding == binding
+        && ApiKeyFingerprint == apiKeyFingerprint && MachineKeyFingerprint == machineKeyFingerprint;
+}
+
 [JsonSourceGenerationOptions(
     JsonSerializerDefaults.Web,
     WriteIndented = true,
     DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull)]
 [JsonSerializable(typeof(CliConfig))]
+[JsonSerializable(typeof(RunnerEnrollmentBinding))]
+[JsonSerializable(typeof(PendingRunnerIdentity))]
+[JsonSerializable(typeof(MessageBus.Mcp.TrustFile))]
 [JsonSerializable(typeof(Server.ServerInfoResponse))]
 [JsonSerializable(typeof(CliSessionFile))]
+[JsonSerializable(typeof(Server.ServerBindingSnapshot))]
+[JsonSerializable(typeof(ServerBindingLedger))]
 [JsonSerializable(typeof(SignIn.CliStartBody))]
 [JsonSerializable(typeof(SignIn.CliStartResponse))]
 [JsonSerializable(typeof(SignIn.CliTokenBody))]

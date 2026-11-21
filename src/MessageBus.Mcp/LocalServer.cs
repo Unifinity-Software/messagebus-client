@@ -14,7 +14,7 @@ public sealed record LocalServerOptions
     /// <summary>The service, authenticated as this machine; base address the server URL with a trailing slash.</summary>
     public required HttpClient Http { get; init; }
 
-    /// <summary>Plain client for attachment links (no credentials, long timeout). Made by the server when not given.</summary>
+    /// <summary>Attachment link transport from <see cref="MessageBus.Attachments.Client.AttachmentTransfers.CreateHttpClient"/>. Made by the server when not given.</summary>
     public HttpClient? Links { get; init; }
 
     /// <summary>The workspace this machine is enrolled in.</summary>
@@ -162,7 +162,7 @@ public static class LocalServer
             return 1;
         }
 
-        using var ownLinks = options.Links is null ? new HttpClient { Timeout = TimeSpan.FromHours(1) } : null;
+        using var ownLinks = options.Links is null ? MessageBus.Attachments.Client.AttachmentTransfers.CreateHttpClient() : null;
         await using var tools = new LocalTools(options with { Links = options.Links ?? ownLinks });
         var shown = ShownTools(options.Delivery ?? ReadDelivery(options.DeliveryFile));
         var listed = await tools.ListToolsAsync(shown, ct);
@@ -204,7 +204,7 @@ public static class LocalServer
         {
             return false;
         }
-        using var ownLinks = options.Links is null ? new HttpClient { Timeout = TimeSpan.FromHours(1) } : null;
+        using var ownLinks = options.Links is null ? MessageBus.Attachments.Client.AttachmentTransfers.CreateHttpClient() : null;
         await using var tools = new LocalTools(options with { Links = options.Links ?? ownLinks });
         return await tools.SendKeptAnswerAsync(ct);
     }

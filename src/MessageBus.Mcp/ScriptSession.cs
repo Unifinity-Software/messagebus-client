@@ -38,7 +38,7 @@ public sealed class ScriptSession : IAsyncDisposable
     {
         ArgumentNullException.ThrowIfNull(options);
         if (options.WorkspaceId is null) throw new ArgumentException("The machine isn't enrolled in a workspace.", nameof(options));
-        _ownLinks = options.Links is null ? new HttpClient { Timeout = TimeSpan.FromHours(1) } : null;
+        _ownLinks = options.Links is null ? MessageBus.Attachments.Client.AttachmentTransfers.CreateHttpClient() : null;
         // the original issue: a script's send ends before a runner could ask it for earlier history, so its bundles carry the whole history.
         _tools = new LocalTools(options with { Links = options.Links ?? _ownLinks, IncrementalBundles = false });
     }
