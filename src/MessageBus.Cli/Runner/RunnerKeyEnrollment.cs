@@ -62,7 +62,11 @@ internal static class RunnerKeyEnrollment
             throw new CliException(string.Join(" ", ex.Message.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)));
         }
 
-        using var key = MachineKey.Create();
+        var pending = settings.Stored.PendingRunnerEnrollment;
+        if (pending is not null && (pending != Fingerprint(apiKey) || settings.Stored.MachineId is not null))
+            throw new CliException("The saved runner enrollment checkpoint does not match this sign-in. Restore the original bootstrap configuration.");
+        using var key = pending is null ? MachineKey.Create()
+            : MachineKey.FromPem(context.Store.LoadKeyPem() ?? throw new CliException("The runner enrollment checkpoint has no machine key. Restore its persisted identity."));
         var inventory = await AgentScanner.BuildInventoryAsync(host, settings.Stored.MachineId, settings.Location, ct).ConfigureAwait(false);
         using var anonymous = ServerConnection.CreateAnonymousClient(host, server);
         var enrolled = await ServerConnection.EnrollAsync(anonymous, server, new AuthenticationHeaderValue(AuthSchemes.ApiKey, apiKey),
@@ -80,6 +84,7 @@ internal static class RunnerKeyEnrollment
             KeyFingerprint = key.Fingerprint,
             EnrolledAt = enrolled.Machine.EnrolledAt,
             EnrolledWithApiKey = Fingerprint(apiKey),
+            PendingRunnerEnrollment = null,
         });
         var signed = reload();
         // The first signed request: proves the saved key works, and files the scan under the new machine.

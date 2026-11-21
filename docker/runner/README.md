@@ -99,106 +99,97 @@ and use that address as `MBUS_SERVER`.
 
 ## Azure Container Instances
 
-`infra/runner-aci.bicep` provisions one Linux runner with outbound connections, a private-registry
-pull identity, Claude Code and Codex API keys, and a stable mbus machine identity. Use a dedicated
-resource group and an image built from the release used by your server. Pin all four CLI versions
-with the build arguments above and build for `linux/amd64`.
+`infra/runner-aci.bicep` provisions a Linux ACI runner that enrolls itself in Azure. You do not
+run an enrollment container on your computer or copy a machine private key into a deployment.
+Use a runner image that includes `docker/runner/aci-bootstrap.mjs` and the pending-enrollment
+checkpoint support. The image supplied for deployment must include this change; an older image
+built from `mbus-v1.1.0` does not contain this bootstrap. Official GHCR distribution is tracked
+separately in issue #17.
 
-The template sets `MBUS_DEPLOYMENT_TARGET=aci` and `MBUS_AZURE_RESOURCE_ID` to the container group's
-ARM ID. A CLI release supporting ACI metadata reports that setup hint to Fleet; older releases still run
-but appear as Docker. Metadata never enables management: approve the shared runner, enable Azure runners
-in Integrations, verify its Azure pairing tag in runner Settings, then explicitly enable wake and idle stop.
+### Deploy in Azure
 
-### Enroll the identity
-
-Enroll once using the release image and a dedicated home volume. Create a **Sign in runners** API
-key in your workspace's **Security** page. Save its value in a private file and run these commands
-in a shell with Podman. Choose distinct container, volume and secret names for each runner.
-
-```sh
-podman secret create aci-enrollment ./runner-api-key.txt
-podman run --name aci-enrollment \
-  --secret aci-enrollment,target=MBUS_API_KEY \
-  -e MBUS_SERVER=https://app.messagebus.ai \
-  -e MBUS_MACHINE_NAME=aci-runner-1 -e MBUS_LOCATION="Azure Container Instances" \
-  -v aci-runner-home:/home/runner messagebus-runner:<version> login
-```
-
-Confirm that login reports the intended workspace and that the dashboard shows the new shared
-runner. Approve the machine if required, choose its roles, and set **Tasks at once** to one for
-the initial deployment. The enrollment container only runs the login command.
-
-Copy the identity into a private directory and store both files in your secret store. On Linux
-or macOS, create that directory with `umask 077` first.
-
-```sh
-mkdir private-runner-state
-podman cp aci-enrollment:/home/runner/.mbus/config.json private-runner-state/config.json
-podman cp aci-enrollment:/home/runner/.mbus/machine-key.pem private-runner-state/machine-key.pem
-az keyvault secret set --vault-name <vault> --name aci-runner-config \
-  --file private-runner-state/config.json --output none
-az keyvault secret set --vault-name <vault> --name aci-runner-key \
-  --file private-runner-state/machine-key.pem --output none
-```
-
-Keep each container group's identity distinct. These files identify the enrolled machine, so its
-role assignments survive restarts. The template restores the same files into local storage as
-UID 10001 with directory mode `700` and file mode `600`. Working copies and per-run state are
-ephemeral. Azure Files SMB mounts expose synthetic Unix modes, so the identity uses an ACI secret
-volume. The release image's `USER runner` supplies the non-root UID.
-
-### Deploy and verify
-
-Push the image to an existing ACR in the resource group. The template creates a user-assigned
-managed identity with `AcrPull` on that registry. Supply the following parameters through your
-deployment system's secure parameters, or a JSON parameter file with Key Vault references.
+Choose a distinct container group name for each runner. Deploy the template through Azure Cloud
+Shell or your deployment pipeline, using an image already in your registry. The default is one
+mbus task slot, two CPU cores, four GiB of memory and no public ingress. Agents run as UID 10001.
 
 | Parameter | Value |
 |---|---|
-| `runnerName` | Your container group name. |
-| `runnerImage` | `<registry>.azurecr.io/messagebus-runner:<version>` or its digest. |
-| `containerRegistryName` | Existing registry name in the resource group. |
-| `machineConfig` | The enrolled runner's `config.json`, stored as a secure string. |
-| `machinePrivateKey` | Its `machine-key.pem`, stored as a secure string. |
-| `anthropicApiKey` | Claude Code API key, stored as a secure string. |
-| `openaiApiKey` | Codex API key, stored as a secure string. |
+| `runnerName` | Your ACI container group name. |
+| `runnerImage` | The supplied image tag or, preferably, its pinned digest. |
+| `containerRegistryName` | Existing private ACR name in the resource group; empty for a public image. |
+| `serverUrl` | Your reachable mbus server address. |
+| `machineName` | How the runner appears in Fleet; defaults to the container group name. |
+| `runnerApiKey` | A workspace API key with **Sign in runners**, supplied as a secure value. |
+| `anthropicApiKey` | Claude Code API key, supplied as a secure value. |
+| `openaiApiKey` | Codex API key, supplied as a secure value. |
 
-For each secret parameter, use a reference in your parameter file. The vault must allow template
+Keep key values in your Azure secret/deployment configuration. Do not commit them to a parameter
+file or place them on a command line. For a Key Vault reference, the vault must allow template
 deployment and the deployer needs `Microsoft.KeyVault/vaults/deploy/action` on it.
-[Microsoft documents the required permissions and reference format](https://learn.microsoft.com/en-us/azure/azure-resource-manager/templates/key-vault-parameter).
+[Required permissions and reference format](https://learn.microsoft.com/en-us/azure/azure-resource-manager/templates/key-vault-parameter).
+For example, this parameter references the enrollment key without including its value:
 
 ```json
-"machinePrivateKey": {
+"runnerApiKey": {
   "reference": {
     "keyVault": { "id": "<key-vault-resource-id>" },
-    "secretName": "aci-runner-key"
+    "secretName": "mbus-runner-enrollment"
   }
 }
 ```
 
+In Azure Cloud Shell, with the template and a parameter file containing secret references:
+
 ```sh
 az deployment group create --subscription <subscription> --resource-group <group> \
   --template-file infra/runner-aci.bicep --parameters @runner.parameters.json
-az container show --subscription <subscription> --resource-group <group> \
-  --name <runner> --query instanceView.state
 ```
 
-Check the dashboard for that machine, run a task with Claude Code and another with Codex, and
-confirm both return their results. Once both tasks have finished, stop and start the group with
-`az container stop` and `az container start`. Check that its machine ID and role assignments
-are the same and repeat the tasks. Review container logs for credential exposure before sharing
-them. The template outputs the ARM resource ID for the workspace's ACI binding.
+The template creates a user-assigned managed identity and a private storage account with one
+identity blob container. That identity gets Blob Data Contributor scoped to that container and,
+when a private ACR is selected, AcrPull on that registry. The account disables anonymous blob
+access and shared-key authentication. Identity data is encrypted at rest by Azure Storage.
+The bootstrap retries initial permission propagation for a bounded period and fails closed if
+it cannot access the identity store.
 
-### Retire a runner
+### First start and later starts
 
-Drain the runner and wait for its active tasks to finish before stopping it. A stopped ACI group
-retains its deployment configuration and secret volumes. Registry storage and other provisioned
-services continue to incur their own charges.
+On first start the container obtains its Azure token through managed identity. It takes a blob
+lease, generates a machine key, and saves a pending checkpoint before sending the mbus enrollment
+request. It then uses the Sign in runners key to join your workspace and saves the completed
+machine identity before starting the runner. An interrupted enrollment reuses the checkpointed
+key, including when the service enrolled the machine but its response was lost.
+
+The new shared machine appears on Fleet. Approve it if required, assign its roles and confirm
+**Tasks at once** is one for the initial deployment. Run a Claude Code task and a Codex task,
+then stop and start the ACI group and repeat them. The machine ID and role assignments must stay
+the same.
+
+On later starts the container restores the same identity into owner-only local files. It does
+not enroll again and does not need the enrollment API key. After the first successful enrollment,
+remove `runnerApiKey` from your deployment's secure values or redeploy it as empty. Revoke that
+key when you no longer need it to enroll other runners. Keep the agent API keys configured.
+Working copies and per-task state are ephemeral; the identity blob is the durable state.
+
+The template reports its ACI target and ARM resource ID as setup hints. To enable automatic
+management, approve the shared runner, enable Azure runners in Integrations, verify the Azure
+pairing tag in runner Settings, and explicitly enable wake and idle stop. Reported metadata
+never authorizes Azure management. The template outputs the group ARM ID and identity storage
+account name.
+
+### Recover or retire
+
+If storage access is revoked, the checkpoint is corrupt or another bootstrap owns the lease,
+the runner does not begin work. Restore access or the correct identity checkpoint and restart.
+A pending enrollment requires its original Sign in runners key. Preserve the storage account
+and blob when updating or replacing the ACI group; deleting them loses the persisted identity.
+An identity checkpoint cannot be used for a different ACI group or mbus server.
+
+Drain active tasks before stopping or retiring the runner. A stopped ACI group retains its
+deployment configuration; identity storage, registry storage and model usage are separate from
+ACI compute charges.
 [ACI lifecycle and billing](https://learn.microsoft.com/en-us/azure/container-instances/container-instances-stop-start).
-
-To retire it, remove the machine from mbus, delete the container group and its pull identity and
-role assignment, and remove its identity secrets from your secret store. If the resource group
-was dedicated to this runner, deleting that group removes its Azure resources together. After
-the identity has been saved and deployed, remove the enrollment container, its dedicated home
-volume, the Podman enrollment secret and the temporary identity files. Revoke the enrollment API
-key when it is no longer needed to enroll other runners.
+To retire it, remove its mbus lifecycle binding and machine registration, delete the ACI group,
+its managed identity and role assignments, and its dedicated identity storage. A dedicated
+resource group can be deleted after the runner has drained. Retire deployment-held model keys
+and revoke enrollment keys that are no longer needed.
