@@ -7,6 +7,9 @@ namespace MessageBus.Cli.Configuration;
 /// </summary>
 public sealed record CliSessionFile
 {
+    /// <summary>Exact endpoint and isolated floor; retained through token rotation.</summary>
+    public Server.ServerBindingSnapshot? ServerBinding { get; init; }
+
     /// <summary>The server that issued it (no trailing slash).</summary>
     public required string Server { get; init; }
 

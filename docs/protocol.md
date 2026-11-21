@@ -67,8 +67,9 @@ W3C `traceparent` / `tracestate`.
 ### Frozen isolated machine domain (v2 core; runtime integration pending)
 
 `MachineRequestSigningV2` is a separate additive builder. The existing `MachineRequestSigning.CanonicalString`
-and v1 wire remain unchanged. This core does not activate isolated signing, persist a binding ledger, or gate
-credential transports. It makes no regional availability or release-readiness claim.
+and v1 wire remain unchanged. The durable binding APIs below are available for subsequent transport integration;
+this core does not activate isolated signing or gate credential transports. It makes no regional availability or
+release-readiness claim.
 
 Isolated discovery retains `product: "messagebus.ai"`, optional `capabilities: string[]` and all existing tokens.
 The descriptive shape is `stamp:{stampId,geography,azureRegion,url,aliases}`. The security extension is exactly
@@ -120,7 +121,35 @@ Unknown/corrupt binding state refuses. Any origin-keyed ledger entry or survivin
 establishes the isolated floor. Missing/lower/malformed/conflicting discovery cannot erase it. Integration must
 read all state under the existing single profile security lock, reconcile and durably persist the ledger and
 credential snapshots before first credential transmission, and preserve the floor through every writer, logout,
-refresh, expiry and failure. These persistence/locking and transport gates remain subsequent implementation work.
+refresh, expiry and failure. The persistence APIs implement the storage part; actual credential transport gates
+remain subsequent implementation work.
+
+`ConfigStore.WithProfileSecurityLockAsync` supplies an explicit `ProfileSecurityTransaction` using the existing
+`cli-session.lock` and process semaphore. `LoadBindingFloor()` rereads the independent `server-bindings.json`
+ledger and both saved files under that lock. `PrepareBinding(selected, discovery, expected)` evaluates the pure
+policy, durably publishes the origin pin first, attaches matching exact-endpoint snapshots to reused config and
+session credentials, then returns an immutable `ServerBindingSnapshot` for new credentials. A returned snapshot
+is storage evidence, not permission to send; callers still need current discovery for each actual send. Existing
+session-lock callers and synchronous config/session writers reuse the lock-held context without reacquisition.
+
+The ledger root is `{schemaVersion:1,bindings:{"<normalized transport origin>":<snapshot>}}`. Each snapshot has
+exactly `version:1`, `selectedEndpoint`, `stampId`, `authorityVersion:1`, `issuer`, `audience`,
+`minimumMachineSignatureVersion:2` and `machineSignatureRequired:true`. The ledger key establishes the floor for
+every base path on that origin; its snapshot endpoint does not grant reuse of credentials at another base path.
+Optional `serverBinding` on `CliConfig` (including its pending runner enrollment checkpoint) and `CliSessionFile`
+uses the same snapshot schema. Absent fields in valid never-pinned old profiles remain optional. A missing
+ledger with a surviving snapshot, inconsistent endpoint/tuple, duplicate security member, unsupported schema,
+unreadable file or malformed session refuses; malformed sessions no longer silently become absent sign-ins.
+
+Every config/session writer rereads and merges the floor. Rotation, clearing pending enrollment, unrelated
+settings and local sign-out retain it; session deletion never removes the ledger. Files use owner-only temporary
+creation, disk flush and same-directory atomic replacement, with directory metadata flush on Unix and
+write-through replacement on Windows. Isolated preparation restricts the profile directory to its owner.
+`server-bindings.pending` is durably published before a multi-file transition. Any interruption retaining that
+marker refuses further state use until profile restoration; normal commands never delete it to reset a pin.
+Failure before preparation returns must not permit credentials. Local owner deletion/rollback of all state or an
+older binary ignoring the fence remains outside this protection. Native filesystem/crash verification is still
+required; compiling the fault-boundary fixtures is not runtime durability evidence.
 
 The trusted local `MBUS_SERVER_BINDING` JSON object is parsed by `ServerBindingExpectation.Parse`:
 
@@ -141,6 +170,12 @@ from descriptive metadata or this core. All credential paths still require fresh
 each actual send, no stale-context fallback, no credential redirects and no host/v1 retry. Full native client
 tests, real HTTP/WS/proxy and persistence fixtures, combined independent review and client-first publication must
 precede server package pin/enforcement. Public update-feed release-key verification remains unchanged.
+
+`ProfileSecurityTransaction.ValidateProvisioning(selected, expectedJson, durableHome)` validates the trusted
+expected tuple against the selected origin and current floor, requires an explicit absolute home matching this
+store, and verifies owner-only durable write access before future caller probes. The caller passes the returned
+expectation to `PrepareBinding`; neither API reads process environment or discovers a server. A writable path
+cannot prove that a container volume survives replacement: provisioning must still enforce the persistent mount.
 
 ## REST routes the client calls
 

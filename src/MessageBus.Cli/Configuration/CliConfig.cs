@@ -9,6 +9,9 @@ namespace MessageBus.Cli.Configuration;
 /// </summary>
 public sealed record CliConfig
 {
+    /// <summary>Exact endpoint and isolated floor for this identity, including a pending runner enrollment.</summary>
+    public Server.ServerBindingSnapshot? ServerBinding { get; init; }
+
     /// <summary>The persisted machine key store: file or keychain; null uses the platform default.</summary>
     public string? KeyStore { get; init; }
 
@@ -62,6 +65,8 @@ public sealed record CliConfig
 [JsonSerializable(typeof(CliConfig))]
 [JsonSerializable(typeof(Server.ServerInfoResponse))]
 [JsonSerializable(typeof(CliSessionFile))]
+[JsonSerializable(typeof(Server.ServerBindingSnapshot))]
+[JsonSerializable(typeof(ServerBindingLedger))]
 [JsonSerializable(typeof(SignIn.CliStartBody))]
 [JsonSerializable(typeof(SignIn.CliStartResponse))]
 [JsonSerializable(typeof(SignIn.CliTokenBody))]

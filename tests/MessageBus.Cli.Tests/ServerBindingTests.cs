@@ -1,6 +1,7 @@
 using System.Text.Json;
 using MessageBus.Cli.Configuration;
 using MessageBus.Cli.Server;
+using MessageBus.Cli.Tests.Infrastructure;
 using MessageBus.Contracts.Security;
 using Xunit;
 
@@ -14,6 +15,226 @@ public sealed class ServerBindingTests
     private const string Isolated = """{"product":"messagebus.ai","url":"https://eu.stamps.example.test","capabilities":["approvalAffectedV1","settleAttemptV1"],"stamp":{"stampId":"eu","geography":"eu","azureRegion":"westeurope","url":"https://eu.stamps.example.test","aliases":["https://alias.stamps.example.test"]},"signIn":{"microsoft":true,"authority":{"version":1,"stampId":"eu","issuer":"https://eu.stamps.example.test","audience":"https://eu.stamps.example.test"},"machineSignature":{"version":2,"required":true}}}""";
     private const string Expected = """{"version":1,"transportOrigin":"https://eu.stamps.example.test","stampId":"eu","issuer":"https://eu.stamps.example.test","audience":"https://eu.stamps.example.test","authorityVersion":1,"minimumMachineSignatureVersion":2,"machineSignatureRequired":true}""";
     private static ServerBindingFloor NeverPinned => ServerBindingFloor.FromCompleteState([]);
+
+    [Fact]
+    public async Task Restart_stale_writers_rotation_and_logout_preserve_the_floor_and_pending_checkpoint()
+    {
+        using var machine = new TestMachine();
+        var store = new ConfigStore(machine.MbusFolder, "file");
+        var staleConfig = new CliConfig { Server = Origin + "/gateway", MachineId = "mch_fixture", PendingRunnerEnrollment = "fixture-fingerprint" };
+        var staleSession = Session(Origin + "/gateway");
+        store.Save(staleConfig);
+        store.SaveSession(staleSession);
+        var snapshot = await Prepare(store);
+        Assert.Equal(Origin + "/gateway/", snapshot!.SelectedEndpoint);
+        Assert.Equal(snapshot, store.Load().ServerBinding);
+        Assert.Equal(snapshot, store.LoadSession()!.ServerBinding);
+
+        // A writer holding a pre-pin object must reread and merge, including pending enrollment and token rotation.
+        var restarted = new ConfigStore(machine.MbusFolder, "file");
+        restarted.Save(staleConfig with { WorkspaceName = "Changed", PendingRunnerEnrollment = null });
+        restarted.SaveSession(staleSession with { AccessToken = "fixture-rotated-access", RefreshToken = "fixture-rotated-refresh" });
+        Assert.Equal(snapshot, restarted.Load().ServerBinding);
+        Assert.Equal(snapshot, restarted.LoadSession()!.ServerBinding);
+        Assert.Equal("fixture-rotated-refresh", restarted.LoadSession()!.RefreshToken);
+        restarted.DeleteSession();
+        restarted.Save(new CliConfig()); // Local identity forgetting still retains the config's surviving evidence.
+        Assert.Equal(snapshot, restarted.Load().ServerBinding);
+        await AssertLegacyRefused(restarted);
+        Assert.True(File.Exists(restarted.ServerBindingsPath));
+        if (!OperatingSystem.IsWindows())
+        {
+            Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(restarted.ServerBindingsPath));
+            Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute, File.GetUnixFileMode(machine.MbusFolder));
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Missing_ledger_with_either_surviving_snapshot_blocks_load_save_and_logout(bool sessionOnly)
+    {
+        using var machine = new TestMachine();
+        var store = new ConfigStore(machine.MbusFolder, "file");
+        if (!sessionOnly) store.Save(new CliConfig { Server = Origin + "/gateway" });
+        store.SaveSession(Session(Origin + "/gateway"));
+        await Prepare(store);
+        if (sessionOnly && File.Exists(store.ConfigPath)) File.Delete(store.ConfigPath);
+        File.Delete(store.ServerBindingsPath);
+        var before = File.ReadAllText(store.SessionPath);
+        Assert.Throws<ServerBindingException>(() => store.LoadSession());
+        Assert.Throws<ServerBindingException>(() => store.DeleteSession());
+        Assert.Throws<ServerBindingException>(() => store.Save(new CliConfig()));
+        Assert.Throws<ServerBindingException>(() => new ConfigStore(machine.MbusFolder, "file"));
+        Assert.Equal(before, File.ReadAllText(store.SessionPath));
+        Assert.False(File.Exists(store.ServerBindingsPath));
+    }
+
+    [Theory]
+    [InlineData("ledger-corrupt")]
+    [InlineData("ledger-future")]
+    [InlineData("ledger-duplicate")]
+    [InlineData("ledger-unreadable")]
+    [InlineData("session-corrupt")]
+    [InlineData("session-null-snapshot")]
+    [InlineData("config-unknown-snapshot")]
+    [InlineData("config-scope")]
+    public async Task Unknown_corrupt_and_contradictory_saved_state_never_becomes_empty_legacy(string damage)
+    {
+        using var machine = new TestMachine();
+        var store = new ConfigStore(machine.MbusFolder, "file");
+        store.Save(new CliConfig { Server = Origin + "/gateway" });
+        store.SaveSession(Session(Origin + "/gateway"));
+        await Prepare(store);
+        var ledger = File.ReadAllText(store.ServerBindingsPath);
+        switch (damage)
+        {
+            case "ledger-corrupt": File.WriteAllText(store.ServerBindingsPath, "{broken"); break;
+            case "ledger-future": File.WriteAllText(store.ServerBindingsPath, ledger.Replace("\"schemaVersion\": 1", "\"schemaVersion\": 2", StringComparison.Ordinal)); break;
+            case "ledger-duplicate": File.WriteAllText(store.ServerBindingsPath, ledger.Replace("\"schemaVersion\": 1", "\"schemaVersion\": 1,\"schemaVersion\": 1", StringComparison.Ordinal)); break;
+            case "ledger-unreadable": File.Delete(store.ServerBindingsPath); Directory.CreateDirectory(store.ServerBindingsPath); break;
+            case "session-corrupt": File.WriteAllText(store.SessionPath, "{broken"); break;
+            case "session-null-snapshot": File.WriteAllText(store.SessionPath, "{\"serverBinding\":null}"); break;
+            case "config-unknown-snapshot": File.WriteAllText(store.ConfigPath, File.ReadAllText(store.ConfigPath).Replace("\"minimumMachineSignatureVersion\": 2", "\"minimumMachineSignatureVersion\": 3", StringComparison.Ordinal)); break;
+            case "config-scope": File.WriteAllText(store.ConfigPath, File.ReadAllText(store.ConfigPath).Replace("\"server\": \"" + Origin + "/gateway\"", "\"server\": \"" + Origin + "/other\"", StringComparison.Ordinal)); break;
+        }
+        Assert.Throws<ServerBindingException>(() => store.LoadSession());
+        Assert.Throws<ServerBindingException>(() => new ConfigStore(machine.MbusFolder, "file"));
+    }
+
+    [Theory]
+    [InlineData("before-marker", false)]
+    [InlineData("after-marker", true)]
+    [InlineData("after-ledger", true)]
+    [InlineData("after-config", true)]
+    [InlineData("after-session", true)]
+    [InlineData("after-commit", false)]
+    public async Task Interrupted_durable_boundaries_never_return_a_prepared_credential_or_downgrade(string boundary, bool interrupted)
+    {
+        using var machine = new TestMachine();
+        var store = new ConfigStore(machine.MbusFolder, "file");
+        store.Save(new CliConfig { Server = Origin + "/gateway" });
+        store.SaveSession(Session(Origin + "/gateway"));
+        store.BindingWriteBoundary = current => { if (current == boundary) throw new IOException("fixture disk failure"); };
+        await Assert.ThrowsAsync<IOException>(() => Prepare(store));
+        Assert.Equal(interrupted, File.Exists(Path.Combine(machine.MbusFolder, "server-bindings.pending")));
+        Assert.Empty(Directory.GetFiles(machine.MbusFolder, "*.tmp"));
+        if (interrupted)
+            Assert.Throws<ServerBindingException>(() => new ConfigStore(machine.MbusFolder, "file"));
+        else
+        {
+            var restarted = new ConfigStore(machine.MbusFolder, "file");
+            if (boundary == "after-commit") await AssertLegacyRefused(restarted);
+            else Assert.Null(restarted.Load().ServerBinding); // No credential was prepared and no pin was published.
+        }
+    }
+
+    [Fact]
+    public async Task Filesystem_publish_failure_leaves_a_restrictive_marker_and_original_credentials()
+    {
+        using var machine = new TestMachine();
+        var store = new ConfigStore(machine.MbusFolder, "file");
+        store.SaveSession(Session(Origin + "/gateway"));
+        var original = File.ReadAllText(store.SessionPath);
+        store.BindingWriteBoundary = boundary =>
+        {
+            if (boundary == "after-marker") Directory.CreateDirectory(store.ServerBindingsPath);
+        };
+        await Assert.ThrowsAnyAsync<IOException>(() => Prepare(store));
+        Assert.Equal(original, File.ReadAllText(store.SessionPath));
+        Assert.Empty(Directory.GetFiles(machine.MbusFolder, "*.tmp"));
+        Assert.Throws<ServerBindingException>(() => store.LoadSession());
+    }
+
+    [Fact]
+    public async Task Concurrent_conflicting_first_pins_reread_the_winner_under_the_shared_lock()
+    {
+        using var machine = new TestMachine();
+        var first = new ConfigStore(machine.MbusFolder, "file");
+        var second = new ConfigStore(machine.MbusFolder, "file");
+        var held = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var winner = first.WithProfileSecurityLockAsync(async context =>
+        {
+            held.SetResult();
+            await release.Task;
+            return context.PrepareBinding(ServerEndpoint.Parse(Origin + "/gateway"), ServerDiscoveryParser.Parse(Isolated));
+        }, TestContext.Current.CancellationToken);
+        await held.Task;
+        var conflicting = second.WithProfileSecurityLockAsync(context => Task.FromResult(context.PrepareBinding(
+            ServerEndpoint.Parse(Origin + "/gateway"), ServerDiscoveryParser.Parse(Isolated.Replace("\"stampId\":\"eu\"", "\"stampId\":\"ca\"", StringComparison.Ordinal)))), TestContext.Current.CancellationToken);
+        Assert.False(conflicting.IsCompleted);
+        release.SetResult();
+        var snapshot = await winner;
+        await Assert.ThrowsAsync<ServerBindingException>(() => conflicting);
+        // Independent origins merge; the losing writer cannot drop the earlier pin.
+        var other = "https://ca.stamps.example.test";
+        await second.WithProfileSecurityLockAsync(context => Task.FromResult(context.PrepareBinding(ServerEndpoint.Parse(other),
+            ServerDiscoveryParser.Parse(Isolated.Replace(Origin, other, StringComparison.Ordinal).Replace("\"stampId\":\"eu\"", "\"stampId\":\"ca\"", StringComparison.Ordinal)))), TestContext.Current.CancellationToken);
+        using var ledger = JsonDocument.Parse(File.ReadAllText(first.ServerBindingsPath));
+        Assert.Equal(2, ledger.RootElement.GetProperty("bindings").EnumerateObject().Count());
+        Assert.Equal(snapshot!.Binding, ServerBinding.Create("eu", Origin, Origin));
+        await AssertLegacyRefused(first);
+    }
+
+    [Fact]
+    public async Task Explicit_context_supports_nested_session_writers_and_refuses_use_after_release()
+    {
+        using var machine = new TestMachine();
+        var store = new ConfigStore(machine.MbusFolder, "file");
+        ConfigStore.ProfileSecurityTransaction? escaped = null;
+        await store.WithProfileSecurityLockAsync(async context =>
+        {
+            escaped = context;
+            var snapshot = context.PrepareBinding(ServerEndpoint.Parse(Origin + "/gateway"), ServerDiscoveryParser.Parse(Isolated));
+            return await store.WithSessionLockAsync(() =>
+            {
+                store.Save(new CliConfig { Server = Origin + "/gateway", ServerBinding = snapshot });
+                store.SaveSession(Session(Origin + "/gateway") with { ServerBinding = snapshot });
+                return Task.FromResult(true);
+            }, TestContext.Current.CancellationToken);
+        }, TestContext.Current.CancellationToken);
+        Assert.NotNull(store.LoadSession()!.ServerBinding);
+        Assert.Throws<InvalidOperationException>(() => escaped!.LoadBindingFloor());
+        Assert.Throws<ServerBindingException>(() => store.SaveSession(Session(Origin + "/different") with { ServerBinding = store.Load().ServerBinding }));
+    }
+
+    [Fact]
+    public async Task Provisioning_validates_exact_origin_floor_and_explicit_writable_home_before_preparation()
+    {
+        using var machine = new TestMachine();
+        var store = new ConfigStore(machine.MbusFolder, "file");
+        await store.WithProfileSecurityLockAsync(context =>
+        {
+            var selected = ServerEndpoint.Parse(Origin + "/gateway");
+            Assert.Throws<ServerBindingException>(() => context.ValidateProvisioning(selected, Expected, ""));
+            Assert.Throws<ServerBindingException>(() => context.ValidateProvisioning(selected, Expected, machine.Home));
+            Assert.Throws<ServerBindingException>(() => context.ValidateProvisioning(ServerEndpoint.Parse(Alias), Expected, machine.MbusFolder));
+            var expected = context.ValidateProvisioning(selected, Expected, machine.MbusFolder);
+            Assert.Throws<ServerBindingException>(() => context.PrepareBinding(selected, ServerDiscoveryParser.Parse(Legacy), expected));
+            context.PrepareBinding(selected, ServerDiscoveryParser.Parse(Isolated), expected);
+            Assert.Throws<ServerBindingException>(() => context.ValidateProvisioning(selected,
+                Expected.Replace("\"stampId\":\"eu\"", "\"stampId\":\"ca\"", StringComparison.Ordinal), machine.MbusFolder));
+            Assert.Empty(Directory.GetFiles(machine.MbusFolder, ".binding-write-probe-*"));
+            return Task.FromResult(true);
+        }, TestContext.Current.CancellationToken);
+    }
+
+    private static CliSessionFile Session(string server) => new()
+    {
+        Server = server, AccessToken = "fixture-access", RefreshToken = "fixture-refresh",
+        AccessExpiresAt = DateTimeOffset.UnixEpoch, // Expiry must not erase the snapshot.
+    };
+
+    private static Task<ServerBindingSnapshot?> Prepare(ConfigStore store) => store.WithProfileSecurityLockAsync(context =>
+        Task.FromResult(context.PrepareBinding(ServerEndpoint.Parse(Origin + "/gateway"), ServerDiscoveryParser.Parse(Isolated))), TestContext.Current.CancellationToken);
+
+    private static Task AssertLegacyRefused(ConfigStore store) => store.WithProfileSecurityLockAsync(context =>
+    {
+        Assert.Throws<ServerBindingException>(() => ServerBindingPolicy.Evaluate(ServerEndpoint.Parse(Origin),
+            ServerDiscoveryParser.Parse(Legacy), context.LoadBindingFloor(), null));
+        return Task.FromResult(true);
+    }, TestContext.Current.CancellationToken);
 
     [Fact]
     public void Descriptive_stamp_preserves_legacy_but_surviving_or_provisioned_pin_blocks_stripping()

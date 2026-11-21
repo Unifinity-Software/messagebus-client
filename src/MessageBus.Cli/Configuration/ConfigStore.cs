@@ -9,7 +9,7 @@ namespace MessageBus.Cli.Configuration;
 /// so an interrupted write never leaves half a settings file. The machine's private key goes to the
 /// OS's own store where there is one (<see cref="Security.IMachineKeyVault"/>, the original issue).
 /// </summary>
-public sealed class ConfigStore
+public sealed partial class ConfigStore
 {
     /// <summary><c>os</c> (the default: DPAPI on Windows, the Keychain on macOS) or <c>file</c> (the owner-only PEM file everywhere).</summary>
     public const string KeyStoreVariable = "MBUS_KEY_STORE";
@@ -227,25 +227,35 @@ public sealed class ConfigStore
 
     /// <summary>The stored settings, or empty settings when there are none.</summary>
     public CliConfig Load()
+        => InSecurityTransaction(_ => ReadBindingState().Config);
+
+    private CliConfig ReadConfig()
     {
-        if (!File.Exists(ConfigPath))
+        var json = ReadOptionalProfileFile(ConfigPath);
+        if (json is null)
         {
             return new CliConfig();
         }
         try
         {
-            return JsonSerializer.Deserialize(File.ReadAllText(ConfigPath), CliJsonContext.Default.CliConfig) ?? new CliConfig();
+            ValidateSavedJson(json);
+            return JsonSerializer.Deserialize(json, CliJsonContext.Default.CliConfig) ?? throw new Server.ServerBindingException("Empty settings state.");
         }
         catch (JsonException ex)
         {
-            throw new CliException($"The settings file {ConfigPath} can't be read ({ex.Message}). Delete it and run mbus login again.");
+            throw new Server.ServerBindingException("Unreadable settings state; restore the profile before using credentials.", ex);
         }
     }
 
     /// <summary>Saves the settings.</summary>
     public void Save(CliConfig config)
+        => InSecurityTransaction(context => { SaveConfigLocked(config); return true; });
+
+    private void SaveConfigLocked(CliConfig config)
     {
-        var previousServer = Load().Server;
+        var state = ReadBindingState();
+        config = config with { ServerBinding = MergeSnapshot(state.Config.ServerBinding, config.ServerBinding, config.Server, state.Ledger) };
+        var previousServer = state.Config.Server;
         if (previousServer != config.Server)
             MessageBus.Mcp.KeyTrust.BindLegacy(Directory, previousServer ?? config.Server ?? "");
         // the original issue: every login path saves here, including enrollment with a runner API key.
@@ -407,37 +417,54 @@ public sealed class ConfigStore
     /// <summary>Full path of the person's mbus sign-in (<see cref="CliSessionFile"/>).</summary>
     public string SessionPath => Path.Combine(Directory, CliSessionFile.FileName);
 
-    /// <summary>The saved sign-in, or null when there is none (or it can't be read: then mbus signs in again).</summary>
+    /// <summary>The saved sign-in, or null when absent. Unreadable state refuses rather than erasing a possible floor.</summary>
     public CliSessionFile? LoadSession()
+        => InSecurityTransaction(_ => { var state = ReadBindingState(); return state.Session; });
+
+    private CliSessionFile? ReadSession()
     {
-        if (!File.Exists(SessionPath))
+        var json = ReadOptionalProfileFile(SessionPath);
+        if (json is null)
         {
             return null;
         }
         try
         {
-            return JsonSerializer.Deserialize(File.ReadAllText(SessionPath), CliJsonContext.Default.CliSessionFile);
+            ValidateSavedJson(json);
+            return JsonSerializer.Deserialize(json, CliJsonContext.Default.CliSessionFile)
+                ?? throw new Server.ServerBindingException("Empty saved sign-in state.");
         }
-        catch (JsonException)
+        catch (JsonException ex)
         {
-            return null;
+            throw new Server.ServerBindingException("Unreadable saved sign-in state; restore the profile before using credentials.", ex);
         }
     }
 
     /// <summary>Saves the sign-in (owner-only, replaced in one step).</summary>
-    public void SaveSession(CliSessionFile session) =>
+    public void SaveSession(CliSessionFile session) => InSecurityTransaction(_ =>
+    {
+        var state = ReadBindingState();
+        session = session with { ServerBinding = MergeSnapshot(state.Session?.ServerBinding, session.ServerBinding, session.Server, state.Ledger) };
         WriteOwnerOnly(SessionPath, JsonSerializer.Serialize(session, CliJsonContext.Default.CliSessionFile));
+        return true;
+    });
 
     /// <summary>Forgets the sign-in.</summary>
     public void DeleteSession()
+        => InSecurityTransaction(_ => { DeleteSessionLocked(); return true; });
+
+    private void DeleteSessionLocked()
     {
+        _ = ReadBindingState(); // A surviving snapshot may never be discarded to repair a missing/corrupt ledger.
         if (File.Exists(SessionPath))
         {
             File.Delete(SessionPath);
+            DurableProfileFile.FlushDirectory(Directory);
         }
     }
 
-    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, SemaphoreSlim> SessionGates = new(StringComparer.Ordinal);
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, SemaphoreSlim> SessionGates = new(
+        OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
 
     /// <summary>
     /// Runs <paramref name="body"/> while holding the sign-in lock, so two mbus processes (or two
@@ -446,8 +473,14 @@ public sealed class ConfigStore
     /// the callers; across processes an exclusive lock file does. Whoever waited must read the
     /// sign-in again once inside: another process may have refreshed it meanwhile.
     /// </summary>
-    public async Task<T> WithSessionLockAsync<T>(Func<Task<T>> body, CancellationToken ct)
+    public Task<T> WithSessionLockAsync<T>(Func<Task<T>> body, CancellationToken ct) =>
+        WithProfileSecurityLockAsync(_ => body(), ct);
+
+    /// <summary>Runs a serialized profile transaction; nested existing session operations reuse its explicit context.</summary>
+    public async Task<T> WithProfileSecurityLockAsync<T>(Func<ProfileSecurityTransaction, Task<T>> body, CancellationToken ct)
     {
+        if (_securityTransaction.Value is { Active: true } nested)
+            return await body(nested).ConfigureAwait(false);
         EnsureDirectory();
         var lockPath = Path.GetFullPath(Path.Combine(Directory, CliSessionFile.LockFileName));
         var gate = SessionGates.GetOrAdd(lockPath, _ => new SemaphoreSlim(1, 1));
@@ -455,7 +488,10 @@ public sealed class ConfigStore
         try
         {
             using var file = await AcquireLockFileAsync(lockPath, ct).ConfigureAwait(false);
-            return await body().ConfigureAwait(false);
+            var context = new ProfileSecurityTransaction(this);
+            _securityTransaction.Value = context;
+            try { return await body(context).ConfigureAwait(false); }
+            finally { context.Active = false; _securityTransaction.Value = null; }
         }
         finally
         {
@@ -517,7 +553,7 @@ public sealed class ConfigStore
                 // Retain owner-only permissions even if the process umask removed an owner permission.
                 File.SetUnixFileMode(temp, UnixFileMode.UserRead | UnixFileMode.UserWrite);
             }
-            File.Move(temp, path, overwrite: true);
+            DurableProfileFile.Replace(temp, path);
         }
         catch
         {
@@ -565,6 +601,15 @@ public sealed class ConfigStore
         }
         // A new folder is owner-only; an existing one (MBUS_HOME pointed somewhere) is left as it is,
         // and the files in it are owner-only either way.
+        var missing = new List<string>();
+        var current = Path.GetFullPath(Directory);
+        while (!System.IO.Directory.Exists(current))
+        {
+            missing.Add(current);
+            current = Path.GetDirectoryName(current) ?? throw new IOException("Cannot locate the profile parent directory.");
+        }
         System.IO.Directory.CreateDirectory(Directory, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        // A flushed file in a new home is insufficient if the home's own parent entry can disappear on a crash.
+        foreach (var created in missing) DurableProfileFile.FlushDirectory(Path.GetDirectoryName(created)!);
     }
 }
