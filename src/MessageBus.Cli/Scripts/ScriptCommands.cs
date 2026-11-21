@@ -26,9 +26,39 @@ internal static class ScriptCommands
         root.Subcommands.Add(Status(host, options));
         root.Subcommands.Add(Project(host, options));
         root.Subcommands.Add(Move(host, options));
+        root.Subcommands.Add(Retarget(host, options));
         root.Subcommands.Add(Roles(host, options));
         root.Subcommands.Add(Threads(host, options));
         root.Subcommands.Add(Attach(host, options));
+    }
+
+    private static Command Retarget(CliHost host, CommonOptions options)
+    {
+        var thread = new Argument<string>("thread") { Description = "The queued task's thread." };
+        var to = new Option<string>("--to") { Required = true, Description = "role:<name>, agent:<agt_id> or capabilities:<cap>,<cap>." };
+        var reason = new Option<string?>("--reason") { Description = "Why the task is being retargeted (at most 500 characters)." };
+        var dryRun = new Option<bool>("--dry-run") { Description = "Preview without changing anything or uploading content." };
+        var expected = new Option<string?>("--expected-task-message-id") { Description = "The previousMessageId from the preview; required unless --dry-run." };
+        var operation = new Option<string?>("--operation-id") { Description = "A unique id to keep for retries; required unless --dry-run." };
+        var json = ScriptRunner.JsonOption();
+        var command = new Command("retarget", "Change the recipient of a queued task on the same thread and project.")
+        { thread, to, reason, dryRun, expected, operation, json };
+        command.SetAction((parse, ct) => ScriptRunner.RunAsync(host, parse, options, "retarget", parse.GetValue(json), async (script, ct) =>
+        {
+            var args = new JsonObject
+            {
+                ["threadId"] = parse.GetValue(thread), ["to"] = parse.GetValue(to),
+                ["reason"] = parse.GetValue(reason), ["dryRun"] = parse.GetValue(dryRun),
+                ["expectedTaskMessageId"] = parse.GetValue(expected), ["operationId"] = parse.GetValue(operation),
+            };
+            return await script.ReportAsync(await script.Session.CallAsync(McpToolNames.Retarget, args, ct), value =>
+            {
+                script.Line($"{(parse.GetValue(dryRun) ? "Would retarget" : "Retargeted")} {Script.Text(value, "threadId")} to {Script.Target(value, "to")} ({Script.Text(value, "status")}).");
+                script.Line($"Task message: {Script.Text(value, "previousMessageId")}");
+                if (Script.Text(value, "notice") is { } notice) script.Line(notice);
+            });
+        }, ct));
+        return command;
     }
 
     private static Command Move(CliHost host, CommonOptions options)

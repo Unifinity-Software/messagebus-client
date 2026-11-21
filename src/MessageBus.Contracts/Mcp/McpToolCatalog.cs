@@ -98,6 +98,11 @@ public static class McpToolCatalog
         new(McpToolNames.Cancel, typeof(CancelInput), typeof(CancelResult), "Cancel a thread or project",
             "Cancel a thread and every thread started from it, or a whole project (its open tasks; it ends cancelled). Agents on them are told to stop. Give a short reason. " +
             "Returns the cancelled ids, or `message` when there was nothing to stop. Only cancel what the user asked for or what you started."),
+        new(McpToolNames.Retarget, typeof(RetargetInput), typeof(RetargetResult), "Retarget a queued task",
+            "Change a queued task's recipient on the same thread and project. `to`: role:<name>, agent:<agt_id> or capabilities:<cap>,<cap>. " +
+            "Refused after any copy has been picked up. Preview with dryRun first; a mutation requires operationId and expectedTaskMessageId. " +
+            "Keep operationId for retries. reason is at most 500 characters. The local client negotiates support before reading or uploading content, " +
+            "and reseals each encrypted input whose key changes. Run on a machine holding all old keys. Returns routing, status and notice.") { Features = McpCatalogFeatures.Retarget },
         new(McpToolNames.Move, typeof(MoveInput), typeof(MoveThreadsResult), "Move a task",
             "Move a task sent under the wrong project instead of sending it again. Give threadId and projectId (null for no project). " +
             "includeSubtasks defaults to true; reason explains why; dryRun previews without changing anything. Returns thread ids and from/to projects. " +
@@ -268,6 +273,11 @@ public static class McpToolCatalog
             }
         }
         Simplify(node);
+        if (input == typeof(RetargetInput))
+        {
+            node["properties"]!["reason"]!["maxLength"] = 500;
+            node["properties"]!["to"]!["description"] = "role:<name>, agent:<agt_id> or capabilities:<cap>,<cap>; inbox is not supported";
+        }
         // This required argument uses null to mean no project, so its null alternative must stay in the schema.
         if (input == typeof(MoveInput)) node["properties"]!["projectId"]!["type"] = new JsonArray("string", "null");
         using var doc = JsonDocument.Parse(node.ToJsonString());

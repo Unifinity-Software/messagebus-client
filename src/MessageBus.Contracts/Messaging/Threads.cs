@@ -357,6 +357,9 @@ public sealed record ThreadProgressed : ThreadEvent
 /// <summary>A message was added to the thread (a reply, or a follow-up).</summary>
 public sealed record ThreadMessageAdded : ThreadEvent
 {
+    /// <summary>Present when this message replaces a queued task through retargeting.</summary>
+    public MessageBus.Contracts.Mcp.RetargetMetadata? Retarget { get; init; }
+
     /// <summary>Discriminator: <c>message</c>.</summary>
     public const string Kind = "message";
 
@@ -487,13 +490,15 @@ public sealed record ReplayDeadLetterInput
     /// <summary>
     /// For an end-to-end encrypted message going to another role: its body, opened and sealed again for that
     /// role's key by a machine that holds the original role's key (<c>mbus deadletters replay</c>). The service
-    /// can't do it: it never holds the plaintext, so without this a replay to another role is refused.
+    /// can't do it: it never holds the plaintext. A service advertising <c>replayIndependentInputsV1</c>
+    /// retains a body already encrypted for the destination key without a replacement.
     /// </summary>
     public Mcp.SealedBody? SealedBody { get; init; }
 
     /// <summary>
-    /// With <see cref="SealedBody"/> (the original issue): the message's attachments in the same order, each encrypted one downloaded,
-    /// opened and uploaded again sealed for the new role's key by that machine; the rest as they were.
+    /// The message's attachments in the same order: encrypted inputs needing a different recipient key
+    /// are opened and uploaded again for the destination; plaintext and same-key references stay exact.
+    /// Independently optional from <see cref="SealedBody"/> with <c>replayIndependentInputsV1</c> support.
     /// </summary>
     public IReadOnlyList<AttachmentRef>? Attachments { get; init; }
 }

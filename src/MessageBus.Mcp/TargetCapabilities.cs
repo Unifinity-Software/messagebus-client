@@ -19,6 +19,7 @@ public static class TargetCapabilities
             if (!response.IsSuccessStatusCode) return false;
             var info = MessageBusJson.Deserialize<ServerCapabilitiesResponse>(await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false));
             return info is { Product: "messagebus.ai", Capabilities: { } capabilities }
+                && capabilities.All(value => value is not null)
                 && capabilities.Contains(capability, StringComparer.Ordinal);
         }
         catch (Exception e) when (e is HttpRequestException or JsonException || e is OperationCanceledException && !ct.IsCancellationRequested)

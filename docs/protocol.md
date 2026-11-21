@@ -64,6 +64,74 @@ namespace after the launch check passes. There is no new wire field or service p
   [Updates](#updates)).
 - **Errors** carry a short machine-readable code in `X-Mbus-Error` (MCP errors: `McpErrorCodes`).
 
+## Queued task retargeting (handler-gated)
+
+`retarget` takes `RetargetInput` and returns `RetargetResult` from `Contracts/Mcp/Retarget.cs`.
+It replaces the current queued task message on the **same thread and project**, preserving attachments,
+expiry/deadline, parent/join relationships, exclusions, priority and requested model. Targets are role,
+agent or capabilities; inbox targets are refused. A task that has ever been picked up cannot be retargeted.
+The deployed service remains responsible for eligibility, routing, ownership and atomic publication.
+This client contract does not imply the service has deployed that implementation.
+
+Inputs are `threadId`, `to`, optional `reason` (at most 500 characters), `dryRun`, `resumeOnly`,
+`expectedTaskMessageId`, `operationId`, and the local client's hidden `sealedBody` and `attachments`.
+A mutation requires both a caller-generated operation id (retained across retries) and the exact task
+message id from the preview. The service refuses stale task pins and conflicting reuse of operation ids.
+Results contain `threadId`, `messageId`, `previousMessageId`, `from`, `to`, `status`, `dryRun`,
+`alreadyApplied`, `needsReseal`, optional public-key `recipient`, `copies`, `agentsOnline`, `agentsFree`,
+optional `queuePosition` and `notice`. An already-applied operation returns its historical result and
+never changes a later task generation.
+
+`McpToolSpec.Features` declares the remote handler capabilities required to advertise a tool. The flags
+`McpCatalogFeatures` are `None=0`, `VerifiedTasks=1`, `Retarget=2`, and `RoleProposals=4`; flags reserve
+capabilities and do not imply their handlers are deployed. The original positional `McpToolSpec`
+constructor/deconstruction and `McpToolCatalog.Tools(bool, IReadOnlySet<string>?)` signature remain intact.
+The additive `Tools(bool, IReadOnlySet<string>?, McpCatalogFeatures)` overload applies feature support
+and the `only` permission filter independently for remote tools: both must allow a tool. The original
+overload defaults remote catalogs to `None`, hiding retarget; local catalogs expose implemented local
+tools while excluding service-only names and retaining the permission filter.
+A service with a deployed retarget handler opts in with `McpCatalogFeatures.Retarget`.
+Before a mutation, the local client sends `resumeOnly: true` with the original logical request
+and no replacement content. The service resolves the operation before evaluating the current task.
+Only `retarget-operation-absent` advances the client to a dry-run preview and fresh preparation.
+An explicit resume returns the absence error directly. Unknown-tool errors and ordinary `not-found`
+responses stop the flow before content transfers. An explicit dry-run returns the preview without
+reserving, adopting, uploading or deleting inputs.
+
+After a supported preview, a mutation reads the **pinned message**, rather than assuming the thread's
+first historical message is still current. A shared `TaskReseal` helper is used by retarget and dead-letter
+replay. Body and attachment encryption decisions are independent: plaintext body with encrypted files,
+encrypted body with plaintext files, and mixed lists are supported. Plain references, order and metadata
+remain unchanged; inputs already encrypted for the destination key need no download or upload.
+All required old keys are checked before the first content transfer. Missing keys refuse the operation
+with guidance to run on a machine holding the original keys. Large stored bodies are downloaded and
+verified against their size and SHA-256 before resealing. Only encrypted inputs needing a different
+recipient key are replaced. The service validates input ownership and collects abandoned uploads;
+the client never deletes original shared references on failure.
+
+Dead-letter replay discovers `replayIndependentInputsV1` in the actual service's
+`GET /api/server` response (`product: "messagebus.ai"`, optional `capabilities: string[]`).
+The CLI checks freshly with its authenticated operation client before downloading body bytes,
+requesting attachment download links or uploading replacements when the body can stay shared
+but files need a different key, or another input shape needs independent handling. Missing,
+malformed, unknown or failed discovery refuses with upgrade guidance and zero replacement uploads.
+Catalog tool advertising is not support evidence. Plain replay with no replacements and legacy
+cross-role replay with a replaced encrypted body (including files) do not require this token.
+Destination key metadata is resolved once for this preparation; all old keys are then checked
+before content transfers. A retry never wraps a completed upload in the key-ring retry loop.
+
+On a capable service, `sealedBody` and `attachments` are independently optional for an explicit
+destination role. The destination's current recipient key is resolved and checked separately from
+body replacement. Exact plaintext and same-key attachment references retain their original ownership;
+fresh encrypted replacements preserve count, order, name, format, branch and base commit, and are
+acquired using the authenticated uploader's exact upload-row CAS and permanent ownership receipt.
+Historical messages and bodies remain unchanged. Ordinary replay to the original target retains its
+existing historical-key behavior. Discovery grants no authorization to replay or acquire uploads.
+
+Thread notifications reuse the existing `message` event kind (`ThreadMessageAdded`), adding optional
+`retarget: {previousMessageId, from, to, reason?}` metadata. Old events omit it; no new polymorphic
+event discriminator is introduced. All new wire types use the source-generated `MessageBusJson` context.
+
 ## Identity and request signing
 
 Defined in `src/MessageBus.Contracts/Security/MachineAuth.cs` and `src/MessageBus.Contracts/Http/Http.cs`.

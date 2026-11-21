@@ -73,7 +73,9 @@ internal static class DeadLettersCommand
                 var title = letter.Envelope.Title ?? letter.Envelope.Type;
                 try
                 {
-                    var (sealedBody, files) = await ResealAsync(keys, http, attachments, letter, to, ct);
+                    var target = new RoleTarget { Role = to };
+                    var recipient = await TaskReseal.PrepareReplayAsync(keys, http, letter.Envelope, target, ct);
+                    var (sealedBody, files) = await TaskReseal.ResealAsync(keys, http, attachments, letter.Envelope, target, ct, recipientKey: recipient);
                     var input = new ReplayDeadLetterInput { ToRole = to, SealedBody = sealedBody, Attachments = files };
                     using var content = new StringContent(MessageBusJson.Serialize(input), Encoding.UTF8);
                     content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
@@ -86,7 +88,7 @@ internal static class DeadLettersCommand
                     failed++;
                     var why = e switch
                     {
-                        MissingKeyException => $"this computer doesn't hold the key it was encrypted for. Run this on a computer that holds the {letter.Role} role.",
+                        MissingKeyException => "this computer doesn't hold every key it was encrypted for. Run this on a computer holding the original role/workspace keys.",
                         McpToolException m => m.Error.Message,
                         AttachmentTransferException a => "an attachment couldn't be encrypted again: " + a.Message,
                         _ => e.Message,
@@ -98,75 +100,6 @@ internal static class DeadLettersCommand
         }, ct));
 
         return new Command("deadletters", "Dead letters: list them, and send encrypted ones to another role.") { list, replay };
-    }
-
-    /// <summary>
-    /// The body sealed again for <paramref name="toRole"/>'s key, when it was sealed for another role's, with the message's
-    /// attachments (each encrypted one downloaded, opened and uploaded again sealed for that key, the original issue); nulls when the service
-    /// can send it as it is (not encrypted, already for that role, or for the workspace key every member holds).
-    /// </summary>
-    private static async Task<(SealedBody? Body, IReadOnlyList<AttachmentRef>? Attachments)> ResealAsync(MachineKeys keys, HttpClient http,
-        AttachmentClient attachments, DeadLetter letter, string toRole, CancellationToken ct)
-    {
-        var envelope = letter.Envelope;
-        if (envelope.Encryption is not { } encryption || envelope.Target is not RoleTarget { Role: var own } || own == toRole) return (null, null);
-        // A body over 64 KB is stored on its own: read it back from there.
-        var ciphertext = envelope.Body.Data is { } data ? Convert.FromBase64String(data) : await StoredBodyAsync(http, keys.WorkspaceId, envelope, ct);
-        var body = await keys.OpenAsync(ciphertext, encryption, ct);
-        var key = await keys.RecipientAsync(new RoleTarget { Role = toRole }, ct);
-        var sealedBytes = BodyCrypto.Seal(body, key);
-        // Inline up to the body limit: the service moves anything over 64 KB to blob storage itself.
-        var sealedBody = new SealedBody
-        {
-            Body = new BodyRef
-            {
-                SizeBytes = sealedBytes.Ciphertext.Length, Sha256 = sealedBytes.Sha256, ContentType = MessageLimits.BodyContentType,
-                Data = Convert.ToBase64String(sealedBytes.Ciphertext),
-            },
-            Encryption = sealedBytes.Encryption,
-        };
-
-        var moved = new List<AttachmentRef>();
-        foreach (var attachment in envelope.Attachments)
-        {
-            if (attachment.Encryption is null)
-            {
-                moved.Add(attachment);
-                continue;
-            }
-            // Opened to a temporary file here (never in memory whole), sealed for the new role on the way back up.
-            var folder = Directory.CreateTempSubdirectory("mbus-replay-");
-            try
-            {
-                var file = Path.Combine(folder.FullName, "attachment");
-                var link = await attachments.DownloadLinkAsync(attachment.Id, ct);
-                await keys.WithRingAsync(async ring =>
-                {
-                    await attachments.DownloadToFileAsync(attachment, link, file, ring, ct);
-                    return true;
-                }, ct);
-                await using var plaintext = File.OpenRead(file);
-                moved.Add(await attachments.UploadAsync(plaintext, new AttachmentUpload(new RoleTarget { Role = toRole }, attachment.Name, attachment.Format,
-                    envelope.ThreadId, attachment.ContentType, attachment.Branch, attachment.BaseCommit), key, ct));
-            }
-            finally
-            {
-                folder.Delete(recursive: true);
-            }
-        }
-        return (sealedBody, envelope.Attachments.Count == 0 ? null : moved);
-    }
-
-    /// <summary>A body stored on its own (over 64 KB), as the service holds it: ciphertext.</summary>
-    private static async Task<byte[]> StoredBodyAsync(HttpClient http, string workspaceId, MessageEnvelope envelope, CancellationToken ct)
-    {
-        using var response = await http.GetAsync(
-            $"api/w/{Uri.EscapeDataString(workspaceId)}/threads/{Uri.EscapeDataString(envelope.ThreadId)}/messages/{Uri.EscapeDataString(envelope.Id)}/body", ct);
-        if (!response.IsSuccessStatusCode) throw new CliException("its body couldn't be read back: " + await ErrorTextAsync(response, ct));
-        var bytes = await response.Content.ReadAsByteArrayAsync(ct);
-        if (bytes.Length != envelope.Body.SizeBytes || Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(bytes)) != envelope.Body.Sha256)
-            throw new CliException("its stored body doesn't match the size and SHA-256 on its message.");
-        return bytes;
     }
 
     private static async Task<IReadOnlyList<DeadLetter>> ListAsync(HttpClient http, string workspaceId, string? role, CancellationToken ct)
