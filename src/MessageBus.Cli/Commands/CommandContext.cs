@@ -73,7 +73,7 @@ public sealed class CommandContext
     public void WriteAgents(IReadOnlyList<DetectedAgent> agents)
     {
         var table = new Table().Border(TableBorder.Rounded)
-            .AddColumn("Agent").AddColumn("Installed").AddColumn("Version").AddColumn("On PATH").AddColumn("Uses mbus").AddColumn("Signed in");
+            .AddColumn("Agent").AddColumn("Installed").AddColumn("Version").AddColumn("On PATH").AddColumn("Uses mbus").AddColumn("Credentials");
         foreach (var agent in agents)
         {
             table.AddRow(
@@ -82,7 +82,8 @@ public sealed class CommandContext
                 new Text(agent.Version ?? (agent.Found ? "unknown" : "")),
                 agent.Found ? YesNo(agent.OnPath) : new Text(""),
                 agent.Found ? YesNo(agent.McpConfigured) : new Text(""),
-                agent.Found ? YesNo(agent.SignedIn) : new Text(""));
+                agent is { Found: true, Kind: AgentKind.Codex, SignedIn: true } ? new Text("configured, model access unverified")
+                    : agent.Found ? YesNo(agent.SignedIn) : new Text(""));
         }
         Console.Write(table);
         foreach (var agent in agents.Where(a => a is { Found: true, NotReady: not null }))

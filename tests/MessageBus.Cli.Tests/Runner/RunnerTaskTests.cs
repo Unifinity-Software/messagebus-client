@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using MessageBus.Cli.Readiness;
 using MessageBus.Cli.Runner;
 using MessageBus.Cli.Tests.Infrastructure;
 using MessageBus.Contracts.Json;
@@ -173,6 +174,63 @@ public sealed class RunnerTaskTests
 
         Assert.Equal($"CLAUDE_CODE_OAUTH_TOKEN={token}", File.ReadAllText(Path.Combine(h.WorkTreeOf("dlv_token"), "env.txt")).Trim());
         Assert.DoesNotContain(token, File.ReadAllText(Path.Combine(h.WorkTreeOf("dlv_token"), "setup-env.txt")));
+    }
+
+    [Theory]
+    [InlineData(null, null, "fixture-openai")]
+    [InlineData("  ", "fixture-stored-codex", "fixture-stored-codex")]
+    [InlineData("fixture-explicit-codex", "fixture-stored-codex", "fixture-explicit-codex")]
+    public async Task Codex_gets_only_its_selected_key_and_setup_and_mcp_receive_no_key(string? explicitKey, string? storedKey, string expected)
+    {
+        var session = new Dictionary<string, string> { ["OPENAI_API_KEY"] = "fixture-openai" };
+        if (explicitKey is not null) session["CODEX_API_KEY"] = explicitKey;
+        var stored = new Dictionary<string, string> { ["OPENAI_API_KEY"] = "fixture-stored-openai" };
+        if (storedKey is not null) stored["CODEX_API_KEY"] = storedKey;
+        await using var h = new RunnerHarness(environment: session, agentEnvironment: stored);
+        var setup = OperatingSystem.IsWindows()
+            ? "(if defined CODEX_API_KEY exit /b 9) & (if defined OPENAI_API_KEY exit /b 10) & echo ready> setup.txt"
+            : "test -z \"${CODEX_API_KEY+x}${OPENAI_API_KEY+x}\" && echo ready > setup.txt";
+        var run = new RunEnvironment { Checkout = CheckoutMode.Empty, SetupCommand = setup };
+
+        Assert.True((await h.DeliverAsync(h.Task("dlv_key_codex", "agt_codex", environment: run,
+            directives: d => { d["env"] = "CODEX_API_KEY,OPENAI_API_KEY"; d["settle"] = "mcp-env"; }))).Accepted);
+        Assert.Equal(SettleStatus.Succeeded, (await h.Service.SettledAsync("dlv_key_codex")).Result.Status);
+        var work = h.WorkTreeOf("dlv_key_codex");
+        Assert.Equal("ready", File.ReadAllText(Path.Combine(work, "setup.txt")).Trim());
+        Assert.Equal([$"CODEX_API_KEY={expected}", "OPENAI_API_KEY=<unset>"], File.ReadAllLines(Path.Combine(work, "env.txt")));
+        var args = File.ReadAllLines(Path.Combine(work, "fake-agent-args.txt"));
+        Assert.Contains("shell_environment_policy.set.CODEX_API_KEY=\"\"", args);
+        Assert.Contains("mcp_servers.mbus.env_vars=[]", args);
+        Assert.DoesNotContain(args, arg => arg.Contains(expected, StringComparison.Ordinal));
+        Assert.DoesNotContain("API_KEY", File.ReadAllText(Path.Combine(work, "mcp-env.txt")));
+
+        Assert.True((await h.DeliverAsync(h.Task("dlv_key_other", directives: d => d["env"] = "CODEX_API_KEY,OPENAI_API_KEY"))).Accepted);
+        Assert.Equal(SettleStatus.Succeeded, (await h.Service.SettledAsync("dlv_key_other")).Result.Status);
+        Assert.Equal(["CODEX_API_KEY=<unset>", "OPENAI_API_KEY=<unset>"], File.ReadAllLines(Path.Combine(h.WorkTreeOf("dlv_key_other"), "env.txt")));
+    }
+
+    [Theory]
+    [InlineData("codex-missing-auth", "no API credential reached the provider")]
+    [InlineData("codex-ineligible", "Codex-eligible sign-in or API project")]
+    public async Task A_Codex_provider_refusal_is_actionable_and_never_echoes_the_key(string mode, string advice)
+    {
+        const string key = "fixture-provider-refusal";
+        var log = new StringWriter();
+        await using var h = new RunnerHarness(environment: new Dictionary<string, string> { ["OPENAI_API_KEY"] = key }, log: log,
+            extensions: e => e with { Readiness = new RunnerReadiness(log) });
+        var run = new RunEnvironment { Checkout = CheckoutMode.Empty, Logs = LogCapture.Local };
+        Assert.True((await h.DeliverAsync(h.Task("dlv_codex_refusal", "agt_codex", environment: run, directives: d => d["mode"] = mode))).Accepted);
+        var settle = await h.Service.SettledAsync("dlv_codex_refusal");
+        await h.Engine.StopAsync();
+
+        Assert.Equal(DeclineReason.MachineNotReady, settle.Declined);
+        Assert.Equal(SettleStatus.Abandoned, settle.Result.Status);
+        Assert.Contains(advice, settle.Result.Error);
+        Assert.DoesNotContain(key, settle.Result.Error);
+        Assert.DoesNotContain(key, log.ToString());
+        var logFile = Path.Combine(Path.GetDirectoryName(h.WorkTreeOf("dlv_codex_refusal"))!, "agent.log");
+        Assert.Contains("[redacted]", File.ReadAllText(logFile));
+        Assert.DoesNotContain(key, File.ReadAllText(logFile));
     }
 
     [Fact]

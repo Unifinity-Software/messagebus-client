@@ -49,7 +49,8 @@ Everything is an environment variable. Secrets can also come from your secret st
 | `MBUS_MACHINE_NAME` | How the dashboard names this machine. |
 | `MBUS_LOCATION` | The machine's Location label in the dashboard. |
 | `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` | Claude Code (the token comes from `claude setup-token`). Secret. |
-| `OPENAI_API_KEY` | Codex. Secret. |
+| `CODEX_API_KEY` | Codex API key. Secret. Takes precedence over `OPENAI_API_KEY`. |
+| `OPENAI_API_KEY` | Fallback Codex API key. Secret. The runner passes it to Codex as `CODEX_API_KEY`. |
 | The key for OpenCode's provider | OpenCode, for example `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`. Secret. |
 | `COPILOT_GITHUB_TOKEN` | GitHub Copilot CLI: a fine-grained token with the "Copilot Requests" permission. Secret. |
 
@@ -269,9 +270,21 @@ machine identity before starting the runner. An interrupted enrollment reuses th
 key, including when the service enrolled the machine but its response was lost.
 
 The new shared machine appears on Fleet. Approve it if required, assign its roles and confirm
-**Tasks at once** is one for the initial deployment. Run a Claude Code task and a Codex task,
-then stop and start the ACI group and repeat them. The machine ID and role assignments must stay
-the same.
+**Tasks at once** is one for the initial deployment. A credentials check (`mbus doctor`, runner
+startup or a Fleet scan) establishes that Codex can be offered work while model access is still
+unverified. When you can invoke mbus directly on the runner, `mbus doctor --smoke --agent codex`
+runs a bounded model-backed edit, build, test and commit in a scratch checkout.
+
+For ACI acceptance, run a small Claude Code task and a Codex task on this runner. For Codex, use a
+single read-only request without a checkout, such as “Reply with `codex-ready`,” with a five-minute
+role time limit. Verify the task succeeds, returns the requested reply and reports Codex output
+tokens. Stop and start the ACI group and repeat both tasks. Verify the machine ID and role
+assignments stayed the same. Keep key values out of task prompts, commands and logs.
+
+If OpenAI reports missing authentication or rejects the key, check the configured secret and
+restart the runner. If OpenAI refuses Codex because of the organization's monthly API Credits
+benefit for ChatGPT subscriptions, ask the organization owner for a Codex-eligible sign-in or API
+project, then retry the task. Model access is verified by a completed model request.
 
 On later starts the container restores the same identity into owner-only local files. It does
 not enroll again and does not need the enrollment API key. After the first successful enrollment,

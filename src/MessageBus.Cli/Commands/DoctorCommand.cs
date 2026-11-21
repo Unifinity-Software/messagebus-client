@@ -187,6 +187,10 @@ internal static class DoctorCommand
             {
                 Bad(name, "it doesn't look signed in. Fix: sign in to it on this machine, then mbus connect --rescan.");
             }
+            else if (agent.Kind == AgentKind.Codex)
+            {
+                Note(name, $"{agent.Version ?? "version unknown"}, credentials configured. {CodexAuthentication.VerifyAccess}");
+            }
             else
             {
                 Good(name, $"{agent.Version ?? "version unknown"}, {(agent.Kind == AgentKind.OpenCode ? "provider available" : "signed in")}");

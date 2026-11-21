@@ -21,7 +21,7 @@ public sealed class SmokeTestTests : IDisposable
     private static readonly string Build = OperatingSystem.IsWindows() ? @".\build.cmd" : "sh build.sh";
     private static readonly string Test = OperatingSystem.IsWindows() ? @".\test.cmd" : "sh test.sh";
 
-    private SmokeTest Smoke(string directives, bool keep = false) => new(new SmokeTestOptions
+    private SmokeTest Smoke(string directives, bool keep = false, string? openAiKey = null) => new(new SmokeTestOptions
     {
         WorkRoot = WorkRoot,
         Git = CommandLocator.Find("git", Environment.GetEnvironmentVariable, []) ?? throw new InvalidOperationException("git is needed for these tests."),
@@ -29,9 +29,38 @@ public sealed class SmokeTestTests : IDisposable
         Sandbox = new NoSandbox(),
         Keep = keep,
         PromptSuffix = directives,
+        GetEnvironmentVariable = name => name == "OPENAI_API_KEY" ? openAiKey : null,
     });
 
     private static SmokeAgent FakeClaude => new(AgentKind.ClaudeCode, new ClaudeCodeAdapter(), RunnerHarness.FakeAgentPath);
+
+    [Fact]
+    public async Task Codex_smoke_checks_a_model_response_using_the_normalized_key()
+    {
+        var codex = new SmokeAgent(AgentKind.Codex, new CodexAdapter(null, codexHome: Path.Combine(_root, ".codex")), RunnerHarness.FakeAgentPath);
+        var token = TestContext.Current.CancellationToken;
+        const string key = "fixture-smoke-credential";
+        var success = await Smoke($"""
+            fake-agent: env=CODEX_API_KEY
+            fake-agent: replace=word.txt|word=before|word=after
+            fake-agent: run={Build} && {Test}
+            fake-agent: commit={SmokeTest.CommitMessage}
+            """, keep: true, openAiKey: key).RunAsync(codex, token);
+        Assert.True(success.Passed, string.Join("; ", success.Steps.Select(step => step.Detail)));
+        Assert.Equal("CODEX_API_KEY=" + key, File.ReadAllText(Path.Combine(success.KeptFolder!, "work", "env.txt")).Trim());
+        Assert.Contains("completed an authenticated model request", success.Steps.First().Detail);
+    }
+
+    [Fact]
+    public async Task Codex_smoke_reports_a_provider_refusal_without_its_key()
+    {
+        var codex = new SmokeAgent(AgentKind.Codex, new CodexAdapter(null, codexHome: Path.Combine(_root, ".codex")), RunnerHarness.FakeAgentPath);
+        const string key = "fixture-smoke-credential";
+        var refused = await Smoke("fake-agent: mode=codex-ineligible", openAiKey: key).RunAsync(codex, TestContext.Current.CancellationToken);
+        Assert.False(refused.Passed);
+        Assert.Contains("Codex-eligible sign-in or API project", Assert.Single(refused.Steps).Detail);
+        Assert.DoesNotContain(key, Report([refused]).Output);
+    }
 
     [Fact]
     public async Task An_agent_that_edits_builds_tests_and_commits_passes_every_step_and_its_run_folder_is_removed()

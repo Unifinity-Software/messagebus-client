@@ -89,6 +89,8 @@ public sealed record AgentLaunchContext(string Prompt, string PromptFile, Permis
 {
     /// <summary>Named tools to keep from the agent's own settings; empty turns this off.</summary>
     public IReadOnlyList<string> KeepAgentTools { get; init; } = KeepAgentTools ?? [];
+
+    internal bool UsesCodexEnvironmentKey { get; init; }
 }
 
 /// <summary>An agent command line.</summary>

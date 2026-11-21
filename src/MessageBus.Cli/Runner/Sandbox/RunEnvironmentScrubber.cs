@@ -47,6 +47,7 @@ public static class RunEnvironmentScrubber
     {
         // Windows names are case-insensitive; proxy variables are lower-case as often as not.
         var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        if (MessageBus.Cli.Agents.CodexAuthentication.IsKeyVariable(name)) return false;
         return Names.Any(n => string.Equals(n, name, n.EndsWith("_PROXY", StringComparison.Ordinal) ? StringComparison.OrdinalIgnoreCase : comparison))
             || Prefixes.Any(p => name.StartsWith(p, comparison))
             || extra.Any(n => string.Equals(n, name, comparison));

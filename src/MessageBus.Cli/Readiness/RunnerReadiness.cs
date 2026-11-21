@@ -59,10 +59,13 @@ public sealed class RunnerReadiness(TextWriter log, TimeProvider? time = null, F
             }
         }
         var found = inventory.Agents.Where(a => a.Found).ToList();
-        var ready = found.Where(a => a.NotReady is null).Select(a => $"{AgentKinds.DisplayName(a.Kind)}{(a.Version is { } v ? " " + v : "")}").ToList();
+        var ready = found.Where(a => a is { Kind: not AgentKind.Codex, NotReady: null }).Select(a => $"{AgentKinds.DisplayName(a.Kind)}{(a.Version is { } v ? " " + v : "")}").ToList();
+        var codexConfigured = found.Any(a => a is { Kind: AgentKind.Codex, SignedIn: true, NotReady: null });
         var tools = inventory.Capabilities.Where(c => c.StartsWith(CapabilityNames.ToolPrefix + ":", StringComparison.Ordinal))
             .Select(c => c[(CapabilityNames.ToolPrefix.Length + 1)..]).ToList();
-        _log.WriteLine(ready.Count > 0 ? $"Ready to run: {string.Join(", ", ready)}." : "No agent on this machine can take work yet.");
+        if (ready.Count > 0) _log.WriteLine($"Ready to run: {string.Join(", ", ready)}.");
+        if (codexConfigured) _log.WriteLine($"Codex credentials configured. {Local(CodexAuthentication.VerifyAccess)}");
+        if (ready.Count == 0 && !codexConfigured) _log.WriteLine("No agent on this machine can take work yet.");
         foreach (var problem in found.Where(a => a.NotReady is not null).GroupBy(a => a.NotReady!))
         {
             _log.WriteLine($"Not ready: {string.Join(", ", problem.Select(a => AgentKinds.DisplayName(a.Kind)))}. {Local(problem.Key)}");
@@ -148,6 +151,10 @@ public sealed class RunnerReadiness(TextWriter log, TimeProvider? time = null, F
                 : "git isn't installed on this machine. Fix: install git") + ", then mbus connect --rescan or restart mbus runner.");
         }
         var usedModel = result.Usage is { } usage && usage.TokensIn + usage.TokensOut > 0;
+        if (!usedModel && kind == AgentKind.Codex && CodexAuthentication.Refusal(error) is { } refusal)
+        {
+            return (false, refusal);
+        }
         if (!usedModel && (error.Contains("Not logged in", StringComparison.OrdinalIgnoreCase)
             || error.Contains("Please run /login", StringComparison.OrdinalIgnoreCase)
             || error.Contains("Invalid API key", StringComparison.OrdinalIgnoreCase)))
@@ -180,7 +187,8 @@ public sealed class RunnerReadiness(TextWriter log, TimeProvider? time = null, F
         return settle with
         {
             Declined = DeclineReason.MachineNotReady,
-            Result = settle.Result with { Status = SettleStatus.Abandoned, Error = $"{Tagged(verdict.Reason)} ({settle.Result.Error})" },
+            Result = settle.Result with { Status = SettleStatus.Abandoned, Error = kind == AgentKind.Codex
+                ? Tagged(verdict.Reason) : $"{Tagged(verdict.Reason)} ({settle.Result.Error})" },
         };
     }
 
