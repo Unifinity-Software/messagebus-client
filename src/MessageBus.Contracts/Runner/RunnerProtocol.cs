@@ -360,6 +360,8 @@ public enum DeclineReason
     /// it waits a little and is offered again, so the session is never run twice at once. Not an attempt.
     /// </summary>
     [JsonStringEnumMemberName("session-open")] SessionOpen,
+    /// <summary>This runner has no approved execution runtime for the required verification.</summary>
+    [JsonStringEnumMemberName("verification-unavailable")] VerificationUnavailable,
 }
 
 /// <summary>A download link minted when the delivery was made (never stored in the message).</summary>
@@ -378,6 +380,9 @@ public sealed record DownloadLink
 /// <summary>A task pushed to a runner (<see cref="RunnerRoutes.Deliver"/>).</summary>
 public sealed record TaskDelivery
 {
+    /// <summary>The service-pinned verification definition, supplied only for required verification.</summary>
+    public VerificationSnapshot? Verification { get; init; }
+
     /// <summary>The delivery (<c>dlv_…</c>); progress, heartbeat and settle name it.</summary>
     public required string DeliveryId { get; init; }
 
@@ -659,6 +664,18 @@ public sealed record RunnerProgress
 /// <summary>How a delivery ended (<see cref="ServiceRoutes.Settle"/>).</summary>
 public sealed record RunnerSettle
 {
+    /// <summary>The authenticated runner's verification outcome for this delivery attempt, when reported.</summary>
+    public VerificationResult? Verification { get; init; }
+
+    /// <summary>The leased attempt whose required checks were run.</summary>
+    public int? VerificationAttempt { get; init; }
+
+    /// <summary>The pinned definition digest from the verified delivery.</summary>
+    public string? VerificationDigest { get; init; }
+
+    /// <summary>The trusted <see cref="TaskDelivery.Attempt"/>, sent only when the target advertises <c>settleAttemptV1</c>. A stale attempt must never settle a newer lease.</summary>
+    public int? Attempt { get; init; }
+
     /// <summary>The role whose key this machine refused while opening the task (the original issue).</summary>
     public string? UnreadableRole { get; init; }
 

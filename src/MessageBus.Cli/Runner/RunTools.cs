@@ -20,6 +20,8 @@ public sealed record RunToolsRequest(RunWorkspace Workspace, TaskDelivery Delive
 
     /// <summary>Reports the last non-retryable mbus refusal without trusting files the agent can rewrite.</summary>
     public Action<string, MessageBus.Contracts.Mcp.McpError>? Refused { get; init; }
+
+    internal Action<MessageBus.Contracts.Mcp.SettleInput>? RecordVerifiedTaskSettle { get; init; }
 }
 
 /// <summary>

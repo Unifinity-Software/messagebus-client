@@ -2,19 +2,16 @@ using System.Text.Json.Serialization;
 
 namespace MessageBus.Contracts.Mcp;
 
-/// <summary>Optional capabilities a deployed handler supports when building its MCP tool catalog.</summary>
+/// <summary>Optional catalog features explicitly supported by the service's installed handlers.</summary>
 [Flags]
 public enum McpCatalogFeatures
 {
-    /// <summary>Expose only the established tool contracts.</summary>
+    /// <summary>No optional service features.</summary>
     [JsonStringEnumMemberName("none")] None = 0,
-
-    /// <summary>The handler supports verified task workflows.</summary>
+    /// <summary>Required task verification sends and their request schemas.</summary>
     [JsonStringEnumMemberName("verified-tasks")] VerifiedTasks = 1,
-
-    /// <summary>The handler supports retargeting queued tasks.</summary>
+    /// <summary>Reserved for task retargeting integration.</summary>
     [JsonStringEnumMemberName("retarget")] Retarget = 2,
-
-    /// <summary>The handler supports role proposals.</summary>
+    /// <summary>Reserved for role proposal integration.</summary>
     [JsonStringEnumMemberName("role-proposals")] RoleProposals = 4,
 }

@@ -118,12 +118,42 @@ public class JsonContractTests
         [
             "specVersion", "id", "type", "source", "time", "workspaceId", "target", "replyTo", "threadId", "parentId",
             "projectId", "title", "labels", "refs", "expect", "priority", "dedupeKey", "expiresAt", "hopCount", "trace",
-            "sender", "body", "attachments", "encryption", "excludeAgents", "model",
+            "sender", "body", "attachments", "encryption", "excludeAgents", "model", "verification",
         ];
         Assert.Equal(expected, node.Select(p => p.Key));
         Assert.Equal(["algorithm", "keyWrapAlgorithm", "keyId", "wrappedKey", "nonce", "ephemeralPublicKey"],
             node["encryption"]!.AsObject().Select(p => p.Key));
         Assert.Equal("traceParent", node["trace"]!.AsObject().First().Key);
+    }
+
+    [Fact]
+    public void Verification_and_current_friction_are_independent_of_completion_and_friction_history()
+    {
+        var json = MessageBusJson.Serialize(ContractSamples.Thread with { CurrentFrictionKinds = [] });
+        var thread = MessageBusJson.Deserialize<ThreadSummary>(json)!;
+
+        Assert.Equal(SettleStatus.Succeeded, thread.Result!.Status);
+        Assert.Equal(VerificationState.Failed, thread.Verification!.State);
+        Assert.Empty(thread.CurrentFrictionKinds!);
+        Assert.Equal(["missing-context"], thread.Result.FrictionKinds);
+
+        var legacy = MessageBusJson.Deserialize<ThreadSummary>(
+            MessageBusJson.Serialize(thread with { Verification = null, CurrentFrictionKinds = null }))!;
+        Assert.Null(legacy.Verification);
+        Assert.Null(legacy.CurrentFrictionKinds);
+    }
+
+    [Fact]
+    public void Agent_settlement_has_no_verification_claim_on_the_wire()
+    {
+        var input = MessageBusJson.Deserialize<SettleInput>("""
+            {"threadId":"thr_test","result":{"status":"succeeded","verification":{"state":"passed","environment":"frontend"}},
+             "verification":{"state":"passed","environment":"frontend"}}
+            """)!;
+        var serialized = MessageBusJson.Serialize(input);
+
+        Assert.DoesNotContain("verification", serialized);
+        Assert.Equal(SettleStatus.Succeeded, input.Result.Status);
     }
 
     [Fact]

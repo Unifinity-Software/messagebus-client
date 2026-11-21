@@ -55,13 +55,14 @@ Results contain `threadId`, `messageId`, `previousMessageId`, `from`, `to`, `sta
 optional `queuePosition` and `notice`. An already-applied operation returns its historical result and
 never changes a later task generation.
 
-`McpToolSpec.RequiredFeatures` declares the handler capabilities required to advertise a tool. The flags
+`McpToolSpec.Features` declares the remote handler capabilities required to advertise a tool. The flags
 `McpCatalogFeatures` are `None=0`, `VerifiedTasks=1`, `Retarget=2`, and `RoleProposals=4`; flags reserve
 capabilities and do not imply their handlers are deployed. The original positional `McpToolSpec`
 constructor/deconstruction and `McpToolCatalog.Tools(bool, IReadOnlySet<string>?)` signature remain intact.
 The additive `Tools(bool, IReadOnlySet<string>?, McpCatalogFeatures)` overload applies feature support
-and the `only` permission filter independently: both must allow a tool. The original overload defaults
-remote catalogs to `None`, hiding retarget, and local catalogs to their implemented `Retarget` capability.
+and the `only` permission filter independently for remote tools: both must allow a tool. The original
+overload defaults remote catalogs to `None`, hiding retarget; local catalogs expose implemented local
+tools while excluding service-only names and retaining the permission filter.
 A service with a deployed retarget handler opts in with `McpCatalogFeatures.Retarget`. Independently of catalog
 advertising, it calls the actual remote retarget handler with `dryRun: true` before reading message
 content, accessing recipient keys, downloading, resealing or uploading. JSON-RPC unknown-tool errors
@@ -120,8 +121,8 @@ grants (`/api/w/{workspaceId}/keys*`), attachment links (`/api/w/{workspaceId}/a
 ## MCP tools
 
 `src/MessageBus.Contracts/Mcp/McpTools.cs` (`McpToolNames`) names the tools, and `McpToolCatalog.cs` gives each one
-its description and input schema. The service's remote `/mcp` endpoint and the local `mbus mcp` server show the same
-catalog with the same input and result types:
+its description and input schema. The catalog shared by the service's remote `/mcp` endpoint and the local
+`mbus mcp` server includes:
 
 `send`, `send_many`, `wait`, `watch`, `inbox`, `progress`, `settle`, `status`, `cancel`, `move`, `ensure_project`,
 `find_project`, `complete_project`, `directory`, `describe_role`, `subscribe`, `fetch_attachment`, `retry`,
@@ -135,6 +136,46 @@ plaintext, which is protected in transit and at rest but not end to end.
 
 Adding a tool, or a field to a tool's input or result, follows the compatibility rules above: an older local server
 must keep working against a newer service, and the reverse.
+
+## Optional approval impact and settlement attempt
+
+`GET /api/server` may include `capabilities: ["approvalAffectedV1", "settleAttemptV1"]`.
+Trust these only when `product` is `messagebus.ai`. Each upgraded producer checks the actual
+configured target through its authenticated HTTP client, without a positive cache (request
+`Cache-Control: no-cache, no-store`). Missing, unknown or failed discovery means unsupported.
+Servers advertise each capability only when its complete implementation is deployed and enabled.
+
+`request_approval.affected` and `ApprovalResult.affected` are optional plain text. It is an
+author-supplied impact description, never verified targets or authority to act. Normalize CRLF
+and CR to LF, trim leading/trailing whitespace, and map empty to null. Validate before sending:
+at most 1000 Unicode scalar values after normalization (supplementary characters count once),
+reject invalid surrogates and controls other than LF/TAB; never truncate. Controls are rejected
+before trimming too. The local proxy scans affected for secrets alongside title/detail.
+Both local and remote generated schemas expose affected with `maxLength: 1000`.
+
+For every non-null affected request, the local producer first freshly verifies
+`approvalAffectedV1`; unsupported discovery refuses before POST. It never drops affected and
+retries. The server must also refuse affected-bearing requests when the feature is disabled,
+including a rollout race after discovery. Request and wait responses echo the normalized
+affected and `requestDigest`. The local proxy rejects a missing/different echo or missing digest
+as a protocol failure, never authorization. For requests made in the same local session it also
+checks later wait responses against the original affected and digest. Affected participates in
+the server's v1 digest exactly as normalized and displayed; omitted/null affected uses the legacy
+digest path. Stored old digests must not be rewritten. New client/old server supports omitted
+affected and explicitly refuses affected; old client/new server remains unchanged. A new
+client/new server round-trips affected only with the capability and exact response echo.
+
+`SettleInput.attempt` and `RunnerSettle.attempt` are optional integers copied from
+`TaskDelivery.attempt`. With `settleAttemptV1`, the server must reject a stale mismatched attempt
+or return that attempt's immutable prior receipt, never apply it to a newer lease. Direct remote
+MCP callers may supply the delivered attempt; the local agent's schema hides it. Runner-owned
+local tools inject only their trusted in-memory delivery attempt, overriding agent arguments
+and kept-answer files, and never trust the agent-writable delivery file for it. `AgentRun` also
+copies its own delivery attempt, never the agent's settle file. Both network producers freshly
+gate the field on `settleAttemptV1` and omit it against older/unknown servers, preserving the
+existing settlement behavior. Old untagged submissions cannot prove identity across a reused
+delivery: consumers must qualify that history as identity-incomplete rather than inventing an
+attempt or claiming exactly-once observations. No wire lease history is added.
 
 ## The runner connection
 
@@ -235,3 +276,114 @@ work, lets running tasks finish, reports each stage on `/api/runner/update-progr
 2. Release the client.
 3. The service adopts the release and starts using the new behaviour.
 4. Users update `mbus`.
+
+## Required task verification
+
+The local `directory` accepts optional `verificationRepositoryId` in `github:<numeric-id>` form.
+The local MCP server forwards the ordinary role filters to the service's `directory` and uses the
+same authenticated HTTP client for
+`GET /api/w/{workspaceId}/environments?repositoryId=github:<numeric-id>`. This endpoint requires
+`workspace.messages.send`. Its response is exposed as optional `DirectoryResult.verification`:
+
+- `registryVersion` (currently 1) and `requiredTaskRequestsSupported` (boolean).
+- `recipes[]` with `id`, `revision`, optional `nodeMajor` and `checks[]`. The initial recipe is
+  `node-npm-ci` at revision 1 with Node 24 and checks `test`, `typecheck` and `build`.
+- `environments[]` with `id`, `version`, `recipeId`, `recipeRevision` and
+  `approvedSharedMachineCount`. The count records approval, independent of availability.
+
+Ordinary directory calls make no discovery request. A 404 from the discovery route leaves the role
+directory intact and omits `verification`. Missing discovery, an unknown registry version or
+`requiredTaskRequestsSupported: false` blocks required dispatch. Discovery describes approvals for the
+specified repository. The verified send independently authorizes the pinned execution target and the
+requested checks, including when no eligible runner is currently available.
+
+A role task can require a workspace-approved environment through the optional
+`SendInput.verification` object `{environment, requiredChecks}`. Both properties are required when
+the object is supplied. Phase-one check keys are `test`, `typecheck`, `build` and `browser`.
+Browser verification is blocked until a compatible implementation is enrolled. The hosted service
+must validate role permission, workspace approval, repository provenance and check selection before
+queuing any work. Labels, encrypted bodies and bundle metadata cannot establish repository provenance.
+
+The local `send` tool and `mbus send --input` accept the same object. `mbus send` also accepts
+`--environment <id>` with repeated `--required-check <key>`. The local server sends the sealed
+request to the service-only `send_verified` tool on `/mcp`, using the same input and result types as
+`send`. A batch containing any such request uses `send_many_verified` with the ordinary batch
+input and result types. The service must validate verification for the whole batch before
+enqueueing any member. A service that does not implement the new tools rejects the call. The local
+server never retries through the ordinary send tools. The ordinary service send tools must reject
+explicit verification requirements and must never downgrade an inherited requirement. Dedupe must
+not return a task with weaker requirements.
+
+Before packaging a required send or any member of a mixed batch, the local client reads the
+authenticated `/environments` registry (without a repository filter) and requires
+`registryVersion: 1` and `requiredTaskRequestsSupported: true`. It then checks `tools/list` for
+the particular verified handler. A listed tool alone never authorizes dispatch. A missing,
+disabled, malformed or unsupported registry, or a missing handler, refuses the whole request
+without creating ordinary children. Ordinary sends do not make these negotiation requests.
+`McpToolCatalog.Tools(local: false)` omits verified tools and optional verification request schemas
+by default. A service with their handlers installed explicitly uses
+`Tools(bool local, IReadOnlySet<string>? only, McpCatalogFeatures features)` with
+`McpCatalogFeatures.VerifiedTasks`. The original two-parameter signature and all constructor
+signatures remain available. The flags in `MessageBus.Contracts.Mcp` are `None = 0`,
+`VerifiedTasks = 1`, `Retarget = 2`, and `RoleProposals = 4`; the latter two reserve integration
+values and do not enable additional tools here. Name filtering cannot enable an unsupported
+feature. Local `send` and `send_many` retain the supported verification request schema and route
+negotiated requests to the service-only tools, which remain hidden locally. Catalog visibility
+never replaces the live registry/handler preflight or service authorization.
+
+The service persists the normalized request as `MessageEnvelope.verification`, including on the
+root message used by local retry. Retry sends it again with `sourceThreadId`. The service must
+check the source thread's persisted requirements even when an older client omits this object, and
+retain the requirements and pinned definition on retry and replay. The service rechecks approvals
+and runner eligibility at claim and checks that the immutable input still matches its authorization.
+
+`TaskDelivery.verification` is optional and carries the service-pinned
+`{environment, recipe, version, digest, nodeVersion, npmVersion, repository, remote, revision,
+baseRevision, requiredChecks}`. All members of a supplied snapshot are required. The first recipe
+is `node-npm-ci`. `repository` is the trusted repository identity, `remote` the authorized HTTPS
+remote, and `revision` and `baseRevision` full immutable commit IDs. The service sends required
+deliveries exclusively to positively enrolled, compatible runners. A runner that cannot provide
+the required execution boundary declines before checkout with `verification-unavailable`. The
+service records the blocked reason independently of ordinary task completion.
+
+Eligible runners report `verification:node-npm-ci-v1` in `MachineInventory.capabilities`.
+Runtime enrollment and capability advertising stay disabled until the shared protected-execution
+lifecycle supplies current session/generation/recipe/policy/proof-bound readiness, including
+storage bounds, authenticated receipts and cleanup proof. The internal readiness adapter defaults
+to unsupported; owner environment settings and executable/bubblewrap preflight cannot establish
+this readiness. Inventory and delivery admission re-read the adapter, so missing or invalidated
+readiness withholds the capability and refuses required deliveries before checkout. The
+service also needs to positively enroll the runner in the workspace's approved pool and match the
+delivery's pinned environment and repository. The capability alone does not attest to deployer
+egress control or authorize a delivery. [Dedicated Node verifier setup](node-verifier.md) describes
+the required runner settings and the supported recipe.
+
+The verifier fetches both pinned full SHA-1 commit IDs from the approved HTTPS remote and requires
+the base to be an ancestor of the input revision. If anonymous fetch fails, it may use the
+existing repository credential endpoint for the held delivery and exact approved remote with
+`canPush: false`. The service must honor the read-only request for verified editing deliveries
+as well as reviews. The runner uses this credential only for the pinned Git fetch. It accepts a
+single repository without a session resume. An optional input bundle does not establish provenance
+or supply objects to the verifier. A review (`task.review` or a dot-delimited subtype) checks the
+pinned input. An editing run starts on `mbus-verified` with dependencies restored using the fixed
+recipe. It checks the committed descendant on `mbus-verified` in a fresh checkout after the agent
+exits. The runner serves the agent's settle reply but owns code
+return for verified tasks. Its reply attaches the exact checked commit and the runner settlement
+includes the corresponding `git.commit` ref. The runner cannot report a coding pass before that
+reply has been accepted. Neither the send contract nor the shape of the verification snapshot changes.
+
+Only authenticated runner settlement at `POST /api/runner/settle` may report
+`RunnerSettle.verification`, accompanied by `verificationAttempt` and `verificationDigest`.
+The service checks these against the current lease, pinned definition and required immutable
+revision. The agent's MCP `settle` has no such field. The verification
+result shape is `{state, environment, reason?, revision?, checks?}`, with `checks` entries
+`{name, state, reason?}`. State values are `pending`, `blocked`, `failed` and `passed`. A
+pass requires all requested checks to have run successfully at the required revision. The Node
+runner uses fixed reason codes when present: `revision-unverified`, `dependency-policy-changed`,
+`toolchain-missing`, `restore-failed`, `check-failed`, `check-unavailable`, `timed-out`, and `cancelled`.
+The dependency policy code indicates that a supported manifest, lockfile, or Git attributes file
+differs from the approved base. Process output does not appear in these fields.
+
+The service exposes this result as optional `verification` on full thread summaries and compact
+status tasks. Omission represents legacy work. Optional `currentFrictionKinds` is authoritative
+when present, including an empty array. Existing `frictionKinds` continues to represent history.

@@ -80,6 +80,7 @@ public static class MessageBusJson
     UseStringEnumConverter = true,
     AllowOutOfOrderMetadataProperties = true)]
 [JsonSerializable(typeof(JsonElement))]
+[JsonSerializable(typeof(Http.ServerCapabilitiesResponse))]
 // Messaging
 [JsonSerializable(typeof(MessageEnvelope))]
 [JsonSerializable(typeof(MessageTarget))]
@@ -191,6 +192,7 @@ public static class MessageBusJson
 [JsonSerializable(typeof(AttachSpec))]
 [JsonSerializable(typeof(IReadOnlyList<DownloadLink>))]
 // MCP
+[JsonSerializable(typeof(McpCatalogFeatures))]
 [JsonSerializable(typeof(McpError))]
 [JsonSerializable(typeof(SealedBody))]
 [JsonSerializable(typeof(SendInput))]
@@ -214,7 +216,6 @@ public static class MessageBusJson
 [JsonSerializable(typeof(StatusResult))]
 [JsonSerializable(typeof(ThreadBrief))]
 [JsonSerializable(typeof(RetargetInput))]
-[JsonSerializable(typeof(McpCatalogFeatures))]
 [JsonSerializable(typeof(RetargetResult))]
 [JsonSerializable(typeof(RetargetMetadata))]
 [JsonSerializable(typeof(MoveInput))]
@@ -229,6 +230,7 @@ public static class MessageBusJson
 [JsonSerializable(typeof(CompleteProjectResult))]
 [JsonSerializable(typeof(DirectoryInput))]
 [JsonSerializable(typeof(DirectoryResult))]
+[JsonSerializable(typeof(VerificationDirectory))]
 [JsonSerializable(typeof(DescribeRoleInput))]
 [JsonSerializable(typeof(DescribeRoleResult))]
 [JsonSerializable(typeof(SubscribeInput))]

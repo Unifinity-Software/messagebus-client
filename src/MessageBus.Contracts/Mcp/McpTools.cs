@@ -24,6 +24,10 @@ public static class McpToolNames
     public const string Send = "send";
     /// <summary>Send several messages at once, optionally with a join.</summary>
     public const string SendMany = "send_many";
+    /// <summary>Service-only send that atomically enforces a required verification request.</summary>
+    public const string SendVerified = "send_verified";
+    /// <summary>Service-only batch send that atomically enforces required verification requests.</summary>
+    public const string SendManyVerified = "send_many_verified";
     /// <summary>Wait for any or all of a set of threads (or a project's) to finish, up to a timeout.</summary>
     public const string Wait = "wait";
     /// <summary>Read new events on a thread or project since a cursor.</summary>
@@ -73,11 +77,14 @@ public static class McpToolNames
     [
         Send, SendMany, Wait, Watch, Inbox, Progress, Settle, Status, Cancel, Retarget, Move,
         EnsureProject, FindProject, CompleteProject, Directory, DescribeRole, Subscribe, FetchAttachment, Retry,
-        RequestApproval, WaitApproval, OpenInbox,
+        RequestApproval, WaitApproval, OpenInbox, SendVerified, SendManyVerified,
     ];
 
     /// <summary>Tools only the local <c>mbus mcp</c> server has (the remote endpoint can't decrypt or touch this machine's files).</summary>
     public static IReadOnlyList<string> LocalOnly { get; } = [FetchAttachment, Retry];
+
+    /// <summary>Tools that require a hosted service implementation and are never exposed by the local server.</summary>
+    public static IReadOnlyList<string> ServiceOnly { get; } = [SendVerified, SendManyVerified];
 }
 
 /// <summary>Error codes a tool (or a REST call, in <see cref="Http.MbusHeaders.Error"/>) returns.</summary>
@@ -133,6 +140,9 @@ public sealed record SealedBody
 /// <summary>Input of <c>send</c> (and each item of <c>send_many</c>).</summary>
 public sealed record SendInput
 {
+    /// <summary>The verification required for this role-targeted task, if any.</summary>
+    public VerificationRequest? Verification { get; init; }
+
     /// <summary>Required provenance for a supported retry. The server reads its project and execution owner; labels cannot override them.</summary>
     public string? SourceThreadId { get; init; }
 
@@ -451,6 +461,9 @@ public sealed record ProgressResult
 /// <summary>Input of <c>settle</c>.</summary>
 public sealed record SettleInput
 {
+    /// <summary>The delivered attempt, when the target advertises <c>settleAttemptV1</c>. Injected by the runner's local tools; remote callers use the attempt they received.</summary>
+    public int? Attempt { get; init; }
+
     /// <summary>Optional short notes (at most 12). Local tool only: sealed into reply.friction; only kinds reach the service.</summary>
     public IReadOnlyList<FrictionNote> Friction { get; set; } = [];
 
@@ -542,6 +555,12 @@ public sealed record StatusResult
 /// <summary>One thread in a compact <c>status</c> result: what it is, where it stands and how it ended.</summary>
 public sealed record ThreadBrief
 {
+    /// <summary>The current verification state, absent for tasks without verification requirements.</summary>
+    public VerificationResult? Verification { get; init; }
+
+    /// <summary>Current friction kinds when provided, including an empty list when no kind applies.</summary>
+    public IReadOnlyList<string>? CurrentFrictionKinds { get; init; }
+
     /// <summary>The thread.</summary>
     public required string ThreadId { get; init; }
 
@@ -716,6 +735,9 @@ public sealed record DirectoryInput
 
     /// <summary>Only agents online now.</summary>
     public bool OnlineOnly { get; init; }
+
+    /// <summary>Local MCP only: discover verification approvals for this stable <c>github:&lt;numeric-id&gt;</c> repository identity.</summary>
+    public string? VerificationRepositoryId { get; init; }
 }
 
 /// <summary>Result of <c>directory</c>.</summary>
@@ -723,6 +745,9 @@ public sealed record DirectoryResult
 {
     /// <summary>The roles.</summary>
     public IReadOnlyList<DirectoryRole> Roles { get; set; } = [];
+
+    /// <summary>The repository's verification registry, if requested through local MCP and available from the service.</summary>
+    public VerificationDirectory? Verification { get; init; }
 }
 
 /// <summary>Input of <c>describe_role</c>.</summary>
@@ -834,6 +859,9 @@ public sealed record RetryInput
 /// </summary>
 public sealed record RequestApprovalInput
 {
+    /// <summary>Author-supplied plain-text impact, not verified targets or authority. Normalize line endings to LF, trim, and map empty to null; at most 1000 Unicode scalars, no invalid surrogates or controls except LF/TAB. Requires <c>approvalAffectedV1</c>.</summary>
+    public string? Affected { get; init; }
+
     /// <summary>What to approve, one short sentence (the approver sees it as the title).</summary>
     public required string Title { get; init; }
 
@@ -891,6 +919,9 @@ public enum ApprovalState
 /// <summary>Result of <c>request_approval</c> and <c>wait_approval</c> (the original issue).</summary>
 public sealed record ApprovalResult
 {
+    /// <summary>The normalized author-supplied impact shown to the approver, when supplied; not verified targets or authority.</summary>
+    public string? Affected { get; init; }
+
     /// <summary>The approval id (<c>apr_…</c>), for <c>wait_approval</c>.</summary>
     public required string ApprovalId { get; init; }
 

@@ -9,6 +9,12 @@ namespace MessageBus.Contracts.Messaging;
 /// </summary>
 public sealed record ThreadSummary
 {
+    /// <summary>The current verification state, absent for tasks without verification requirements.</summary>
+    public VerificationResult? Verification { get; init; }
+
+    /// <summary>Current friction kinds when provided, including an empty list when no kind applies.</summary>
+    public IReadOnlyList<string>? CurrentFrictionKinds { get; init; }
+
     /// <summary>Immutable original execution owner for restricted work and its descendants.</summary>
     public string? ExecutionOwnerSubjectId { get; init; }
 

@@ -71,6 +71,10 @@ public static class RunnerCommand
             : null;
         isolation = isolation with { SharedNetwork = sharedNetwork };
         var sandbox = Sandbox.RunIsolation.Create(isolation, covered);
+        var verification = await NodeVerification.EnrollAsync(host.GetEnvironmentVariable,
+            sandbox is Sandbox.RunIsolation { SupportsVerificationAgent: true } && parts.Tools is not null && options.KeyStore == "file",
+            parts.ReturnCommits is not null, time, covered, isolation.Credentials, isolation.WorkRoot, cancellationToken,
+            parts.VerificationReadiness).ConfigureAwait(false);
         var readiness = new Readiness.RunnerReadiness(covered, time, parts.Advice);
         var engine = new RunnerEngine(options, host, new HttpRunnerServiceClient(http), time, log,
             parts with
@@ -79,6 +83,7 @@ public static class RunnerCommand
                 Sandbox = new Readiness.ToolPathSandbox(sandbox, toolPaths,
                     () => Readiness.ToolPaths.RunVariables(host.HomeDirectory, host.GetEnvironmentVariable)),
                 Readiness = readiness,
+                Verification = verification,
                 WorkActivityChanged = working => sleep?.SetWorking(working),
                 // Isolation off: runs inherit this machine's environment, its mbus sign-in included.
                 Tools = sandbox is NoSandbox ? null : parts.Tools,

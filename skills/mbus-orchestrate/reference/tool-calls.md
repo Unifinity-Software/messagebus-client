@@ -41,6 +41,35 @@ compete, broadcast; `count`; `distinctVendors`), `requiredCapabilities`, `agents
   `owner-runners` project, don't describe every online agent as eligible; `send`'s
   `availableAgents` and waiting reasons decide.
 
+## Verified send and provenance
+
+After [selecting an approved environment](workflow-steps.md#approved-frontend-verification),
+include the required checks and the pinned commit in the local `send` request:
+
+```json
+{
+  "verification": { "environment": "frontend", "requiredChecks": ["test", "typecheck", "build"] },
+  "refs": [
+    {
+      "kind": "github.commit",
+      "repo": "example-org/example-web",
+      "sha": "1234567890abcdef1234567890abcdef12345678",
+      "url": "https://github.com/example-org/example-web/commit/1234567890abcdef1234567890abcdef12345678"
+    }
+  ]
+}
+```
+
+The normal task arguments still apply. The local MCP tool routes this request through the service's
+verified send. The ref tells the service which commit to resolve. The service must independently
+authorize the repository and commit through a trusted source before it can pin the execution target.
+Labels, encrypted task text and bundle metadata carry no such authorization. During rollout,
+`requiredTaskRequestsSupported` must stay false until the service can resolve and authorize
+the pinned target. The remaining integration point is the hosted verified-send resolver's accepted
+target input and its validation of the remote, input SHA and base SHA. Treat an unsupported or
+rejected target as a verification blocker. The orchestrator does not publish commits to make
+them resolvable.
+
 ## Task body
 
 Every task message:
@@ -232,7 +261,12 @@ For each attachment with `format: "git-bundle"` on a reply:
 fetch_attachment { "threadId": "thr_…", "attachmentId": "att_…", "repository": "<repo>" }
 ```
 
-It lands at `refs/remotes/mbus/<branch>` and returns `{commit, ref}`. Then, in the repository:
+It lands at `refs/remotes/mbus/<branch>` and returns `{commit, ref}`. For a coding task with
+required verification, compare the returned `commit` to the runner's `verification.revision`.
+Only that commit can carry the reported check results. If the commit does not match, stop
+integration for that task and report the mismatch.
+
+Then, in the repository:
 
 ```
 git log --oneline <start>..<ref>          # what came back

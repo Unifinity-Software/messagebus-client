@@ -127,6 +127,9 @@ public static class CapabilityNames
     /// </summary>
     public const string ModelPrefix = "model";
 
+    /// <summary>An owner-enrolled runner passed the executable preflight for the isolated Node npm recipe, version 1.</summary>
+    public const string NodeVerificationV1 = "verification:node-npm-ci-v1";
+
     /// <summary>
     /// The kinds a machine's owner may add from the dashboard (the original issue). The others (<c>os:</c>, <c>agent:</c>, <c>tool:</c>) are
     /// only what <c>mbus</c> finds on the machine, so an added one can never pass for them.

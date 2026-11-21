@@ -16,7 +16,7 @@ public sealed class RetargetContractTests
         Assert.Contains(McpToolCatalog.Tools(local: false), t => t.Name == McpToolNames.Move);
         Assert.DoesNotContain(McpToolCatalog.Tools(local: false, only: new HashSet<string> { McpToolNames.Move }, features: McpCatalogFeatures.Retarget), t => t.Name == McpToolNames.Retarget);
         Assert.DoesNotContain(McpToolCatalog.Tools(local: false, only: new HashSet<string> { McpToolNames.Retarget }, features: McpCatalogFeatures.VerifiedTasks | McpCatalogFeatures.RoleProposals), t => t.Name == McpToolNames.Retarget);
-        Assert.DoesNotContain(McpToolCatalog.Tools(local: true, only: null, features: McpCatalogFeatures.None), t => t.Name == McpToolNames.Retarget);
+        Assert.Contains(McpToolCatalog.Tools(local: true, only: null, features: McpCatalogFeatures.None), t => t.Name == McpToolNames.Retarget);
         Assert.Contains(McpToolCatalog.Tools(local: true, only: null, features: McpCatalogFeatures.Retarget), t => t.Name == McpToolNames.Retarget);
         Assert.DoesNotContain(McpToolCatalog.Tools(local: true, only: new HashSet<string> { McpToolNames.Move }), t => t.Name == McpToolNames.Retarget);
     }
