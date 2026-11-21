@@ -49,12 +49,11 @@ LABEL org.opencontainers.image.source="https://github.com/Unifinity-Software/mes
       org.opencontainers.image.version="$MBUS_RELEASE_VERSION" \
       org.opencontainers.image.revision="$MBUS_SOURCE_REVISION"
 
-# Agent CLI versions. "latest" picks up the newest release at build time; pin them (for example
-# --build-arg CLAUDE_CODE_VERSION=2.1.0) for repeatable images.
-ARG CLAUDE_CODE_VERSION=latest
-ARG CODEX_VERSION=latest
-ARG OPENCODE_VERSION=latest
-ARG COPILOT_VERSION=latest
+# Keep the release harness versions exact. Custom builds can override them.
+ARG CLAUDE_CODE_VERSION=2.1.330
+ARG CODEX_VERSION=0.171.0
+ARG OPENCODE_VERSION=1.19.6
+ARG COPILOT_VERSION=1.0.114
 
 # git and ssh for the code the agents work on, ICU for .NET, tini to pass signals to mbus.
 RUN apt-get update \

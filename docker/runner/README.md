@@ -200,14 +200,24 @@ digest, runner machine ID, task IDs and returned commit SHAs. Keep evidence free
 `infra/runner-aci.bicep` provisions a Linux ACI runner that enrolls itself in Azure. You do not
 run an enrollment container on your computer or copy a machine private key into a deployment.
 Use a runner image that includes `docker/runner/aci-bootstrap.mjs` and the pending-enrollment
-checkpoint support. The image supplied for deployment must include this change; an older image
-built from `mbus-v1.1.0` does not contain this bootstrap. Official GHCR distribution is tracked
-separately in issue #17.
+checkpoint support. Images built from `mbus-v1.1.0` predate this bootstrap.
+
+For a release whose notes list a verified public Linux amd64 runner image, copy the
+**Digest pin** from the notes into `runnerImage`. It has the form
+`ghcr.io/unifinity-software/messagebus-runner@sha256:<digest>`. Leave
+`containerRegistryName` empty. This path uses the published image directly. To
+upgrade, select the digest from the newer release and redeploy with the same
+runner name, resource group and identity storage. For a custom image, supply
+its own tag or digest and set `containerRegistryName` for a private ACR.
+
+The template takes an explicit image until a first public digest passes the
+release pull check. At that point, set the template's default to the exact
+release pin and record its release version alongside it.
 
 ### Deploy in Azure
 
 Choose a distinct container group name for each runner. Deploy the template through Azure Cloud
-Shell or your deployment pipeline, using an image already in your registry. The default is one
+Shell or your deployment pipeline. The default is one
 mbus task slot, two CPU cores, four GiB of memory and no public ingress. Agents run as UID 10001.
 
 | Parameter | Value |

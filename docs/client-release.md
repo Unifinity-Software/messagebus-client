@@ -26,6 +26,12 @@ public Contracts surface and scans for credentials.
   **branch**. Publishing runs automatically after the release checks. Store
   `NUGET_USER` as a secret in that environment, with the nuget.org profile
   name that can publish all eight packages.
+- Create the `ghcr` environment with deployment restricted to the protected
+  main **branch**. Allow the repository's GitHub Actions token to create and
+  write the organization package `ghcr.io/unifinity-software/messagebus-runner`.
+  If the package already exists, link it to this repository and grant this
+  repository write access under **Manage Actions access**. Reserve versioned
+  tag writes for the release workflow.
 - Protect `mbus-v*` tags against updates and deletion. Manual releases need
   permission for the release workflow to create the tag. Limit tag creation to
   the release workflow and authorized maintainers when configuring rules.
@@ -42,6 +48,12 @@ Perform these steps in order.
 3. Confirm the owner authorizes first publication for the exact version and
    full commit SHA. Then set `MBUS_RELEASE_ENABLED` to `true`. Keep it unset
    until then.
+4. On first publication, the protected promotion job may create a private GHCR
+   package and then stop at the anonymous pull check. With owner approval,
+   change the package visibility to **Public** in package settings. Then use
+   **Re-run failed jobs** on the original run. Promotion verifies the existing
+   versioned tag and pulls the same OCI digest anonymously before allowing any
+   NuGet uploads.
 
 ## Publish
 
@@ -56,14 +68,19 @@ main commit at dispatch, checks it, and releases that commit. To select an
 earlier merged commit, pass its full SHA as `tagged_commit` or push
 `mbus-v<version>` at that commit. The tag trigger dispatches the release on
 main so the environment's branch restriction applies. The workflow packs
-and verifies the packages and builds the complete runner image before
-publishing with GitHub OIDC and a short-lived nuget.org credential.
+and verifies the packages and builds a Linux amd64 OCI image once from the
+exact release commit. Preparation verifies the image's source provenance,
+non-root configuration and all five CLI versions, and scans for secrets and
+high or critical vulnerabilities. The protected `ghcr` job promotes the exact
+OCI index by digest and verifies a full anonymous pull before NuGet publishing
+can use GitHub OIDC and a short-lived nuget.org credential.
 
 The publish job rechecks Build and the disclosure status before publishing. It
 submits the libraries in dependency order so NuGet can index them together.
 It verifies their signatures and payloads before uploading the mbus tool.
 GitHub stages a draft, verifies the eight `.nupkg` and seven `.snupkg` assets by SHA-256,
-and publishes the completed release. A prerelease version produces a GitHub
+and publishes the completed release with the image digest, source commit and
+bundled CLI versions in the notes. A prerelease version produces a GitHub
 prerelease.
 
 ## Recover a partial release
@@ -71,8 +88,12 @@ prerelease.
 Preserve the original run and its verified artifact. Confirm the release
 owner currently authorizes resuming that exact version and commit. Use
 **Re-run failed jobs** in the original workflow run. This retains the
-immutable artifact ID from the successful prepare job. A fresh dispatch or
-**Re-run all jobs** applies the fresh version guard.
+immutable package and OCI artifact IDs from the successful prepare job.
+An existing image tag can be reused only if its digest matches that candidate.
+If the digest differs, stop and report the mismatch to the release owner.
+A fresh dispatch or **Re-run all jobs** builds a new candidate and applies the
+fresh version guard. If the original artifact is gone, coordinate a new version
+with the owner.
 
 For each already-published package, the job verifies its NuGet signature and
 compares every uncompressed archive entry against the original candidate,
