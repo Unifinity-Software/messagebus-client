@@ -412,6 +412,7 @@ public sealed class RunIsolation : IRunSandbox
         }
         try
         {
+            if (network is not null) network.LocalModelEndpoint = workspace.LocalModelEndpoint;
             _runs[workspace.Root] = NewState(workspace, repository, credential, profile.CanPush, network, telemetry, ownerGit);
         }
         catch

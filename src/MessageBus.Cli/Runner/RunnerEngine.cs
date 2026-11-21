@@ -716,8 +716,8 @@ public sealed class RunnerEngine : IAsyncDisposable
         AgentKind.ClaudeCode => new ClaudeCodeAdapter(settingsFile: ClaudeCodeAdapter.SettingsFile(_host.GetEnvironmentVariable, _host.HomeDirectory)),
         AgentKind.Codex => new CodexAdapter(CodexAdapter.ReadConfiguredModel(CodexHome), Connect.CodexTomlConfig.HasMbus(Path.Combine(CodexHome, "config.toml")), codexHome: CodexHome, getEnvironmentVariable: _host.GetEnvironmentVariable, sandboxOverride: _options.CodexSandbox),
         AgentKind.Copilot => new CopilotAdapter(copilotHome: EnvOr("COPILOT_HOME", Path.Combine(_host.HomeDirectory, ".copilot"))),
-        AgentKind.OpenCode => new OpenCodeAdapter(_agentVersions.GetValueOrDefault(AgentKind.OpenCode),
-            OpenCodeAdapter.ReadConfiguredModel(OpenCodeAdapter.ConfigDirectory(_host.GetEnvironmentVariable, _host.HomeDirectory))),
+        AgentKind.OpenCode => OpenCodeAdapter.ForRunner(_agentVersions.GetValueOrDefault(AgentKind.OpenCode), _host.GetEnvironmentVariable, _host.HomeDirectory,
+            storedEnvironment: _host.AgentEnvironment),
         _ => null,
     };
 

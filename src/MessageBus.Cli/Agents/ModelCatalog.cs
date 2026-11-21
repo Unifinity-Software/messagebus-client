@@ -28,7 +28,7 @@ internal sealed record AgentModels(string? Default, IReadOnlyList<string> Models
 /// <item>Codex 0.169 prints its model catalog with <c>codex debug models</c> (<c>{"models":[{"slug", "visibility", "priority"}]}</c>,
 /// the models with <c>visibility: list</c> being the ones its picker offers); it caches the same in <c>~/.codex/models_cache.json</c>.
 /// Its default is <c>model</c> at the top of <c>config.toml</c>.</item>
-/// <item>Copilot CLI and OpenCode: nothing is read yet, so their list is partial and empty.</item>
+/// <item>OpenCode: the runner's configured models (a partial catalog), without inference. Copilot CLI is unknown.</item>
 /// </list>
 /// </summary>
 internal static class ModelCatalog
@@ -52,6 +52,7 @@ internal static class ModelCatalog
             {
                 AgentKind.ClaudeCode => Claude(locations, env, version),
                 AgentKind.Codex => await CodexAsync(executable, locations, env, cancellationToken).ConfigureAwait(false),
+                AgentKind.OpenCode => OpenCodeSettings.Read(env.Get, locations.HomeDirectory, version).Inventory,
                 _ => AgentModels.Unknown,
             };
         }

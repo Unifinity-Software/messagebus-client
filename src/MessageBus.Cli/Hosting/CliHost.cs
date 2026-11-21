@@ -58,6 +58,7 @@ public sealed class CliHost
 
     /// <summary>Optional separate anonymous discovery transport factory. It must not inject credentials or follow redirects.</summary>
     public Func<HttpMessageHandler>? CreateDiscoveryHttpHandler { get; init; }
+    internal Func<HttpMessageHandler> CreateLocalModelHttpHandler { get; init; } = Agents.OpenCodeReadiness.Handler;
 
     /// <summary>Clock for request signatures and scan times.</summary>
     public TimeProvider Time { get; init; } = TimeProvider.System;
@@ -162,3 +163,4 @@ public static class EnvVars
     /// <summary>Folder for mbus's settings and machine key (default <c>~/.mbus</c>).</summary>
     public const string Home = "MBUS_HOME";
 }
+

@@ -22,6 +22,71 @@ shows each file it changes first. `mbus runner install` keeps the machine availa
 
 Help center: [messagebus.ai/docs](https://messagebus.ai/docs).
 
+## OpenCode with LM Studio
+
+The runner reads a partial configured model inventory and checks LM Studio's loaded-model state without inference.
+Local execution supports **OpenCode `opencode-ai@1.19.5` with `@ai-sdk/openai-compatible` on an unmanaged host**.
+The runner creates fresh run-owned home/config/data/cache/state folders, skips repository OpenCode configuration,
+and constructs a single-provider, single-model runtime. Primary, small, title, summary, compaction and subagent
+inference use the selected local model. Inherited plugins, credentials, model overrides and fallback providers are
+excluded. Managed/system configuration (including macOS MDM) is refused because it loads after run content.
+OpenCode 2 and unverified versions still refuse local execution. Explicit cloud task selections preserve their settings.
+
+Configure a loaded, tool-capable LM Studio model in the runner account's OpenCode settings:
+
+```jsonc
+{
+  "model": "local/coder",
+  "provider": {
+    "local": {
+      "npm": "@ai-sdk/openai-compatible",
+      "options": { "baseURL": "http://127.0.0.1:1234/v1" },
+      "models": { "coder": { "id": "your-loaded-instance-id" } }
+    }
+  }
+}
+```
+
+Use the API ID served by `/v1/models`, not the display name. Model keys can contain additional slashes.
+The bounded baseline uses an 8192-token context and 2048-token output budget; load a model with at least that context.
+The reader also accepts OpenCode 2's `providers`/`package`/`settings`/`modelID` shape for inventory inspection.
+
+The scan merges global JSON then JSONC, `OPENCODE_CONFIG`, `OPENCODE_CONFIG_DIR` JSON then JSONC, and
+`OPENCODE_CONFIG_CONTENT` in that order. `{env:NAME}` resolves in the runner session; missing variables, file
+substitutions and malformed or oversized settings require a configuration fix. Inventory is partial, capped at 100
+service-compatible IDs of at most 100 characters. Repository, managed/system, remote and file-based agent settings
+are not inventory sources. They are not copied into the confined local runtime. Personal settings stay unchanged.
+
+The implementation is based on [exact pinned upstream source and package integrity](docs/opencode-local-runtime.md).
+Native Windows verification passed the full client build and suite, public-contract checks, and the real pinned
+package's production launch/isolation proof against fake local and cloud providers. The proof observed nine local
+inferences and no cloud requests or cloud inference after its hostile-settings positive-control baseline.
+Actual LM Studio inference, Mac two-model trials and the Windows/macOS three-family handoff remain pending;
+the [native proof packet](eng/opencode-proof/README.md) records the results and remaining acceptance steps.
+
+`mbus doctor` and scans make only read-only model-list GETs under **one five-second budget for all candidates**, at
+most two requests per candidate, 1 MiB per response, without redirects. Native `/api/v1/models` must confirm a loaded
+language model, and `/v1/models` must include its API ID. An unloaded default does not hide a healthy second local
+candidate. If the shared deadline leaves candidates unverified, availability is retained with a warning and each
+delivery must pass preflight. If all candidates fail, an authless local-only agent is unavailable until a successful
+rescan; saved cloud authentication remains available. A loaded-candidate warning also explains the local execution
+restriction. With LM Studio authentication enabled, configure `settings.apiKey` (OpenCode 1: `options.apiKey`).
+The runner never starts a server, loads/downloads a model or assumes JIT loading.
+
+After setup, use `mbus connect opencode` and `mbus connect --rescan` to inspect configuration and readiness.
+`mbus doctor --smoke --agent opencode` runs inference for the supported local baseline; unsupported local selections
+are handed back before checkout/setup. Only confined local runs with reported token use get known-zero inference
+cost. Missing usage stays unknown and positive reported costs remain positive. Inference for this path stays on the
+configured operator-controlled loopback LM Studio server. Coordination, reports and allowed tools can use the network;
+this is not an offline-agent or zero-total-network-cost guarantee.
+
+Full issue acceptance still needs an operator-run Windows/macOS handoff and bounded tester trials of two already
+downloaded coding candidates. Use one harmless repository SHA and tester prompt, fixed context and timeout, and two
+attempts per candidate. Record exact models/quantizations, memory fit, tool/MCP success, test commands and exit codes,
+progress/settle, elapsed time, tokens/costs, failures, and the chosen default with rationale. Use disposable run-scoped
+configuration and restore any operator-authorized service/model changes afterwards. Automated fake-agent tests do
+not establish that live acceptance evidence.
+
 ## What is in this repository
 
 | Path | Package | What it is |

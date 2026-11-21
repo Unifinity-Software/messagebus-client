@@ -15,6 +15,66 @@ namespace MessageBus.Cli.Tests.Runner.Sandbox;
 /// </summary>
 public sealed class RunNetworkTests
 {
+    [Theory]
+    [InlineData("localhost", "127.0.0.1")]
+    [InlineData("127.0.0.1", "127.0.0.1")]
+    [InlineData("[::1]", "::1")]
+    public async Task Configured_local_model_exception_is_exact_authenticated_and_never_points_at_the_proxy(string configuredHost, string socketHost)
+    {
+        using var server = new TcpListener(IPAddress.Loopback, 0);
+        server.Start();
+        var serverPort = ((IPEndPoint)server.LocalEndpoint).Port;
+        var dialled = new List<string>();
+        using var proxy = RunNetworkProxy.Start(0, TextWriter.Null, async (host, port, ct) =>
+        {
+            lock (dialled) dialled.Add($"{host}:{port}");
+            var tcp = new TcpClient();
+            await tcp.ConnectAsync(IPAddress.Loopback, serverPort, ct);
+            return tcp.GetStream();
+        }, UpstreamProxy.For(new Uri("http://proxy.example:9876")));
+        using var local = proxy.Register(new HostAllowList(["github.com"]), "local-run");
+        local.LocalModelEndpoint = new Uri($"http://{configuredHost}:{serverPort}/v1");
+        using var other = proxy.Register(new HostAllowList(["github.com"]), "other-run");
+        var target = $"{configuredHost}:{serverPort}";
+        Assert.StartsWith("HTTP/1.1 407", await ConnectThroughAsync(proxy.Port, target, null));
+        Assert.StartsWith("HTTP/1.1 407", await ConnectThroughAsync(proxy.Port, target, "Basic d3Jvbmc6d3Jvbmc="));
+        Assert.StartsWith("HTTP/1.1 403", await ConnectThroughAsync(proxy.Port, target, Basic(other)));
+        Assert.StartsWith("HTTP/1.1 403", await ConnectThroughAsync(proxy.Port, $"{configuredHost}:{serverPort + 1}", Basic(local)));
+        Assert.StartsWith("HTTP/1.1 403", await ConnectThroughAsync(proxy.Port, $"localhost.evil:{serverPort}", Basic(local)));
+        Assert.StartsWith("HTTP/1.1 403", await ConnectThroughAsync(proxy.Port, $"192.0.2.1:{serverPort}", Basic(local)));
+        var echo = EchoOnceAsync(server);
+        using (var client = await ConnectAsync(proxy.Port))
+        {
+            var stream = client.GetStream();
+            Assert.StartsWith("HTTP/1.1 200", await RequestAsync(stream, $"CONNECT {target} HTTP/1.1\r\nProxy-Authorization: {Basic(local)}\r\n\r\n"));
+            await stream.WriteAsync("ping"u8.ToArray());
+            var answer = new byte[4];
+            await stream.ReadExactlyAsync(answer);
+            Assert.Equal("ping", Encoding.ASCII.GetString(answer));
+        }
+        await echo;
+        var http = Task.Run(async () =>
+        {
+            using var client = await server.AcceptTcpClientAsync(TestContext.Current.CancellationToken);
+            var stream = client.GetStream();
+            var head = await ReadHeadAsync(stream);
+            Assert.StartsWith("GET /v1/models HTTP/1.1", head);
+            Assert.DoesNotContain("Proxy-Authorization", head);
+            await stream.WriteAsync("HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n"u8.ToArray());
+        });
+        using (var client = await ConnectAsync(proxy.Port))
+            Assert.StartsWith("HTTP/1.1 204", await RequestAsync(client.GetStream(), $"GET http://{target}/v1/models HTTP/1.1\r\nHost: {target}\r\nProxy-Authorization: {Basic(local)}\r\n\r\n"));
+        await http;
+        Assert.Equal([$"{socketHost}:{serverPort}", $"{socketHost}:{serverPort}"], dialled);
+        // Even a trusted configuration must not turn the mbus proxy into its own upstream.
+        foreach (var alias in new[] { "localhost", "127.0.0.1", "127.0.0.2", "[::1]" })
+        {
+            local.LocalModelEndpoint = new Uri($"http://{alias}:{proxy.Port}/v1");
+            Assert.StartsWith("HTTP/1.1 403", await ConnectThroughAsync(proxy.Port, $"{alias}:{proxy.Port}", Basic(local)));
+        }
+        Assert.Equal(2, dialled.Count);
+    }
+
     [Fact]
     public async Task The_proxy_tunnels_to_hosts_on_the_list_and_refuses_the_rest_without_connecting()
     {

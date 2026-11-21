@@ -8,6 +8,7 @@ namespace MessageBus.Cli.Agents;
 /// </summary>
 internal sealed class AgentLocations(CliHost host)
 {
+    internal string HomeDirectory => host.HomeDirectory;
     private string Home => host.HomeDirectory;
 
     private string? Env(string name) => host.GetEnvironmentVariable(name) is { Length: > 0 } value ? value : null;
