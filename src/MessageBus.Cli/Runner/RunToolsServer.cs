@@ -44,6 +44,7 @@ internal static class RunToolsServer
                 Time = host.Time,
                 Scope = RunToolScope.For(request.Delivery, run.Root),
                 Refused = request.Refused,
+                RecordVerifiedTaskSettle = request.RecordVerifiedTaskSettle,
                 TempDirectory = Directory.CreateDirectory(Path.Combine(run.Root, "tmp")).FullName,
                 PrepareGit = start => InRun(start, request, git),
                 Session = request.Session,

@@ -40,7 +40,8 @@ internal sealed record RunServices(
     IRunTools? Tools = null,
     RunApprovalPrompt? RunApprovals = null,
     Func<RunWorkspace, TaskDelivery, CancellationToken, Task<bool>>? SendKeptAnswer = null,
-    Func<RunWorkspace, TaskDelivery, string, string?, CancellationToken, Task<bool>>? ReturnCommits = null);
+    Func<RunWorkspace, TaskDelivery, string, string?, CancellationToken, Task<bool>>? ReturnCommits = null,
+    NodeVerification? Verification = null);
 
 /// <summary>
 /// One delivery, from worktree to settle: check out, run the setup command, start the agent with its
@@ -72,6 +73,8 @@ internal sealed class AgentRun
     private RunToolsSession? _tools;
     private string? _lastRefusal;
     private readonly string? _alreadyHandled;
+    private SettleInput? _verifiedAgentSettle;
+    private VerificationResult? _verification;
 
     /// <param name="services">What the engine gives every run.</param>
     /// <param name="delivery">The task.</param>
@@ -156,7 +159,13 @@ internal sealed class AgentRun
             _timeout?.Dispose();
             return done;
         }
+        var snapshot = Delivery.Verification;
+        var verifier = snapshot is null ? null : _s.Verification;
+        if (snapshot is not null)
+            _verification = NodeVerification.Blocked(snapshot, "check-unavailable");
+
         RunWorkspace? workspace = null;
+        RunWorkspace? verificationWorkspace = null;
         RunCommits? commits = null;
         AgentOutcome? outcome = null;
         SettleInput? agentSettle = null;
@@ -199,12 +208,16 @@ internal sealed class AgentRun
         catch (Exception ex)
         {
             // Every run settles, whatever went wrong on this machine (missing executable, disk full).
-            failure ??= (SettleStatus.Abandoned, $"Couldn't run the task here: {ex.Message}");
+            failure ??= (SettleStatus.Abandoned, verifier is null
+                ? $"Couldn't run the task here: {ex.Message}"
+                : "The required verification checkout or agent setup could not complete.");
         }
         finally
         {
             await EndToolsAndSandboxAsync(workspace).ConfigureAwait(false);
         }
+        if (verifier is not null)
+            agentSettle = Volatile.Read(ref _verifiedAgentSettle);
 
         async Task PrepareAndRunAsync()
         {
@@ -212,13 +225,28 @@ internal sealed class AgentRun
             workspace = RunWorkspace.Create(_s.Options.WorkRoot, DeliveryId, Delivery.Attempt, Resume?.Folder);
             await File.WriteAllTextAsync(workspace.DeliveryFile, MessageBusJson.Serialize(Delivery)).ConfigureAwait(false);
             var prompt = Resume is null ? TaskPrompt.Build(Delivery, _s.Host.MachineName, _restricted) : TaskPrompt.BuildResume(Delivery, _s.Host.MachineName);
+            if (verifier is not null && !NodeVerification.IsReview(Delivery))
+                prompt += $"\n\nFor required verification, commit your result on the current {NodeVerification.Branch} branch. "
+                    + "Keep the approved package manifest, lockfile and Git attributes unchanged. Settle with your reply. The runner returns the checked commit.";
             await File.WriteAllTextAsync(workspace.PromptFile, prompt).ConfigureAwait(false);
 
             await _s.Sandbox.PrepareAsync(workspace, Delivery, _profile, _stop.Token).ConfigureAwait(false);
             var sandboxed = workspace;
             ProcessLaunch Sandboxed(ProcessLaunch launch) => _s.Sandbox.Wrap(launch, sandboxed, _profile);
 
-            if (Resume is not null)
+            if (verifier is not null)
+            {
+                Note("Preparing the pinned checkout for isolated verification");
+                verificationWorkspace = RunWorkspace.Create(_s.Options.WorkRoot, DeliveryId + "-verification", Delivery.Attempt);
+                if (await verifier.PrepareAsync(workspace.WorkTree, Delivery, verificationWorkspace, _stop.Token)
+                    .ConfigureAwait(false) is { } blocked)
+                {
+                    _verification = NodeVerification.Blocked(snapshot!, blocked);
+                    failure = (SettleStatus.Failed, blocked);
+                    return;
+                }
+            }
+            else if (Resume is not null)
             {
                 Note($"Resuming the session on {_s.Host.MachineName}");
             }
@@ -250,8 +278,11 @@ internal sealed class AgentRun
                 }
             }
 
-            commits = new RunCommits(_s.Host.LocateCommand("git"), workspace);
-            await commits.CaptureAsync().ConfigureAwait(false);
+            if (verifier is null)
+            {
+                commits = new RunCommits(_s.Host.LocateCommand("git"), workspace);
+                await commits.CaptureAsync().ConfigureAwait(false);
+            }
 
             if (failure is null && _s.Tools is { } tools)
             {
@@ -259,6 +290,7 @@ internal sealed class AgentRun
                 _tools = await tools.StartAsync(new RunToolsRequest(workspace, Delivery, _profile, Sandboxed)
                 {
                     Session = Resume,
+                    RecordVerifiedTaskSettle = verifier is null ? null : input => Volatile.Write(ref _verifiedAgentSettle, input),
                     Refused = (name, error) =>
                     {
                         if (name == McpToolNames.Settle) Volatile.Write(ref _lastRefusal, error.Message);
@@ -266,7 +298,7 @@ internal sealed class AgentRun
                 }, _stop.Token).ConfigureAwait(false);
             }
             var environment = RunEnvironmentVariables(workspace);
-            if (failure is null && Resume is null && Delivery.RunEnvironment.SetupCommand is { Length: > 0 } setup)
+            if (failure is null && verifier is null && Resume is null && Delivery.RunEnvironment.SetupCommand is { Length: > 0 } setup)
             {
                 Note("Running the setup command");
                 using var shell = AgentProcess.Start(Sandboxed(AgentProcess.Shell(setup, workspace.WorkTree, environment)), tailLines: 20);
@@ -341,8 +373,11 @@ internal sealed class AgentRun
                 QueueCapacity(parser.Capacity);
                 await _capacityChain.ConfigureAwait(false);
                 tail = agent.Tail();
-                await SendKeptAnswerAsync(workspace).ConfigureAwait(false);
-                agentSettle = ReadAgentSettle(workspace.SettleFile);
+                if (verifier is null)
+                {
+                    await SendKeptAnswerAsync(workspace).ConfigureAwait(false);
+                    agentSettle = ReadAgentSettle(workspace.SettleFile);
+                }
             }
         }
 
@@ -353,10 +388,11 @@ internal sealed class AgentRun
         try
         {
             var refusal = Volatile.Read(ref _lastRefusal);
-            result = Compose(Reason, _stopDetail, failure, exitCode, outcome, agentSettle, tail, _s.Time.GetElapsedTime(started), workspace?.WorkTree,
+            SettleResult CurrentResult() => Compose(Reason, _stopDetail, failure, exitCode, outcome, agentSettle, tail,
+                _s.Time.GetElapsedTime(started), workspace?.WorkTree,
                 // A message to a session inbox is an answer the session reads; there is nothing for it to settle.
-                answerExpected: Delivery.Envelope.Target is not InboxTarget, runnerNote: sandboxSettleNote,
-                refusal: refusal);
+                answerExpected: Delivery.Envelope.Target is not InboxTarget, runnerNote: sandboxSettleNote, refusal: refusal);
+            result = CurrentResult();
             if (result.Status is SettleStatus.Failed or SettleStatus.Abandoned && workspace is not null
                 && File.Exists(MessageBus.Mcp.RoleKeyReadiness.FileName(workspace.SettleFile)))
             {
@@ -377,6 +413,29 @@ internal sealed class AgentRun
             // The agent finished but its answer (and any code it sent back) never reached the service: its
             // work exists only in the worktree.
             keptBecause = IsResultNotReceived(result) ? "the agent's answer didn't reach the runner" : null;
+            if (verifier is not null && workspace is not null)
+            {
+                result = result with
+                {
+                    Refs = (result.Refs ?? []).Where(reference => reference.Kind != "git.commit" && reference.Kind != "git.branch").ToArray(),
+                };
+                if (verificationWorkspace is not null && result.Status == SettleStatus.Succeeded && Reason == StopReason.None)
+                {
+                    Note("Running required checks in a fresh isolated checkout");
+                    var returned = await VerifyAndReturnAsync(verifier, workspace, verificationWorkspace).ConfigureAwait(false);
+                    if (Reason != StopReason.None && returned is null)
+                        result = CurrentResult() with { Refs = result.Refs };
+                    if (returned is not null)
+                        result = result with { Refs = [.. result.Refs, new Ref { Kind = "git.commit", Sha = returned }] };
+                    else if (!NodeVerification.IsReview(Delivery))
+                        keptBecause ??= "the checked commit was not returned";
+                }
+                else if (exitCode is not null && !NodeVerification.IsReview(Delivery))
+                {
+                    keptBecause ??= "the editing agent did not complete verification";
+                }
+            }
+
             commits?.InspectAfterExit();
             if (commits is not null && await commits.MustKeepAsync().ConfigureAwait(false))
             {
@@ -397,7 +456,7 @@ internal sealed class AgentRun
                 if (!returned) keptBecause ??= "commits may not have been returned";
             }
             Telemetry.RunnerTelemetry.Finish(span, Delivery, _adapter.Kind, result, _s.Time.GetElapsedTime(started));
-            if (workspace is not null && Delivery.RunEnvironment.Logs != LogCapture.None)
+            if (verifier is null && workspace is not null && Delivery.RunEnvironment.Logs != LogCapture.None)
             {
                 // Upload (encrypted, to the run-logs container) needs the original issue; until then it is kept locally too.
                 await WriteLogAsync(workspace, tail).ConfigureAwait(false);
@@ -424,6 +483,10 @@ internal sealed class AgentRun
         }
         finally
         {
+            if (verificationWorkspace is not null)
+            {
+                await EndWorkspaceAsync(verificationWorkspace, null).ConfigureAwait(false);
+            }
             if (workspace is not null)
             {
                 await EndWorkspaceAsync(workspace, settled ? keptBecause : keptBecause ?? "its result didn't reach the service").ConfigureAwait(false);
@@ -431,6 +494,28 @@ internal sealed class AgentRun
         }
         _timeout?.Dispose();
         return result;
+    }
+
+    private async Task<string?> VerifyAndReturnAsync(NodeVerification verifier, RunWorkspace workspace, RunWorkspace fresh)
+    {
+        try
+        {
+            _verification = await verifier.VerifyAsync(Delivery, workspace, fresh, _stop.Token).ConfigureAwait(false);
+            if (NodeVerification.IsReview(Delivery) || _verification.Revision is not { } revision) return null;
+
+            fresh.VerifiedReturnRevision = revision;
+            if (_s.ReturnCommits is { } send
+                && await send(fresh, Delivery, NodeVerification.Branch, Delivery.Verification!.Revision, _stop.Token).ConfigureAwait(false))
+                return revision;
+            _verification = NodeVerification.Blocked(Delivery.Verification!, "revision-unverified");
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            _verification = NodeVerification.Blocked(Delivery.Verification!, _stop.IsCancellationRequested
+                ? "cancelled" : "check-unavailable");
+            await _s.Log.WriteLineAsync($"{DeliveryId}: required verification stopped ({ex.GetType().Name}).").ConfigureAwait(false);
+        }
+        return null;
     }
 
     /// <summary>
@@ -1022,7 +1107,13 @@ internal sealed class AgentRun
             await _s.Log.WriteLineAsync($"{DeliveryId}: Stopped because the workspace was suspended ({reference}).").ConfigureAwait(false);
             return true; // The server releases the held task; clean up its local work as usual.
         }
-        var settle = new RunnerSettle { DeliveryId = DeliveryId, Attempt = Delivery.Attempt, Result = result, Declined = _declined, UnreadableRole = _unreadableRole };
+        var settle = new RunnerSettle
+        {
+            DeliveryId = DeliveryId, Attempt = Delivery.Attempt, Result = result, Declined = _declined, UnreadableRole = _unreadableRole,
+            Verification = _verification,
+            VerificationAttempt = Delivery.Verification is null ? null : Delivery.Attempt,
+            VerificationDigest = Delivery.Verification?.Digest,
+        };
         for (var attempt = 0; ; attempt++)
         {
             try

@@ -95,12 +95,15 @@ internal static class ScriptCommands
         var attachments = new Option<string[]>("--attachment") { Description = "An attachment uploaded with mbus attach bundle: the JSON file it wrote. Repeat for more." };
         var excludeAuthors = new Option<bool>("--exclude-authors") { Description = "For reviews: keep the agents that wrote the code from taking it." };
         var model = new Option<string?>("--model") { Description = "The model to run the task on, for example claude-fable-5-2. Only an agent that reports it takes it." };
+        var environment = new Option<string?>("--environment") { Description = "Require a workspace-approved verification environment for this role task." };
+        var checks = new Option<string[]>("--required-check") { Description = "A required verification check. Repeat for more.", AllowMultipleArgumentsPerToken = false };
+        checks.AcceptOnlyFromAmong("test", "typecheck", "build", "browser");
         var wait = new Option<int?>("--wait") { Description = "Wait up to this many seconds for the task to finish, and print its result and answers." };
         var json = ScriptRunner.JsonOption();
         var command = new Command("send", "Send a message to a role or agent, encrypted on this machine.")
         {
             to, type, title, summary, details, detailsFile, input, project, thread, parent, expect, replyTo, priority, dedupe, labels,
-            bundle, patch, files, branch, baseCommit, attachments, excludeAuthors, model, wait, json,
+            bundle, patch, files, branch, baseCommit, attachments, excludeAuthors, model, environment, checks, wait, json,
         };
         command.SetAction((parse, ct) => ScriptRunner.RunAsync(host, parse, options, "send", parse.GetValue(json), async (script, ct) =>
         {
@@ -117,6 +120,17 @@ internal static class ScriptCommands
             Set(args, "dedupeKey", parse.GetValue(dedupe));
             if (parse.GetValue(excludeAuthors)) args["excludeAuthors"] = true;
             Set(args, "model", parse.GetValue(model));
+
+            var checkNames = parse.GetValue(checks);
+            var environmentId = parse.GetValue(environment);
+            if (environmentId is not null || checkNames is { Length: > 0 })
+            {
+                var verification = args["verification"] as JsonObject ?? [];
+                Set(verification, "environment", environmentId);
+                if (checkNames is { Length: > 0 })
+                    verification["requiredChecks"] = new JsonArray([.. checkNames.Select(check => (JsonNode)check)]);
+                args["verification"] = verification;
+            }
 
             var body = args["body"] as JsonObject ?? [];
             Set(body, "summary", parse.GetValue(summary));

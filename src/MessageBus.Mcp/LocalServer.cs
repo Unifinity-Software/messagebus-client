@@ -71,6 +71,9 @@ public sealed record LocalServerOptions
     /// <summary><c>MBUS_SETTLE_FILE</c>: where <c>settle</c> records the agent's result for the runner.</summary>
     public string? SettleFile { get; init; }
 
+    /// <summary>When serving a verified task, records the agent's settlement directly in the runner.</summary>
+    public Action<SettleInput>? RecordVerifiedTaskSettle { get; init; }
+
     /// <summary><c>MBUS_AGENT</c>: which of the machine's agents this is (id or kind); else the delivery's, else from the MCP client's name.</summary>
     public string? Agent { get; init; }
 
