@@ -360,14 +360,19 @@ public sealed class ServerSendGateTests
         {
             stop.Cancel();
             origin.Stop();
-            try { await serving; } catch (OperationCanceledException) { } catch (SocketException) { }
+            try { await serving; }
+            catch (OperationCanceledException) when (stop.IsCancellationRequested) { }
         }
 
         async Task ServeAsync()
         {
             while (!stop.IsCancellationRequested)
             {
-                using var connection = await origin.AcceptTcpClientAsync(stop.Token);
+                TcpClient accepted;
+                try { accepted = await origin.AcceptTcpClientAsync(stop.Token); }
+                catch (ObjectDisposedException) when (stop.IsCancellationRequested) { return; }
+                catch (SocketException) when (stop.IsCancellationRequested) { return; }
+                using var connection = accepted;
                 using var stream = connection.GetStream();
                 using var reader = new StreamReader(stream, Encoding.ASCII, leaveOpen: true);
                 var first = await reader.ReadLineAsync(stop.Token) ?? "";
