@@ -9,6 +9,10 @@ namespace MessageBus.Runner.Transport;
 /// <summary>Settings for <see cref="ReverseConnectionClient"/>. <see cref="RunnerTransport.ClientOptions"/> fills in the <c>mbus.v1</c> values.</summary>
 public sealed record ReverseConnectionClientOptions
 {
+    // Friend fixtures may trust an ephemeral CA without changing process or machine trust.
+    // No validation callback is exposed: the handler still checks the hostname and chain.
+    internal System.Security.Cryptography.X509Certificates.X509ChainPolicy? CertificateChainPolicy { get; init; }
+
     /// <summary>The server's address, for example <c>https://messagebus.example.com</c>. http becomes ws, https becomes wss.</summary>
     public required Uri ServerAddress { get; init; }
 

@@ -81,6 +81,7 @@ public sealed class ReverseConnectionClient(ReverseConnectionClientOptions optio
             Credentials = null,
             PreAuthenticate = false,
             DefaultProxyCredentials = null,
+            SslOptions = new() { CertificateChainPolicy = options.CertificateChainPolicy },
         });
         var listener = new SocketListener();
         var app = BuildServer(listener);

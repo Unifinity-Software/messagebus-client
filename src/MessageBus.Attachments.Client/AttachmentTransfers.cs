@@ -32,11 +32,14 @@ public static class AttachmentTransfers
     public static HttpClient CreateHttpClient() => CreateHttpClient(() => HttpClient.DefaultProxy);
 
     // Per-instance default-proxy seam keeps real transport fixtures independent of process globals.
-    internal static HttpClient CreateHttpClient(Func<System.Net.IWebProxy> defaultProxy) => Register(new HttpClient(new SocketsHttpHandler
+    internal static HttpClient CreateHttpClient(Func<System.Net.IWebProxy> defaultProxy,
+        System.Security.Cryptography.X509Certificates.X509ChainPolicy? certificateChainPolicy = null) => Register(new HttpClient(new SocketsHttpHandler
     {
         AllowAutoRedirect = false, UseCookies = false, Credentials = null,
         PreAuthenticate = false, DefaultProxyCredentials = null,
         Proxy = MessageBus.Http.CredentialFreeProxy.Wrap(null, defaultProxy),
+        // Test roots remain local to this handler; normal TLS hostname validation still applies.
+        SslOptions = new() { CertificateChainPolicy = certificateChainPolicy },
     }) { Timeout = TimeSpan.FromHours(1) });
 
     private static HttpClient Register(HttpClient client)
