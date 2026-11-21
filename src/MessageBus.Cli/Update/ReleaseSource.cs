@@ -1,4 +1,5 @@
 using System.Net;
+using System.Runtime.CompilerServices;
 using MessageBus.Contracts.Http;
 using MessageBus.Contracts.Releases;
 
@@ -50,10 +51,40 @@ public sealed class FolderReleaseSource(string directory) : IReleaseSource
 }
 
 /// <summary>A channel over HTTP(S): the server's <c>/api/releases/{channel}/</c> or a mirror with the same files.</summary>
-/// <param name="http">A client (no credentials needed); disposed with the source.</param>
+/// <param name="http">A separate client from <see cref="CreateHttpClient"/>; disposed with the source.</param>
 /// <param name="channelUrl">The channel's base URL, ending in <c>/</c>.</param>
 public sealed class HttpReleaseSource(HttpClient http, Uri channelUrl) : IReleaseSource, IDisposable
 {
+    private static readonly ConditionalWeakTable<HttpClient, object> PublicClients = new();
+
+    /// <summary>Creates a public artifact transport without redirects, cookies, default headers or ambient credentials.</summary>
+    public static HttpClient CreateHttpClient() => Register(new HttpClient(new SocketsHttpHandler
+    {
+        AllowAutoRedirect = false, UseCookies = false, Credentials = null,
+        PreAuthenticate = false, DefaultProxyCredentials = null,
+    }));
+
+    private static HttpClient Register(HttpClient client)
+    {
+        PublicClients.Add(client, new object());
+        return client;
+    }
+
+    internal static HttpClient CreateTestHttpClient(HttpMessageHandler handler, bool disposeHandler = true)
+    {
+        if (handler is DelegatingHandler or HttpClientHandler or SocketsHttpHandler)
+            throw new ArgumentException("Test feeds require an in-memory terminal handler.", nameof(handler));
+        return Register(new HttpClient(handler, disposeHandler));
+    }
+
+    internal static void ValidateChannelUrl(Uri url)
+    {
+        if (!url.IsAbsoluteUri || url.Scheme is not ("https" or "http")
+            || url.UserInfo.Length != 0 || url.Query.Length != 0 || url.Fragment.Length != 0
+            || url.OriginalString.Any(c => char.IsWhiteSpace(c) || char.IsControl(c) || c == '\\'))
+            throw new CliException("Unsafe public release feed URL; credentials, query and fragment are forbidden.");
+    }
+
     /// <inheritdoc />
     public string Description => channelUrl.AbsoluteUri;
 
@@ -63,6 +94,9 @@ public sealed class HttpReleaseSource(HttpClient http, Uri channelUrl) : IReleas
     /// <inheritdoc />
     public async Task<Stream> OpenAsync(string name, CancellationToken cancellationToken)
     {
+        ValidateChannelUrl(channelUrl);
+        if (!PublicClients.TryGetValue(http, out _) || http.DefaultRequestHeaders.Any())
+            throw new UpdateRefusedException("Public releases require a separate factory-created client without default headers.");
         if (!ReleaseFeed.IsValidName(name))
         {
             throw new FileNotFoundException($"'{name}' isn't a release file name.");
@@ -83,9 +117,34 @@ public sealed class HttpReleaseSource(HttpClient http, Uri channelUrl) : IReleas
             response.Dispose();
             throw new HttpRequestException($"{Description}{name} answered {status}.", null, response.StatusCode);
         }
-        return await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return new ResponseStream(response, await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false));
+        }
+        catch { response.Dispose(); throw; }
     }
 
     /// <inheritdoc />
     public void Dispose() => http.Dispose();
+
+    // Keep downloads streaming so SelfUpdater can enforce its limits before buffering the body.
+    private sealed class ResponseStream(HttpResponseMessage response, Stream stream) : Stream
+    {
+        public override bool CanRead => stream.CanRead;
+        public override bool CanSeek => stream.CanSeek;
+        public override bool CanWrite => false;
+        public override long Length => stream.Length;
+        public override long Position { get => stream.Position; set => stream.Position = value; }
+        public override int Read(byte[] buffer, int offset, int count) => stream.Read(buffer, offset, count);
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default) => stream.ReadAsync(buffer, cancellationToken);
+        public override long Seek(long offset, SeekOrigin origin) => stream.Seek(offset, origin);
+        public override void Flush() => stream.Flush();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) { stream.Dispose(); response.Dispose(); }
+            base.Dispose(disposing);
+        }
+    }
 }
