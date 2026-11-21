@@ -15,6 +15,49 @@ public sealed class AnonymousProxyTests
 {
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
+    public static IEnumerable<object[]> LoginChallenges()
+    {
+        foreach (var dedicated in new[] { false, true })
+        foreach (var clientHandler in new[] { false, true })
+        foreach (var scheme in new[] { "http", "https" })
+        foreach (var challenge in new[] { "Basic realm=\"fixture\"", "Negotiate", "NTLM" })
+            yield return [dedicated, clientHandler, scheme, challenge];
+    }
+
+    [Theory]
+    [MemberData(nameof(LoginChallenges))]
+    public async Task Initial_login_discovery_cannot_answer_proxy_challenges(bool dedicated, bool clientHandler,
+        string scheme, string challenge)
+    {
+        await using var proxy = new ProxyServer(challenge);
+        var basic = challenge.StartsWith("Basic", StringComparison.Ordinal);
+        var address = basic ? new UriBuilder(proxy.Address) { UserName = "fixture-user", Password = "fixture-password" }.Uri : proxy.Address;
+        var routing = new RoutingProxy(address, basic
+            ? new NetworkCredential("fixture-user", "fixture-password") : CredentialCache.DefaultNetworkCredentials);
+        HttpMessageHandler Handler() => clientHandler
+            ? new HttpClientHandler { Proxy = routing, UseDefaultCredentials = true, DefaultProxyCredentials = CredentialCache.DefaultNetworkCredentials }
+            : new SocketsHttpHandler { Proxy = routing, Credentials = CredentialCache.DefaultNetworkCredentials,
+                DefaultProxyCredentials = CredentialCache.DefaultNetworkCredentials };
+        using var machine = new TestMachine();
+        machine.Env[ConfigStore.KeyStoreVariable] = "file";
+        var apiFactories = 0;
+        machine.ApiHttpHandler = () => { apiFactories++; return Handler(); };
+        machine.DiscoveryHttpHandler = dedicated ? Handler : null;
+        var result = await machine.RunAsync("login", "--server", $"{scheme}://anonymous.example.test/gateway", "--token", "fixture-enroll");
+        Assert.NotEqual(0, result.ExitCode);
+        Assert.Equal(dedicated ? 0 : 1, apiFactories);
+        var request = Assert.Single(proxy.Requests);
+        Assert.StartsWith(scheme == "https" ? "CONNECT anonymous.example.test:443 "
+            : "GET http://anonymous.example.test/gateway/api/server ", request[0]);
+        Assert.DoesNotContain(request, line => line.StartsWith("Proxy-Authorization:", StringComparison.OrdinalIgnoreCase)
+            || line.StartsWith("Authorization:", StringComparison.OrdinalIgnoreCase));
+        Assert.Equal(0, routing.CredentialReads);
+        Assert.Equal(0, routing.CredentialWrites);
+        Assert.True(routing.RouteReads > 0);
+        Assert.Empty(machine.Server.Requests);
+        Assert.False(new ConfigStore(machine.MbusFolder, "file").HasKey);
+    }
+
     public static IEnumerable<object[]> Challenges()
     {
         foreach (var factory in new[] { "release", "attachment", "discovery-sockets-default", "discovery-sockets-explicit",

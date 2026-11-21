@@ -137,20 +137,33 @@ public sealed class EnrollmentBindingTests
     }
 
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task Provisioned_stripping_refuses_actual_token_or_caller_before_any_credential_send(bool runner)
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task First_isolated_discovery_refuses_later_stripping_before_token_or_caller_send(bool runner, bool provisioned)
     {
         using var machine = new TestMachine();
         machine.Env[ConfigStore.KeyStoreVariable] = "file";
-        machine.Env["MBUS_HOME"] = machine.MbusFolder;
-        machine.Env[ServerBindingExpectation.EnvironmentVariable] = Expected(Eu, Eu, "eu");
+        if (provisioned)
+        {
+            machine.Env["MBUS_HOME"] = machine.MbusFolder;
+            machine.Env[ServerBindingExpectation.EnvironmentVariable] = Expected(Eu, Eu, "eu");
+        }
         if (runner) machine.Env[EnvVars.ApiKey] = ApiKey;
         var observation = 0;
         machine.Server.On(HttpMethod.Get, "/api/server", _ => Text(++observation == 1 ? Isolated(Eu, "eu") : Legacy));
         var result = runner ? await machine.RunAsync("login", "--server", Eu)
             : await machine.RunAsync("login", "--server", Eu, "--token", "fixture-enroll");
         Assert.NotEqual(0, result.ExitCode);
+        var restarted = new ConfigStore(machine.MbusFolder, "file");
+        var floor = await restarted.WithProfileSecurityLockAsync(tx => Task.FromResult(tx.LoadBindingFloor()), Ct);
+        Assert.Equal(Eu, Assert.Single(floor.Bindings).TransportOrigin);
+        Assert.False(restarted.HasKey);
+        machine.Env.Remove(ServerBindingExpectation.EnvironmentVariable);
+        var retry = runner ? await machine.RunAsync("login", "--server", Eu)
+            : await machine.RunAsync("login", "--server", Eu, "--token", "fixture-enroll");
+        Assert.NotEqual(0, retry.ExitCode);
         Assert.All(machine.Server.Requests, request =>
         {
             Assert.Equal("/api/server", request.Uri.AbsolutePath);
@@ -158,6 +171,187 @@ public sealed class EnrollmentBindingTests
             Assert.Empty(request.Body);
         });
         Assert.False(new ConfigStore(machine.MbusFolder, "file").HasKey);
+    }
+
+    [Theory]
+    [InlineData("partial")]
+    [InlineData("null")]
+    [InlineData("unsupported")]
+    public async Task Invalid_first_security_bundle_refuses_before_a_later_legacy_observation(string invalid)
+    {
+        using var machine = new TestMachine();
+        machine.Env[ConfigStore.KeyStoreVariable] = "file";
+        var first = invalid switch
+        {
+            "partial" => """{"product":"messagebus.ai","signIn":{"machineSignature":{"version":2,"required":true}}}""",
+            "null" => """{"product":"messagebus.ai","signIn":{"authority":null,"machineSignature":null}}""",
+            _ => Isolated(Eu, "eu").Replace("\"version\":2", "\"version\":99", StringComparison.Ordinal),
+        };
+        var observations = 0;
+        machine.Server.On(HttpMethod.Get, "/api/server", _ => Text(++observations == 1 ? first : Legacy));
+        var result = await machine.RunAsync("login", "--server", Eu, "--token", "fixture-enroll");
+        Assert.NotEqual(0, result.ExitCode);
+        var request = Assert.Single(machine.Server.Requests);
+        Assert.Equal("/api/server", request.Uri.AbsolutePath);
+        Assert.Null(request.Header("Authorization"));
+        Assert.Empty(request.Body);
+        Assert.False(new ConfigStore(machine.MbusFolder, "file").HasKey);
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task Runner_logout_clears_provenance_and_restarts_for_new_login_without_erasing_floor(bool isolated, bool pending)
+    {
+        using var machine = new TestMachine();
+        machine.Env[ConfigStore.KeyStoreVariable] = "file";
+        machine.Env[EnvVars.ApiKey] = ApiKey;
+        machine.Env[EnvVars.Server] = Eu;
+        var stripped = false;
+        machine.Server.On(HttpMethod.Get, "/api/server", _ => Text(isolated && !stripped ? Isolated(Eu, "eu") : Legacy));
+        machine.Server.On(HttpMethod.Get, ApiRoutes.Caller, _ => Text("""{"scopes":["runner"]}"""));
+        var loseResponse = pending;
+        machine.Server.On(HttpMethod.Post, ApiRoutes.MachineEnroll, request =>
+        {
+            if (loseResponse) { loseResponse = false; throw new HttpRequestException("Owned fixture response loss"); }
+            return FakeServer.Json(EnrollResponse(MessageBusJson.Deserialize<MachineEnrollRequest>(request.BodyText)!));
+        });
+        machine.Server.On(HttpMethod.Put, ApiRoutes.MachineInventory, _ => new(HttpStatusCode.NoContent));
+        var first = await machine.RunAsync("login");
+        if (pending) Assert.NotEqual(0, first.ExitCode);
+        else Assert.True(first.ExitCode == 0, first.Error);
+        var store = new ConfigStore(machine.MbusFolder, "file");
+        var enrolled = store.Load();
+        Assert.NotNull(enrolled.RunnerEnrollmentBinding);
+        if (pending) Assert.NotNull(enrolled.PendingRunnerEnrollment);
+        else Assert.NotNull(enrolled.EnrolledWithApiKey);
+        var keyPath = store.KeyPath;
+        var ledger = isolated ? File.ReadAllBytes(store.ServerBindingsPath) : null;
+
+        var logout = await machine.RunAsync("logout");
+        Assert.True(logout.ExitCode == 0, logout.Error);
+        var restarted = new ConfigStore(machine.MbusFolder, "file");
+        var reset = restarted.Load();
+        Assert.Null(reset.MachineId);
+        Assert.Null(reset.WorkspaceId);
+        Assert.Null(reset.WorkspaceName);
+        Assert.Null(reset.KeyFingerprint);
+        Assert.Null(reset.EnrolledAt);
+        Assert.Null(reset.EnrolledWithApiKey);
+        Assert.Null(reset.PendingRunnerEnrollment);
+        Assert.Null(reset.RunnerEnrollmentBinding);
+        Assert.Null(reset.PendingRunnerIdentity);
+        Assert.Equal(enrolled.ServerBinding, reset.ServerBinding);
+        Assert.Equal(enrolled.MachineKeyGeneration, reset.MachineKeyGeneration);
+        Assert.Equal(enrolled.KeyStore, reset.KeyStore);
+        Assert.False(File.Exists(keyPath));
+        Assert.False(restarted.HasKey);
+        Assert.Null(restarted.LoadKeyPem());
+        if (isolated)
+        {
+            Assert.Equal(ledger, File.ReadAllBytes(restarted.ServerBindingsPath));
+            stripped = true;
+            var before = machine.Server.Requests.Count;
+            Assert.NotEqual(0, (await machine.RunAsync("login")).ExitCode);
+            Assert.All(machine.Server.Requests.Skip(before), request => Assert.Null(request.Header("Authorization")));
+            stripped = false;
+        }
+        var next = await machine.RunAsync("login");
+        Assert.True(next.ExitCode == 0, next.Error);
+        var completed = new ConfigStore(machine.MbusFolder, "file").Load();
+        Assert.Equal(NewMachineId, completed.MachineId);
+        Assert.NotEqual(enrolled.MachineKeyGeneration, completed.MachineKeyGeneration);
+        Assert.NotEqual(enrolled.KeyFingerprint, completed.KeyFingerprint);
+        Assert.NotNull(completed.RunnerEnrollmentBinding);
+        Assert.Equal(enrolled.ServerBinding, completed.ServerBinding);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Logout_deletes_independently_staged_runner_key_and_active_key(bool isolated)
+    {
+        using var machine = new TestMachine();
+        machine.Env[ConfigStore.KeyStoreVariable] = "file";
+        machine.Env[EnvVars.Server] = Eu;
+        machine.Env[EnvVars.ApiKey] = ApiKey;
+        var store = new ConfigStore(machine.MbusFolder, "file");
+        using var old = MachineKey.Create();
+        store.Save(new CliConfig { Server = Eu, MachineId = "mch_old", WorkspaceId = "w_same", KeyFingerprint = old.Fingerprint });
+        store.SaveKeyPem(old.ExportPrivateKeyPem());
+        var activeKeyPath = store.KeyPath;
+        machine.Server.On(HttpMethod.Get, "/api/server", _ => Text(isolated ? Isolated(Eu, "eu") : Legacy));
+        machine.Server.On(HttpMethod.Get, ApiRoutes.Caller, _ => Text("""{"scopes":["runner"]}"""));
+        machine.Server.On(HttpMethod.Post, ApiRoutes.MachineEnroll, _ => throw new HttpRequestException("Owned fixture response loss"));
+        Assert.NotEqual(0, (await machine.RunAsync("login")).ExitCode);
+        var checkpoint = new ConfigStore(machine.MbusFolder, "file").Load();
+        Assert.NotNull(checkpoint.PendingRunnerIdentity);
+        var pendingKeyPath = Path.Combine(store.Directory, $"machine-key.{checkpoint.PendingRunnerIdentity.KeyGeneration}.pem");
+        Assert.True(File.Exists(pendingKeyPath));
+        var logout = await machine.RunAsync("logout");
+        Assert.True(logout.ExitCode == 0, logout.Error);
+        var restarted = new ConfigStore(machine.MbusFolder, "file");
+        Assert.Null(restarted.Load().PendingRunnerIdentity);
+        Assert.Equal(checkpoint.MachineKeyGeneration, restarted.Load().MachineKeyGeneration);
+        Assert.False(restarted.HasKey);
+        Assert.Null(restarted.LoadKeyPem());
+        Assert.False(File.Exists(pendingKeyPath));
+        Assert.False(File.Exists(activeKeyPath));
+        Assert.Equal(checkpoint.ServerBinding, restarted.Load().ServerBinding);
+        if (isolated) Assert.True(File.Exists(restarted.ServerBindingsPath));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Logout_preserves_latest_settings_and_refuses_a_new_identity_published_during_discovery(bool replaceIdentity)
+    {
+        using var machine = new TestMachine();
+        machine.Env[ConfigStore.KeyStoreVariable] = "file";
+        var store = new ConfigStore(machine.MbusFolder, "file");
+        using var old = MachineKey.Create();
+        using var replacement = MachineKey.Create();
+        store.Save(new CliConfig { Server = Eu, MachineId = "mch_old", WorkspaceId = "w_same", KeyFingerprint = old.Fingerprint });
+        store.SaveKeyPem(old.ExportPrivateKeyPem());
+        machine.Server.On(HttpMethod.Get, "/api/server", _ => Text(Legacy));
+        byte[]? published = null;
+        machine.DiscoveryHttpHandler = () => new DiscoveryHook(machine.Server, async () =>
+        {
+            if (published is not null) return;
+            var competitor = new ConfigStore(machine.MbusFolder, "file");
+            await competitor.WithProfileSecurityLockAsync(tx =>
+            {
+                var current = tx.Load();
+                if (replaceIdentity) tx.CommitEnrollment(current, current with
+                {
+                    MachineId = NewMachineId, KeyFingerprint = replacement.Fingerprint,
+                    MachineName = "new fixture name", Location = "new fixture location",
+                }, replacement.ExportPrivateKeyPem(), Ct);
+                else tx.Save(current with { MachineName = "new fixture name", Location = "new fixture location" });
+                return Task.FromResult(true);
+            }, Ct);
+            published = File.ReadAllBytes(competitor.ConfigPath);
+        });
+        var result = await machine.RunAsync("logout");
+        Assert.NotNull(published);
+        var restarted = new ConfigStore(machine.MbusFolder, "file");
+        Assert.Equal("new fixture name", restarted.Load().MachineName);
+        Assert.Equal("new fixture location", restarted.Load().Location);
+        if (replaceIdentity)
+        {
+            Assert.NotEqual(0, result.ExitCode);
+            Assert.Equal(published, File.ReadAllBytes(store.ConfigPath));
+            Assert.Equal(NewMachineId, restarted.Load().MachineId);
+            Assert.Equal(replacement.ExportPrivateKeyPem(), restarted.LoadKeyPem());
+        }
+        else
+        {
+            Assert.True(result.ExitCode == 0, result.Error);
+            Assert.Null(restarted.Load().MachineId);
+            Assert.Null(restarted.LoadKeyPem());
+        }
     }
 
     [Theory]
@@ -468,6 +662,16 @@ public sealed class EnrollmentBindingTests
 
     private static Task<ServerBindingSnapshot?> PinAsync(ConfigStore store, string endpoint, string discovery) =>
         store.WithProfileSecurityLockAsync(tx => Task.FromResult(tx.PrepareBinding(ServerEndpoint.Parse(endpoint), ServerDiscoveryParser.Parse(discovery))), Ct);
+
+    private sealed class DiscoveryHook(HttpMessageHandler server, Func<Task> before) : HttpMessageHandler
+    {
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            await before();
+            using var transport = new HttpMessageInvoker(server, disposeHandler: false);
+            return await transport.SendAsync(request, ct);
+        }
+    }
 
     private const string Legacy = """{"product":"messagebus.ai","version":"0.0.1","signIn":{"microsoft":true}}""";
     private static string Isolated(string canonical, string stamp, string? alias = null) =>

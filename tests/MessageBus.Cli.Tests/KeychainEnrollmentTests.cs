@@ -250,6 +250,76 @@ public sealed class KeychainEnrollmentTests
     }
 
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Logout_reset_deletes_active_and_pending_native_generations_without_selecting_replacement(bool appOnly)
+    {
+        using var machine = new TestMachine();
+        var backend = new KeychainFixture();
+        IMachineKeyVault Vault() => backend.Vault(machine.MbusFolder, appOnly);
+        var store = new ConfigStore(machine.MbusFolder, osVault: Vault());
+        using var active = MachineKey.Create();
+        using var replacement = MachineKey.Create();
+        await Enroll(store, active, "active");
+        var pending = await store.WithProfileSecurityLockAsync(tx => Task.FromResult(tx.StageRunnerReplacement(
+            new RunnerEnrollmentBinding { SelectedEndpoint = ServerEndpoint.Parse(Server).Value,
+                ApiKeyFingerprint = "0123456789abcdef", MachineKeyFingerprint = replacement.Fingerprint },
+            replacement.ExportPrivateKeyPem(), Ct)), Ct);
+        var before = store.Load();
+        Assert.Equal(2, backend.Secrets.Count);
+        await store.WithProfileSecurityLockAsync(tx => { tx.ResetIdentity(before); return Task.FromResult(true); }, Ct);
+        var restarted = new ConfigStore(store.Directory, osVault: Vault());
+        Assert.Null(restarted.Load().MachineId);
+        Assert.Null(restarted.Load().PendingRunnerIdentity);
+        Assert.Equal(before.MachineKeyGeneration, restarted.Load().MachineKeyGeneration);
+        Assert.NotEqual(pending.KeyGeneration, restarted.Load().MachineKeyGeneration);
+        Assert.Equal("keychain", restarted.KeyStoreName);
+        Assert.False(restarted.HasKey);
+        Assert.Null(restarted.LoadKeyPem());
+        Assert.Empty(backend.Secrets);
+    }
+
+    [Theory]
+    [InlineData("enroll")]
+    [InlineData("backend")]
+    [InlineData("pending")]
+    public async Task Stale_logout_cannot_delete_separate_store_identity_publication(string change)
+    {
+        using var machine = new TestMachine();
+        var backend = new KeychainFixture();
+        IMachineKeyVault Vault() => backend.Vault(machine.MbusFolder, true);
+        var store = new ConfigStore(machine.MbusFolder, "file", osVault: Vault());
+        using var active = MachineKey.Create();
+        using var replacement = MachineKey.Create();
+        await Enroll(store, active, "active");
+        var captured = store.Load();
+        var competitor = new ConfigStore(machine.MbusFolder, osVault: Vault());
+        if (change == "enroll") await Enroll(competitor, replacement, "replacement");
+        else if (change == "backend") competitor.PrepareKeyStoreChange("keychain").Commit();
+        else await competitor.WithProfileSecurityLockAsync(tx => Task.FromResult(tx.StageRunnerReplacement(
+            new RunnerEnrollmentBinding { SelectedEndpoint = ServerEndpoint.Parse(Server).Value,
+                ApiKeyFingerprint = "0123456789abcdef", MachineKeyFingerprint = replacement.Fingerprint },
+            replacement.ExportPrivateKeyPem(), Ct)), Ct);
+        var published = File.ReadAllBytes(competitor.ConfigPath);
+        var secrets = backend.Secrets.ToDictionary(pair => pair.Key, pair => pair.Value.ToArray());
+        await Assert.ThrowsAsync<ServerBindingException>(() => store.WithProfileSecurityLockAsync(tx =>
+        {
+            tx.ResetIdentity(captured);
+            return Task.FromResult(true);
+        }, Ct));
+        Assert.Equal(published, File.ReadAllBytes(competitor.ConfigPath));
+        var restarted = new ConfigStore(machine.MbusFolder, osVault: Vault());
+        Assert.Equal(change == "enroll" ? replacement.ExportPrivateKeyPem() : active.ExportPrivateKeyPem(), restarted.LoadKeyPem());
+        Assert.Equal(secrets.Keys.Order(), backend.Secrets.Keys.Order());
+        foreach (var (account, bytes) in secrets) Assert.Equal(bytes, backend.Secrets[account]);
+        if (change == "pending") await restarted.WithProfileSecurityLockAsync(tx =>
+        {
+            Assert.Equal(replacement.ExportPrivateKeyPem(), tx.LoadRunnerReplacementKey(tx.Load().PendingRunnerIdentity!));
+            return Task.FromResult(true);
+        }, Ct);
+    }
+
+    [Theory]
     [MemberData(nameof(PreparedChanges))]
     public async Task Prepared_A_cannot_publish_or_delete_after_separate_store_enrolls_B(
         bool appOnly, string source, bool generated, bool abandon)

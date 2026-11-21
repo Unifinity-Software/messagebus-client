@@ -301,6 +301,14 @@ Approved tokens may be saved only by the collecting sign-in with that same prepa
 fresh validation and a current ledger check inside the session transaction; changed or stripped discovery cannot
 relabel already-issued tokens. These are source integrations, not runtime verification or release readiness.
 
+`LoginCommand` prepares its initial `/api/server` observation through the same strict, credential-free discovery
+gate at the exact selected endpoint. That first positive isolated observation durably establishes the floor before
+display or approval; later stripped discovery cannot fall back to legacy, even on an unprovisioned clean profile.
+Partial, null or unsupported initial security bundles refuse immediately. Actual credential sends still obtain
+their own fresh prepared observation; the initial descriptive response never authorizes a later send.
+The initial discovery uses the dedicated anonymous factory (or the anonymous-restricted fallback), so proxy
+challenges cannot acquire inherited API proxy credentials.
+
 `LoginCommand` enrollment-token POST and runner caller-key probes now prepare/consume the shared gate before
 attaching their supplied Authorization header. Enrollment content is built only after fresh anonymous validation.
 Both use credential-free transports with redirects disabled, reject every 3xx and clear the per-request credential
@@ -319,6 +327,13 @@ response leaves a durable checkpoint and key; restart reuses that key only in th
 without provenance are accepted only at their original endpoint under affirmative never-pinned legacy, then
 acquire the verified fields. Isolated checkpoints missing those fields refuse. A surviving checkpoint snapshot
 is independent ever-isolated evidence even if the top-level snapshot was stripped.
+
+Logout resets the machine identity, runner enrollment provenance, bootstrap fingerprints and both active and
+independently staged runner keys inside one explicit profile transaction. It rereads current state and refuses
+before key deletion if an enrollment, checkpoint or key-store publication changed the identity during remote
+logout. Unrelated current settings, the selected generation/backend and all server binding snapshots and ledger
+entries survive the reset. No staged replacement becomes selected as a side effect of logout. A subsequent login
+can enroll a fresh identity, and an isolated profile still refuses stripped discovery after restart.
 
 Identity finalization rereads config and current binding inside the explicit profile transaction. Token enrollment
 retains its actual send binding. Browser enrollment captures a pre-send binding and conservatively refuses if

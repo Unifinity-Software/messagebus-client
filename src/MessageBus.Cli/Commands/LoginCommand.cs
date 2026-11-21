@@ -61,8 +61,11 @@ internal static class LoginCommand
 
         await context.Store.WithProfileSecurityLockAsync(tx => { tx.DemandEnrollmentTrust(); return Task.FromResult(true); }, ct);
 
-        using var anonymous = ServerConnection.CreateAnonymousClient(host, server);
-        var info = await ServerConnection.GetServerInfoAsync(anonymous, server, ct);
+        // The first observation establishes the same durable floor as every subsequent send.
+        // It also uses the dedicated credential-free discovery transport, including proxy policy.
+        using var discovery = new ServerSendGate(host, context.Store, server);
+        var initialDiscovery = await discovery.PrepareSendAsync(new Uri(CliSettings.BaseAddress(server), "api/server"), ct);
+        var info = initialDiscovery.Discovery.Info;
         console.MarkupLineInterpolated($"Server: [bold]{serverText}[/] (messagebus.ai {info.Version ?? "unknown version"})");
 
         // the original issue: a runner API key enrolls this machine as a shared runner, once; any other key is used as it is.

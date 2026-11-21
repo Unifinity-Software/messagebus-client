@@ -54,6 +54,7 @@ public sealed class TestMachine : IDisposable
 
     public FakeServer Server { get; } = new();
     internal Func<HttpClient>? ReleaseHttpClient { get; set; }
+    internal Func<HttpMessageHandler>? ApiHttpHandler { get; set; }
     internal Func<HttpMessageHandler>? DiscoveryHttpHandler { get; set; }
     internal Func<HttpMessageHandler> LocalModelHandler { get; set; } = MessageBus.Cli.Agents.OpenCodeReadiness.Handler;
 
@@ -164,7 +165,7 @@ public sealed class TestMachine : IDisposable
             MachineName = "test-mac",
             MbusCommand = MbusCommand,
             ExtraAgentDirectories = [],
-            CreateHttpHandler = () => new NonDisposingHandler(Server),
+            CreateHttpHandler = ApiHttpHandler ?? (() => new NonDisposingHandler(Server)),
             CreateDiscoveryHttpHandler = DiscoveryHttpHandler,
             CreateReleaseHttpClient = ReleaseHttpClient ?? (() => MessageBus.Cli.Update.HttpReleaseSource.CreateTestHttpClient(Server, disposeHandler: false)),
             CreateLocalModelHttpHandler = LocalModelHandler,

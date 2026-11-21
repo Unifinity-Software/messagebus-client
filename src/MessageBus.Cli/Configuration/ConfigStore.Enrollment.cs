@@ -152,6 +152,34 @@ public sealed partial class ConfigStore
 
     public sealed partial class ProfileSecurityTransaction
     {
+        /// <summary>Forgets the logged-out identity and both active and staged keys, retaining all server floors.</summary>
+        internal void ResetIdentity(CliConfig expected) => Execute(() =>
+        {
+            var current = _store.ReadBindingState().Config;
+            // Remote logout awaits do not own a later enrollment or key-store migration. Refuse
+            // before deleting anything if either active or independently staged identity changed.
+            if (current.Server != expected.Server || current.MachineId != expected.MachineId
+                || current.WorkspaceId != expected.WorkspaceId || current.KeyFingerprint != expected.KeyFingerprint
+                || current.MachineKeyGeneration != expected.MachineKeyGeneration || current.KeyStore != expected.KeyStore
+                || current.EnrolledAt != expected.EnrolledAt || current.EnrolledWithApiKey != expected.EnrolledWithApiKey
+                || current.PendingRunnerEnrollment != expected.PendingRunnerEnrollment
+                || current.RunnerEnrollmentBinding != expected.RunnerEnrollmentBinding
+                || current.PendingRunnerIdentity != expected.PendingRunnerIdentity)
+                throw new ServerBindingException("The profile identity changed during logout; its current identity and keys were preserved. Run mbus logout again.");
+
+            _store.DeleteSessionLocked();
+            _store.DeleteKeyLocked();
+            if (current.PendingRunnerIdentity is { } pending)
+                _store.GenerationVault(pending.KeyGeneration, pending.KeyStore == "file").Delete();
+            _store.SaveConfigLocked(current with
+            {
+                MachineId = null, WorkspaceId = null, WorkspaceName = null, KeyFingerprint = null, EnrolledAt = null,
+                EnrolledWithApiKey = null, PendingRunnerEnrollment = null, RunnerEnrollmentBinding = null,
+                PendingRunnerIdentity = null,
+            });
+            return true;
+        });
+
         /// <summary>Stages a runner replacement without changing the active identity or key selector.</summary>
         public PendingRunnerIdentity StageRunnerReplacement(RunnerEnrollmentBinding binding, string pem, CancellationToken ct) => Execute(() =>
         {
