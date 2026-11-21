@@ -44,19 +44,14 @@ public sealed class DotnetToolUpdateCommandTests
         var tools = Path.Combine(machine.Home, "tools & ' (test)");
         Directory.CreateDirectory(tools);
         File.WriteAllText(Path.Combine(tools, OperatingSystem.IsWindows() ? "mbus.exe" : "mbus"), "shim");
-        var package = Path.Combine(tools, ".store", "messagebus.ai.cli", "1.0.0", "messagebus.ai.cli.1.0.0.nupkg");
-        Directory.CreateDirectory(Path.GetDirectoryName(package)!);
-        File.WriteAllText(package, "old package");
-        var entry = Path.Combine(machine.Home, "program", "mbus.dll");
-        Directory.CreateDirectory(Path.GetDirectoryName(entry)!);
-        File.WriteAllText(entry, "private program");
+        var tool = DotnetToolInstallTests.Install(tools);
+        var entry = DotnetToolInstallTests.WriteRecoverableTool(tool, "private program");
         var source = Path.Combine(machine.Home, "feed");
         Directory.CreateDirectory(source);
         File.WriteAllText(Path.Combine(source, "MessageBus.Ai.Cli.2.0.0.nupkg"), "new package");
         machine.Env["MBUS_UPDATE_NUGET_SOURCE"] = source;
         var output = new StringWriter();
         var called = false;
-        var tool = new DotnetToolInstall(tools, false);
         var result = await DotnetToolUpdateCommand.RunAsync(machine.CreateHost(output, terminal: terminal), tool, null, null, false, yes,
             TestContext.Current.CancellationToken, (dotnet, assembly, root) =>
             {
@@ -67,7 +62,8 @@ public sealed class DotnetToolUpdateCommandTests
                 Assert.Equal("2.0.0", attempt.To);
                 Assert.False(attempt.Pinned);
                 Assert.Equal(tools, attempt.Tools);
-                Assert.Equal("old package", File.ReadAllText(Path.Combine(root, "recovery", "MessageBus.Ai.Cli.1.0.0.nupkg")));
+                var savedPackage = Path.Combine(root, "recovery", "MessageBus.Ai.Cli.1.0.0.nupkg");
+                Assert.Equal(File.ReadAllBytes(Directory.GetFiles(tools, "*.nupkg", SearchOption.AllDirectories).Single()), File.ReadAllBytes(savedPackage));
                 var sources = XDocument.Load(Path.Combine(root, "NuGet.Config")).Root!.Element("packageSources")!;
                 Assert.Equal("clear", sources.Elements().First().Name.LocalName);
                 Assert.Equal(source, sources.Element("add")!.Attribute("value")!.Value);
@@ -101,7 +97,7 @@ public sealed class DotnetToolUpdateCommandTests
         }
         using var held = runner ? RunnerInstance.TryAcquire(machine.MbusFolder, out _) : null;
         var ex = await Assert.ThrowsAsync<CliException>(() => DotnetToolUpdateCommand.RunAsync(machine.CreateHost(),
-            new(tools, false), "2.0.0", null, false, true, TestContext.Current.CancellationToken,
+            DotnetToolInstallTests.Install(tools), "2.0.0", null, false, true, TestContext.Current.CancellationToken,
             (_, _, _) => throw new Exception("Must not hand off"), "1.0.0"));
         if (runner) Assert.Equal(DotnetToolUpdateCommand.RunnerMessage, ex.Message);
         else { Assert.Contains("1 processes", ex.Message); Assert.Contains("42 mbus mcp", ex.Message); }
@@ -125,13 +121,13 @@ public sealed class DotnetToolUpdateCommandTests
         {
             var output = new StringWriter();
             Assert.Equal(0, await DotnetToolUpdateCommand.RunAsync(machine.CreateHost(output, terminal: true),
-                new(machine.Bin, false), "2.0.0", null, false, false, TestContext.Current.CancellationToken,
+                DotnetToolInstallTests.Install(machine.Bin), "2.0.0", null, false, false, TestContext.Current.CancellationToken,
                 (_, _, _) => throw new Exception("Must not hand off"), "1.0.0"));
             Assert.Contains("[y/N]", output.ToString());
             return;
         }
         var ex = await Assert.ThrowsAsync<CliException>(() => DotnetToolUpdateCommand.RunAsync(machine.CreateHost(),
-            new(machine.Bin, false), "2.0.0", null, false, true, TestContext.Current.CancellationToken,
+            DotnetToolInstallTests.Install(machine.Bin), "2.0.0", null, false, true, TestContext.Current.CancellationToken,
             (_, _, _) => throw new Exception("Must not hand off"), "1.0.0"));
         Assert.Equal(DotnetToolUpdateCommand.RunnerMessage, ex.Message);
     }
@@ -147,8 +143,8 @@ public sealed class DotnetToolUpdateCommandTests
         File.WriteAllText(Path.Combine(source, $"MessageBus.Ai.Cli.{version}.nupkg"), "package");
         machine.Env["MBUS_UPDATE_NUGET_SOURCE"] = source;
         var output = new StringWriter();
-        Assert.Equal(0, await DotnetToolUpdateCommand.RunAsync(machine.CreateHost(output), new(machine.Bin, false), null, null, true, true,
-            TestContext.Current.CancellationToken, (_, _, _) => throw new Exception(), "1.0.0"));
+        Assert.Equal(0, await DotnetToolUpdateCommand.RunAsync(machine.CreateHost(output), DotnetToolInstallTests.Install(machine.Bin), null, null, true, true,
+            TestContext.Current.CancellationToken, (_, _, _) => throw new Exception(), "6.0.0+dev.012abcd"));
         Assert.Contains(message, output.ToString());
     }
 }

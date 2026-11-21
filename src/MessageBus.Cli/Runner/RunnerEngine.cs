@@ -366,15 +366,17 @@ public sealed class RunnerEngine : IAsyncDisposable
             _update = request;
             if (_ext.SessionUpdater is { } tool)
             {
-                var comparison = Contracts.Releases.ReleaseVersion.Compare(tool.CurrentVersion, request.Version);
-                if (request.Version != RunnerUpdates.Latest && (!Contracts.Releases.ReleaseFeed.IsPinnableVersion(request.Version)
+                var comparison = DotnetToolPackage.Compare(tool.CurrentVersion, request.Version);
+                var exactRelease = DotnetToolUpdater.IsReleaseVersion(request.Version);
+                if (request.Version != RunnerUpdates.Latest && (!exactRelease
                     || comparison == 0 || (!request.Pinned && comparison > 0)))
                 {
                     tool.ClearWaiting();
                     _update = null;
                     var report = new Contracts.Releases.RunnerUpdateReport { Outcome = Contracts.Releases.RunnerUpdateOutcome.NotInstalled,
-                        FromVersion = tool.CurrentVersion, ToVersion = request.Version, At = _time.GetUtcNow(),
-                        Reason = comparison == 0 ? "This version is already installed." : "The requested version is invalid or is an unpinned downgrade." };
+                        FromVersion = tool.CurrentVersion ?? RunnerEnvironment.Version, ToVersion = request.Version, At = _time.GetUtcNow(),
+                        Reason = !exactRelease ? "The update needs an exact, valid package version."
+                            : comparison == 0 ? "This version is already installed." : "An unpinned update cannot install an older version." };
                     _ext.KeepUpdateResult?.Invoke(report);
                     ReportUpdate(Contracts.Releases.RunnerUpdateStage.Ended, null, report);
                     return;
