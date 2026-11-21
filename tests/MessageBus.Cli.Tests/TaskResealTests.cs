@@ -44,7 +44,8 @@ public sealed class TaskResealTests
         var envelope = Envelope(encryptedBody ? BodyCrypto.Seal(new MessageBody { Summary = "Do the work" }, oldKey).ToSealedBody() : null,
             encryptedFile ? [plain, encrypted, same, plain] : [plain]);
 
-        var result = await TaskReseal.ResealAsync(keys, http, attachments, envelope, new RoleTarget { Role = "new-role" }, Ct);
+        var result = await TaskReseal.ResealAsync(keys, http, attachments, envelope, new RoleTarget { Role = "new-role" }, Ct,
+            tempDirectory: machine.Home);
 
         using var destination = new KeyRing().Add(newKey.KeyId, KeyPair.FromPem(newPair.ExportPem()));
         if (encryptedBody)
@@ -78,6 +79,44 @@ public sealed class TaskResealTests
             Assert.Null(result.Attachments);
             Assert.DoesNotContain(machine.Server.Requests, r => r.Uri.AbsolutePath.Contains("attachments"));
         }
+        Assert.Empty(Directory.EnumerateFiles(machine.Home, "mbus-reseal-*"));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Failed_attachment_transfers_clean_plaintext_and_partial_files_without_deleting_originals(bool failUpload)
+    {
+        using var machine = new TestMachine();
+        using var oldPair = KeyPair.GenerateP256();
+        using var newPair = KeyPair.GenerateP256();
+        var oldKey = Key(oldPair, "ek_old", "old-role");
+        var newKey = Key(newPair, "ek_new", "new-role");
+        using var http = Configure(machine, newKey);
+        using var keys = new MachineKeys(http, "ws_test", null, machine.Home, TextWriter.Null, machine.Time);
+        keys.Ring.Add(oldKey.KeyId, KeyPair.FromPem(oldPair.ExportPem()));
+        var sealedFile = await SealFile("private task input"u8.ToArray(), oldKey);
+        var file = FileRef("att_original", sealedFile.Ciphertext) with { Encryption = sealedFile.Encryption };
+        ConfigureDownload(machine, file, sealedFile.Ciphertext);
+        if (failUpload)
+        {
+            machine.Server.On(HttpMethod.Post, "/api/w/ws_test/attachments/upload-link", _ =>
+            {
+                // The decrypted file exists at the failure point, so cleanup must remove it.
+                Assert.Single(Directory.EnumerateFiles(machine.Home, "mbus-reseal-*"));
+                return new(HttpStatusCode.ServiceUnavailable);
+            });
+        }
+        else file = file with { Sha256 = new string('0', 64) };
+
+        await Assert.ThrowsAsync<AttachmentTransferException>(() => TaskReseal.ResealAsync(keys, http,
+            new AttachmentClient(http, http, "ws_test"), Envelope(null, [file]),
+            new RoleTarget { Role = "new-role" }, Ct, tempDirectory: machine.Home));
+
+        Assert.Empty(Directory.EnumerateFiles(machine.Home, "mbus-reseal-*"));
+        Assert.DoesNotContain(machine.Server.Requests, r => r.Method == HttpMethod.Delete || r.Method == HttpMethod.Put);
+        if (!failUpload)
+            Assert.DoesNotContain(machine.Server.Requests, r => r.Uri.AbsolutePath.EndsWith("/upload-link", StringComparison.Ordinal));
     }
 
     [Fact]

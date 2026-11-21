@@ -55,10 +55,14 @@ Results contain `threadId`, `messageId`, `previousMessageId`, `from`, `to`, `sta
 optional `queuePosition` and `notice`. An already-applied operation returns its historical result and
 never changes a later task generation.
 
-`McpToolSpec.RequiresHandlerSupport` hides future tools on remote servers by default. The original
-`McpToolCatalog.Tools(bool, IReadOnlySet<string>?)` signature remains intact. A service with a deployed
-retarget handler opts in through the new three-argument overload's `supported` set; the `only` permission
-filter still applies. The local client advertises its own retarget handler. Independently of catalog
+`McpToolSpec.RequiredFeatures` declares the handler capabilities required to advertise a tool. The flags
+`McpCatalogFeatures` are `None=0`, `VerifiedTasks=1`, `Retarget=2`, and `RoleProposals=4`; flags reserve
+capabilities and do not imply their handlers are deployed. The original positional `McpToolSpec`
+constructor/deconstruction and `McpToolCatalog.Tools(bool, IReadOnlySet<string>?)` signature remain intact.
+The additive `Tools(bool, IReadOnlySet<string>?, McpCatalogFeatures)` overload applies feature support
+and the `only` permission filter independently: both must allow a tool. The original overload defaults
+remote catalogs to `None`, hiding retarget, and local catalogs to their implemented `Retarget` capability.
+A service with a deployed retarget handler opts in with `McpCatalogFeatures.Retarget`. Independently of catalog
 advertising, it calls the actual remote retarget handler with `dryRun: true` before reading message
 content, accessing recipient keys, downloading, resealing or uploading. JSON-RPC unknown-tool errors
 and structured `not-found` failures stop this flow with no uploads. An explicit dry-run returns that

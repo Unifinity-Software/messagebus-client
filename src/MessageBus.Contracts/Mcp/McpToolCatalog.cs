@@ -18,8 +18,8 @@ namespace MessageBus.Contracts.Mcp;
 /// <param name="ReadOnly">True when it changes nothing.</param>
 public sealed record McpToolSpec(string Name, Type Input, Type Output, string Title, string Description, bool ReadOnly = false)
 {
-    /// <summary>Hide this future remote tool unless a deployed handler explicitly opts in.</summary>
-    public bool RequiresHandlerSupport { get; init; }
+    /// <summary>Capabilities the handler must support before this tool is advertised.</summary>
+    public McpCatalogFeatures RequiredFeatures { get; init; }
 }
 
 /// <summary>
@@ -97,7 +97,7 @@ public static class McpToolCatalog
             "Change a queued task's recipient on the same thread and project. `to`: role:<name>, agent:<agt_id> or capabilities:<cap>,<cap>. " +
             "Refused after any copy has been picked up. Preview with dryRun first; a mutation requires operationId and expectedTaskMessageId. " +
             "Keep operationId for retries. reason is at most 500 characters. The local client negotiates support before reading or uploading content, " +
-            "and reseals each encrypted input whose key changes. Run on a machine holding all old keys. Returns routing, status and notice.") { RequiresHandlerSupport = true },
+            "and reseals each encrypted input whose key changes. Run on a machine holding all old keys. Returns routing, status and notice.") { RequiredFeatures = McpCatalogFeatures.Retarget },
         new(McpToolNames.Move, typeof(MoveInput), typeof(MoveThreadsResult), "Move a task",
             "Move a task sent under the wrong project instead of sending it again. Give threadId and projectId (null for no project). " +
             "includeSubtasks defaults to true; reason explains why; dryRun previews without changing anything. Returns thread ids and from/to projects. " +
@@ -164,16 +164,19 @@ public static class McpToolCatalog
     /// The tool list. <paramref name="local"/>: the local server's (all tools, sealed fields hidden); else the remote endpoint's.
     /// <paramref name="only"/>: just these (a runner-started worker's, see <see cref="WorkerTools"/>); null for all.
     /// </summary>
-    public static IList<Tool> Tools(bool local, IReadOnlySet<string>? only = null) => Tools(local, only, supported: null);
+    public static IList<Tool> Tools(bool local, IReadOnlySet<string>? only = null) =>
+        Tools(local, only, local ? McpCatalogFeatures.Retarget : McpCatalogFeatures.None);
 
     /// <summary>
-    /// The tool list with explicitly supported future handlers. Remote retarget is hidden unless
-    /// <paramref name="supported"/> contains it; the local client implements its own handler.
+    /// The tool list with explicitly supported handler capabilities. Tools requiring capabilities absent
+    /// from <paramref name="features"/> are hidden independently of the <paramref name="only"/> permission filter.
     /// Existing callers keep their binary-compatible two-argument entrypoint.
     /// </summary>
-    public static IList<Tool> Tools(bool local, IReadOnlySet<string>? only, IReadOnlySet<string>? supported) =>
+    public static IList<Tool> Tools(bool local, IReadOnlySet<string>? only, McpCatalogFeatures features) =>
     [
-        .. Specs.Where(s => (local || !McpToolNames.LocalOnly.Contains(s.Name)) && (local || !s.RequiresHandlerSupport || supported?.Contains(s.Name) == true) && (only is null || only.Contains(s.Name))).Select(s => new Tool
+        .. Specs.Where(s => (local || !McpToolNames.LocalOnly.Contains(s.Name))
+            && (features & s.RequiredFeatures) == s.RequiredFeatures
+            && (only is null || only.Contains(s.Name))).Select(s => new Tool
         {
             Name = s.Name,
             Title = s.Title,

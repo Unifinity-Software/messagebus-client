@@ -48,6 +48,9 @@ public sealed class RetargetTests
         Assert.True(result.DryRun);
         Assert.Single(Calls(machine));
         Assert.All(machine.Server.Requests, r => Assert.Equal("/mcp", r.Uri.AbsolutePath));
+        var methods = machine.Server.Requests.Select(r => (string?)JsonNode.Parse(r.BodyText)!["method"]).ToList();
+        Assert.Equal("server/discover", methods[0]);
+        Assert.Contains("initialize", methods);
     }
 
     [Fact]
@@ -207,11 +210,20 @@ public sealed class RetargetTests
         machine.Server.On(HttpMethod.Post, "/mcp", request =>
         {
             var rpc = JsonNode.Parse(request.BodyText)!;
-            if (rpc["id"] is not { } id) return new(HttpStatusCode.Accepted);
+            if (rpc["id"] is not { } id)
+            {
+                Assert.Equal("notifications/initialized", (string?)rpc["method"]);
+                return new(HttpStatusCode.Accepted);
+            }
             var response = new JsonObject { ["jsonrpc"] = "2.0", ["id"] = id.DeepClone() };
             JsonNode result;
             switch ((string?)rpc["method"])
             {
+                // SDK 2.4 probes discovery before falling back to the initialize handshake.
+                // Model an older deployed service, while leaving unexpected requests visible.
+                case "server/discover":
+                    response["error"] = new JsonObject { ["code"] = -32601, ["message"] = "Method not found: server/discover" };
+                    return Json(response);
                 case "initialize":
                     result = new JsonObject
                     {
@@ -242,7 +254,7 @@ public sealed class RetargetTests
                         };
                     result = new JsonObject { ["isError"] = failure is not null, ["content"] = new JsonArray(new JsonObject { ["type"] = "text", ["text"] = value.ToJsonString() }) };
                     break;
-                default: throw new InvalidOperationException("Unexpected RPC method.");
+                default: throw new InvalidOperationException($"Unexpected RPC method: {rpc["method"]}.");
             }
             response["result"] = result;
             return Json(response);
