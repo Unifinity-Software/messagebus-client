@@ -35,6 +35,9 @@ public sealed record LocalServerOptions
     /// </summary>
     public RunToolScope? Scope { get; init; }
 
+    /// <summary>Trusted origin. Only explicit interactive or verified resumed coordinator hosts may use proposals.</summary>
+    public ProposalAuthority ProposalAuthority { get; init; }
+
     /// <summary>Reports a non-retryable tool refusal to the runner that owns this server, outside the agent's files.</summary>
     public Action<string, McpError>? Refused { get; init; }
 
@@ -132,6 +135,7 @@ public static class LocalServer
         {
             Http = http, WorkspaceId = workspaceId, MachineId = machineId, ConfigDirectory = configDirectory,
             Input = input, Output = output, Log = log, ClientVersion = clientVersion,
+            ProposalAuthority = HasRunMarkers(environment) ? ProposalAuthority.Unknown : ProposalAuthority.Interactive,
             DeliveryFile = NonEmpty(environment("MBUS_DELIVERY_FILE")),
             SettleFile = NonEmpty(environment("MBUS_SETTLE_FILE")),
             Agent = NonEmpty(environment(AgentVariable)),
@@ -155,7 +159,7 @@ public static class LocalServer
         using var ownLinks = options.Links is null ? new HttpClient { Timeout = TimeSpan.FromHours(1) } : null;
         await using var tools = new LocalTools(options with { Links = options.Links ?? ownLinks });
         var shown = ShownTools(options.Delivery ?? ReadDelivery(options.DeliveryFile));
-        var listed = McpToolCatalog.Tools(local: true, shown);
+        var listed = await tools.ListToolsAsync(shown, ct);
         var server = McpServer.Create(new StreamServerTransport(options.Input, options.Output, "mbus"), new McpServerOptions
         {
             ServerInfo = new Implementation { Name = "mbus", Version = options.ClientVersion },
@@ -205,7 +209,7 @@ public static class LocalServer
     /// allows (<c>mcp__mbus</c> or <c>mcp__mbus__*</c>: all of them); none of the built-in roles needs more, and every
     /// tool listed is re-read on every model call. A resumed orchestrator (a message to a session inbox, or the
     /// orchestrator profile; the runner gives it that profile too) and interactive sessions get every tool: null.
-    /// Only the list changes: a call to a tool left out still works.
+    /// Role proposal tools additionally require trusted coordinator authority and a supported server, both for discovery and forced calls.
     /// </summary>
     public static IReadOnlySet<string>? ShownTools(TaskDelivery? delivery)
     {
@@ -221,6 +225,10 @@ public static class LocalServer
         }
         return shown;
     }
+
+    /// <summary>Any relay/delivery marker requires runner provenance, even if its file is absent or corrupt.</summary>
+    public static bool HasRunMarkers(Func<string, string?> environment) =>
+        new[] { "MBUS_RUN_TOOLS", "MBUS_DELIVERY_FILE", "MBUS_SETTLE_FILE" }.Any(n => environment(n) is not null);
 
     private static TaskDelivery? ReadDelivery(string? file)
     {

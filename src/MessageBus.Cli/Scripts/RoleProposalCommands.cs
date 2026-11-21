@@ -1,0 +1,124 @@
+using System.CommandLine;
+using System.Text.Json;
+using System.Text.Json.Nodes;
+using MessageBus.Cli.Commands;
+using MessageBus.Cli.Hosting;
+using MessageBus.Cli.Runner;
+using MessageBus.Cli.Server;
+using MessageBus.Contracts.Json;
+using MessageBus.Contracts.Mcp;
+using MessageBus.Mcp;
+
+namespace MessageBus.Cli.Scripts;
+
+internal static class RoleProposalCommands
+{
+    public static void AddTo(Command roles, CliHost host, CommonOptions options)
+    {
+        var input = new Option<string>("--input") { Required = true, Description = "JSON file (- for stdin): {operation, definition, rationale, idempotencyKey}." };
+        var agent = new Option<string?>("--agent") { Description = "An agent enrolled on this machine, by id or kind." };
+        var proposeJson = ScriptRunner.JsonOption();
+        var proposeInbox = InboxOption();
+        var propose = new Command("propose", "Submit a role definition for editable owner review in the dashboard.") { input, agent, proposeInbox, proposeJson };
+        propose.SetAction((parse, ct) => RunAsync(host, parse, options, McpToolNames.ProposeRole, parse.GetValue(proposeJson),
+            parse.GetValue(proposeInbox), parse.GetValue(agent), async () =>
+            {
+                var file = parse.GetValue(input)!;
+                var text = file == "-" ? await host.In.ReadToEndAsync(ct) : await File.ReadAllTextAsync(Path.GetFullPath(file, host.CurrentDirectory), ct);
+                return JsonNode.Parse(text) as JsonObject ?? throw new JsonException("--input must contain a JSON object.");
+            }, ct));
+        roles.Subcommands.Add(propose);
+
+        foreach (var wait in new[] { false, true })
+        {
+            var id = new Argument<string>("proposal") { Description = "The proposal id." };
+            var inbox = InboxOption();
+            var timeout = new Option<int>("--timeout") { DefaultValueFactory = _ => 30, Description = "Wait 0–30 seconds; pending at the deadline is not failure." };
+            var json = ScriptRunner.JsonOption();
+            var command = new Command(wait ? "wait-proposal" : "get-proposal", "Read authoritative state for this original coordinator's proposal.") { id, inbox, json };
+            if (wait) command.Options.Add(timeout);
+            command.SetAction((parse, ct) => RunAsync(host, parse, options, wait ? McpToolNames.WaitRoleProposal : McpToolNames.GetRoleProposal,
+                parse.GetValue(json), parse.GetValue(inbox), null, () =>
+                {
+                    var args = new JsonObject { ["proposalId"] = parse.GetValue(id) };
+                    if (wait) args["timeoutSeconds"] = parse.GetValue(timeout);
+                    return Task.FromResult(args);
+                }, ct));
+            roles.Subcommands.Add(command);
+        }
+    }
+
+    private static Option<string?> InboxOption() => new("--inbox")
+    {
+        Description = "Original local coordinator inbox from submission (required for later CLI reads). Runner sessions always use their own binding.",
+    };
+
+    private static async Task<int> RunAsync(CliHost host, ParseResult parse, CommonOptions options, string tool, bool json,
+        string? inbox, string? agent, Func<Task<JsonObject>> arguments, CancellationToken ct)
+    {
+        try
+        {
+            ScriptResult result;
+            string? coordinatorInbox = null;
+            if (LocalServer.HasRunMarkers(host.GetEnvironmentVariable))
+            {
+                // Resolve the runner pipe before settings, files, capabilities or machine authentication.
+                if (host.GetEnvironmentVariable(RunToolsVariables.File) is not { Length: > 0 } file)
+                    return await FailAsync(host, json, new McpError { Code = McpErrorCodes.Forbidden, Message = "This run has no tools pipe; direct machine authentication is refused." });
+                if (inbox is not null || agent is not null)
+                    return await FailAsync(host, json, new McpError { Code = McpErrorCodes.Forbidden, Message = "A run cannot replace its original coordinator or agent binding." });
+                result = await PipeRunTools.CallAsync(file, tool, await arguments(), ct);
+            }
+            else
+            {
+                var context = CommandContext.Load(host, parse, options);
+                var settings = context.Settings;
+                if (settings.Server is null || settings.ApiKey is not null || settings.Stored.MachineId is null
+                    || !settings.CanAuthenticate(context.Store) || settings.Stored.WorkspaceId is not { } workspace)
+                    return await FailAsync(host, json, new McpError { Code = McpErrorCodes.Forbidden, Message = "Role proposals require an enrolled machine connection." });
+                var record = inbox is null ? null : new SessionRecords(context.Store.Directory).Find(inbox);
+                if ((inbox is not null && (record is null || record.OriginAuthority != ProposalAuthority.Interactive
+                    || record.WorkspaceId != workspace || record.MachineId != settings.Stored.MachineId))
+                    || (tool != McpToolNames.ProposeRole && record is null))
+                    return await FailAsync(host, json, new McpError { Code = McpErrorCodes.Forbidden, Message = "Give the original local coordinator inbox with --inbox." });
+                if (record is not null && agent is not null && agent != record.AgentId)
+                    return await FailAsync(host, json, new McpError { Code = McpErrorCodes.Forbidden, Message = "The agent must match the original coordinator record." });
+                using var http = ServerConnection.CreateAuthenticatedClient(host, settings, context.Store, "cli");
+                await using var session = new ScriptSession(LocalServer.Options(http, workspace, settings.Stored.MachineId, context.Store.Directory,
+                    Stream.Null, Stream.Null, host.Error, CliHost.Version, host.GetEnvironmentVariable) with
+                {
+                    Session = record, Agent = record?.AgentId ?? agent, MachineKeyPem = context.Store.LoadKeyPem,
+                    WorkingDirectory = host.CurrentDirectory, Time = host.Time,
+                });
+                result = await session.CallAsync(tool, await arguments(), ct);
+                coordinatorInbox = session.CoordinatorInboxId;
+            }
+            if (result.Error is { } error) return await FailAsync(host, json, error);
+            var output = JsonNode.Parse(result.Value.GetRawText())!.AsObject();
+            if (coordinatorInbox is not null) output["coordinatorInboxId"] = coordinatorInbox;
+            if (json) await host.Out.WriteLineAsync(output.ToJsonString());
+            else
+            {
+                await host.Out.WriteLineAsync($"{Script.Text(result.Value, "proposalId")}: {Script.Text(result.Value, "status")}");
+                if (Script.Text(result.Value, "reviewUrl") is { } review) await host.Out.WriteLineAsync(review);
+                if (coordinatorInbox is not null) await host.Out.WriteLineAsync($"Coordinator inbox: {coordinatorInbox} (use --inbox for later reads).");
+            }
+            return 0;
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or JsonException or InvalidOperationException or TimeoutException or HttpRequestException or ModelContextProtocol.McpException)
+        {
+            return await FailAsync(host, json, new McpError
+            {
+                Code = e is JsonException ? McpErrorCodes.InvalidInput : McpErrorCodes.Unavailable,
+                Message = e.GetBaseException().Message, Retryable = e is IOException or TimeoutException or HttpRequestException or ModelContextProtocol.McpException,
+            });
+        }
+    }
+
+    private static async Task<int> FailAsync(CliHost host, bool json, McpError error)
+    {
+        await host.Error.WriteLineAsync(error.Message);
+        if (json) await host.Out.WriteLineAsync("{\"error\":" + MessageBusJson.Serialize(error) + "}");
+        return ScriptExitCodes.For(error.Code);
+    }
+}

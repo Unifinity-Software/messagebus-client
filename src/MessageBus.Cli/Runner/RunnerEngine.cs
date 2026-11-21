@@ -234,7 +234,11 @@ public sealed class RunnerEngine : IAsyncDisposable
             }
 
             var (profile, restricted) = EffectiveProfile(delivery);
-            run = new AgentRun(_services, delivery, agent.Adapter, agent.Executable, profile, restricted, resume, handled);
+            run = new AgentRun(_services, delivery, agent.Adapter, agent.Executable, profile, restricted, resume, handled,
+                resume is { OriginAuthority: MessageBus.Mcp.ProposalAuthority.Interactive, CoordinatorRecordId.Length: > 0 }
+                    && resume.MachineId is not null && resume.MachineId == _host.MachineId
+                    && resume.AgentId == delivery.AgentId && resume.InboxId == (delivery.Envelope.Target as InboxTarget)?.InboxId
+                    ? MessageBus.Mcp.ProposalAuthority.ResumedCoordinator : MessageBus.Mcp.ProposalAuthority.Worker);
             _runs[delivery.DeliveryId] = run;
             _ext.WorkActivityChanged?.Invoke(true);
             EnsureHeartbeat(TimeSpan.FromSeconds(Math.Max(1, delivery.HeartbeatSeconds)));

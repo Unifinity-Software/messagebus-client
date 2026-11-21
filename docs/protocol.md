@@ -90,6 +90,85 @@ plaintext, which is protected in transit and at rest but not end to end.
 Adding a tool, or a field to a tool's input or result, follows the compatibility rules above: an older local server
 must keep working against a newer service, and the reverse.
 
+## Role proposals (optional version 1)
+
+`GET /api/server` may advertise
+`capabilities.roleProposals = {version: 1, baselineVersion: "role-proposal-readonly-v1",
+normalizerVersion: "role-definition-v1"}`. Missing, malformed or unknown protocol versions mean
+`unsupported`, independently of the product version. Existing tools keep working. Proposal tools are hidden
+when unsupported; forced calls return a nonretryable `unsupported`. Endpoint absence triggers one capability
+refresh. There is no role CRUD fallback.
+
+`Roles/RoleProposals.cs` defines the client contracts. Local-only MCP tools are `propose_role`
+(`ProposeRoleInput` → `RoleProposalSubmitted`), `get_role_proposal` (`GetRoleProposalInput` →
+`RoleProposalDetail`) and `wait_role_proposal` (`WaitRoleProposalInput` → `RoleProposalDetail`). They adapt
+REST under `/api/w/{workspaceId}/role-proposals`:
+
+| Method/path | Request and result |
+|---|---|
+| POST root | `{operation: create|update, definition, rationale, idempotencyKey, agentId, coordinatorRecordId, inboxId}` → 201 acknowledgment; identical identity/key/content retries return the existing proposal |
+| GET `/{proposalId}` | Query `coordinatorRecordId`, `inboxId`; `X-Mbus-Agent` identifies the original agent → own authoritative detail/result |
+| GET `/{proposalId}/wait` | Same provenance plus `timeoutSeconds` (0–30) → authoritative detail/result at change or deadline |
+
+The host fills provenance; it is absent from model-visible input schemas. A proposer cannot list workspace
+proposals. Only a current workspace owner using the dashboard cookie can preview, approve or reject;
+there are no agent/CLI decision tools. The server requires an approved enrolled machine in the workspace,
+MessagesSend and an agent belonging to that machine for proposer operations. API keys, cloud delivery
+tokens and a CLI person's sign-in do not authorize them. Owner access and decision authorization require a
+fresh membership read. Admin status or role ownership alone does not grant owner review authority.
+
+`RoleDefinitionV1` is a complete replacement: name, displayName, description, delivery, requiredCapabilities,
+limits, alertRules, access, runEnvironment and instructions. No delete, BuiltIn, workspace, counters,
+timestamps, attribution or signature fields are accepted. The definition rejects unknown top-level properties;
+the server validates all nested properties, enum values and storage limits. Name is fixed at submission.
+Omitted create run settings use the server's expanded safe baseline; the client leaves them absent rather
+than substituting permissive runner defaults. Update omissions inherit the captured base. The server owns
+normalization, warnings, canonical hashes and review revisions; generic `MessageBusJson` serialization is
+not the canonical digest encoding. Body limit is 256 KiB UTF-8, canonical definition 128 KiB, instructions
+1–30,000 UTF-16 units, rationale 2,000 characters. Existing stricter field/collection/storage bounds apply.
+All exchanged types use the source-generated `MessageBusJsonContext`, preserving trim/AOT support.
+
+`pending` and `applying` at a wait deadline are still pending work, not rejection or failure. Only `approved`
+with the authoritative immutable receipt means the role was applied. Other terminal states are `rejected`,
+`expired`, `conflict`, `failed`. Pending TTL is 24 hours of server time. Stale review never silently rebases.
+The server commits role, published instructions, approved state and receipt atomically; transport failure
+during applying is resolved by reading the outcome. Receipts survive subsequent role edits/deletion.
+`SignedBy`/`approvedBy` are human attribution; signature/key fields remain null and do not claim cryptographic
+signing. Original requested and applied edited definitions are distinct.
+
+Proposal errors share `{code,message,retryable,field?,proposalId?,status?,currentRevision?}`. Codes include
+400 `invalid-input`, 401 `unauthenticated`, 403 `forbidden`, 404 `not-found`, 409 `stale-review`,
+`base-conflict`, `already-terminal`, `idempotency-conflict`, 413 `too-large`, 429 `limit-reached`, 503
+`unavailable`; the local capability error is `unsupported`. Added `McpError` fields are optional.
+
+Runner authority is an independent, non-request value: Interactive, ResumedCoordinator, Worker, Unknown.
+It is checked before nullable/wildcard tool allowlists, capability discovery and forwarding. Worker-created
+inboxes, orchestrator profile names and InboxTarget deliveries grant no proposal access. Any delivery/relay
+marker without a working pipe fails closed, including missing/corrupt delivery files. A CLI inside a run uses
+that pipe and never falls back to direct machine authentication.
+
+Protected local session records persist immutable origin, random coordinator record id, workspace, machine,
+agent, agent kind and resumable session identity. Legacy records have Unknown origin. Resumed authority
+requires the runner's existing owner/session checks, exact identity/inbox matching and the original log;
+mutable RunDeliveryId, request arguments and coordination claims do not establish origin. Explicit recovery
+can retain the same expired record; it cannot silently bind another session/inbox. Own GET/wait remains
+available after inbox expiry and results never reroute to another inbox. These are runner/local-host
+guarantees. The coordinator fields are not a cryptographic credential: a holder of the underlying machine
+credential can use raw HTTP for that machine's proposals. This adds no stronger raw-HTTP session boundary.
+
+CLI equivalents are `mbus roles propose --input proposal.json --agent codex --json`,
+`mbus roles get-proposal <id> --inbox <original-inbox> --json` and
+`mbus roles wait-proposal <id> --inbox <original-inbox> --timeout 30 --json`. Submission input has the
+MCP input shape; `--input -` reads stdin. A successful interactive CLI response additionally includes local
+`coordinatorInboxId` for subsequent commands. `--inbox` can reuse an original saved interactive record;
+inside a run the pipe supplies its exact binding and rejects agent/inbox overrides. No command applies a role.
+Customer help-center documentation should cover this review flow before release.
+
+`AgentRole.generationId` and `legacyInstructionCutoff` are optional snapshot metadata. Capture generation
+with the role and use `(role, generation, version)` for instruction caches; never resolve a new generation
+by name for an old snapshot. Missing generation denotes frozen legacy storage, not the current generation.
+The cutoff bounds the committed legacy prefix. Recreated roles use a new generation without legacy fallback.
+
 ## The runner connection
 
 `RunnerStatus.supportsManagedDrain` enables reversible idle-stop drains. When true, the service

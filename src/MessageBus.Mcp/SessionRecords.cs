@@ -19,6 +19,15 @@ public sealed record SessionRecord
     /// <summary>Its workspace.</summary>
     public required string WorkspaceId { get; init; }
 
+    /// <summary>Immutable original host authority; legacy records remain Unknown.</summary>
+    public ProposalAuthority OriginAuthority { get; init; }
+
+    /// <summary>Random immutable local record id, assigned once when the inbox is opened.</summary>
+    public string? CoordinatorRecordId { get; init; }
+
+    /// <summary>The enrolled machine that opened this record.</summary>
+    public string? MachineId { get; init; }
+
     /// <summary>The agent it belongs to (<c>agt_…</c>), as the service recorded it.</summary>
     public string? AgentId { get; init; }
 
@@ -117,9 +126,18 @@ public sealed class SessionRecords(string configDirectory)
             if (OperatingSystem.IsWindows()) System.IO.Directory.CreateDirectory(Directory);
             else System.IO.Directory.CreateDirectory(Directory, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
         }
+        if (Find(record.InboxId) is { } original &&
+            (original.OriginAuthority != record.OriginAuthority || original.CoordinatorRecordId != record.CoordinatorRecordId
+             || original.MachineId != record.MachineId || original.WorkspaceId != record.WorkspaceId
+             || original.AgentId != record.AgentId || original.AgentKind != record.AgentKind
+             || original.SessionId != record.SessionId || original.Folder != record.Folder))
+            throw new InvalidOperationException("An inbox record's original identity and authority cannot change.");
         var json = new JsonObject
         {
             ["inboxId"] = record.InboxId,
+            ["originAuthority"] = record.OriginAuthority.ToString(),
+            ["coordinatorRecordId"] = record.CoordinatorRecordId,
+            ["machineId"] = record.MachineId,
             ["workspaceId"] = record.WorkspaceId,
             ["agentId"] = record.AgentId,
             ["agentKind"] = record.AgentKind,
@@ -209,6 +227,8 @@ public sealed class SessionRecords(string configDirectory)
             return new SessionRecord
             {
                 InboxId = inbox, WorkspaceId = ws, Folder = folder, ExpiresAt = expires,
+                OriginAuthority = Enum.TryParse<ProposalAuthority>(Text(o, "originAuthority"), out var origin) && Enum.IsDefined(origin) ? origin : ProposalAuthority.Unknown,
+                CoordinatorRecordId = Text(o, "coordinatorRecordId"), MachineId = Text(o, "machineId"),
                 AgentId = Text(o, "agentId"), AgentKind = Text(o, "agentKind"), SessionId = Text(o, "sessionId"),
                 ProcessId = o["processId"] is JsonValue p && p.TryGetValue<int>(out var pid) ? pid : null,
                 ProcessStartedAt = Time(o, "processStartedAt"), RunDeliveryId = Text(o, "runDeliveryId"),

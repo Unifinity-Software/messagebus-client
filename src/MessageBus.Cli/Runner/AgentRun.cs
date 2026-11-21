@@ -80,9 +80,10 @@ internal sealed class AgentRun
     /// <param name="profile">What the run may do.</param>
     /// <param name="restricted">The orchestrator profile, enforced by the runner.</param>
     /// <param name="resume">the original issue: the closed session to resume in its own folder, instead of a new session in a worktree.</param>
+    /// <param name="proposalAuthority">Trusted origin verified by the runner for this exact session.</param>
     /// <param name="alreadyHandled">the original issue: nothing to run (the session already read this reply); settles as succeeded with this summary.</param>
     public AgentRun(RunServices services, TaskDelivery delivery, IAgentAdapter adapter, string executable, PermissionProfile profile, bool restricted,
-        MessageBus.Mcp.SessionRecord? resume = null, string? alreadyHandled = null)
+        MessageBus.Mcp.SessionRecord? resume = null, string? alreadyHandled = null, MessageBus.Mcp.ProposalAuthority proposalAuthority = MessageBus.Mcp.ProposalAuthority.Worker)
     {
         _s = services;
         Delivery = delivery;
@@ -91,6 +92,7 @@ internal sealed class AgentRun
         _profile = profile;
         _restricted = restricted;
         Resume = resume;
+        ProposalAuthority = proposalAuthority;
         _alreadyHandled = alreadyHandled;
         LeaseExpiresAt = delivery.LeaseExpiresAt;
         // Started now, on the caller's thread, so the clock starts when the delivery is accepted; for a run that needs its
@@ -108,6 +110,8 @@ internal sealed class AgentRun
         _timeout = new CancellationTokenSource(limit, _s.Time);
         _timeout.Token.Register(() => Stop(StopReason.TimedOut, $"Stopped after {(int)limit.TotalSeconds} seconds, the role's time limit."));
     }
+
+    private MessageBus.Mcp.ProposalAuthority ProposalAuthority { get; }
 
     public TaskDelivery Delivery { get; }
 
@@ -259,6 +263,7 @@ internal sealed class AgentRun
                 _tools = await tools.StartAsync(new RunToolsRequest(workspace, Delivery, _profile, Sandboxed)
                 {
                     Session = Resume,
+                    ProposalAuthority = ProposalAuthority,
                     Refused = (name, error) =>
                     {
                         if (name == McpToolNames.Settle) Volatile.Write(ref _lastRefusal, error.Message);
