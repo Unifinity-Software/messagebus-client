@@ -166,4 +166,3 @@ public static class EnvVars
     /// <summary>Folder for mbus's settings and machine key (default <c>~/.mbus</c>).</summary>
     public const string Home = "MBUS_HOME";
 }
-

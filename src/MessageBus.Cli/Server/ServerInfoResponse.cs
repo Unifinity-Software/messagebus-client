@@ -91,4 +91,3 @@ public sealed record ServerCapabilities
     /// <summary>Role proposal protocol, present only when the complete implementation is enabled.</summary>
     public RoleProposalsCapability? RoleProposals { get; init; }
 }
-
