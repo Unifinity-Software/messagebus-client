@@ -105,6 +105,8 @@ public static class McpErrorCodes
     public const string InvalidInput = "invalid-input";
     /// <summary>The thread, project, role or agent doesn't exist (or isn't visible to the caller).</summary>
     public const string NotFound = "not-found";
+    /// <summary>A supported retarget handler found no operation for the authorized resume request.</summary>
+    public const string RetargetOperationAbsent = "retarget-operation-absent";
     /// <summary>The caller may not do this.</summary>
     public const string Forbidden = "forbidden";
     /// <summary>The thing changed or already ended (for example settling a cancelled task).</summary>

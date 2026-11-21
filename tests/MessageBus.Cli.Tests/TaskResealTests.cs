@@ -261,7 +261,10 @@ public sealed class TaskResealTests
 
         Assert.Empty(Directory.EnumerateFiles(machine.Home, "mbus-reseal-*"));
         Assert.DoesNotContain(machine.Server.Requests, r => r.Method == HttpMethod.Delete || r.Method == HttpMethod.Put);
-        if (!failUpload)
+        if (failUpload)
+            Assert.Single(machine.Server.Requests.Where(r => r.Method == HttpMethod.Post &&
+                r.Uri.AbsolutePath.EndsWith("/upload-link", StringComparison.Ordinal)));
+        else
             Assert.DoesNotContain(machine.Server.Requests, r => r.Uri.AbsolutePath.EndsWith("/upload-link", StringComparison.Ordinal));
     }
 

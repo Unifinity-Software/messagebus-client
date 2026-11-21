@@ -64,7 +64,7 @@ agent or capabilities; inbox targets are refused. A task that has ever been pick
 The deployed service remains responsible for eligibility, routing, ownership and atomic publication.
 This client contract does not imply the service has deployed that implementation.
 
-Inputs are `threadId`, `to`, optional `reason` (at most 500 characters), `dryRun`,
+Inputs are `threadId`, `to`, optional `reason` (at most 500 characters), `dryRun`, `resumeOnly`,
 `expectedTaskMessageId`, `operationId`, and the local client's hidden `sealedBody` and `attachments`.
 A mutation requires both a caller-generated operation id (retained across retries) and the exact task
 message id from the preview. The service refuses stale task pins and conflicting reuse of operation ids.
@@ -81,11 +81,13 @@ The additive `Tools(bool, IReadOnlySet<string>?, McpCatalogFeatures)` overload a
 and the `only` permission filter independently for remote tools: both must allow a tool. The original
 overload defaults remote catalogs to `None`, hiding retarget; local catalogs expose implemented local
 tools while excluding service-only names and retaining the permission filter.
-A service with a deployed retarget handler opts in with `McpCatalogFeatures.Retarget`. Independently of catalog
-advertising, it calls the actual remote retarget handler with `dryRun: true` before reading message
-content, accessing recipient keys, downloading, resealing or uploading. JSON-RPC unknown-tool errors
-and structured `not-found` failures stop this flow with no uploads. An explicit dry-run returns that
-preview directly, even when `needsReseal` is true: it never reserves, adopts, uploads or deletes inputs.
+A service with a deployed retarget handler opts in with `McpCatalogFeatures.Retarget`.
+Before a mutation, the local client sends `resumeOnly: true` with the original logical request
+and no replacement content. The service resolves the operation before evaluating the current task.
+Only `retarget-operation-absent` advances the client to a dry-run preview and fresh preparation.
+An explicit resume returns the absence error directly. Unknown-tool errors and ordinary `not-found`
+responses stop the flow before content transfers. An explicit dry-run returns the preview without
+reserving, adopting, uploading or deleting inputs.
 
 After a supported preview, a mutation reads the **pinned message**, rather than assuming the thread's
 first historical message is still current. A shared `TaskReseal` helper is used by retarget and dead-letter

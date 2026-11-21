@@ -34,7 +34,7 @@ public sealed class RetargetTests
         Assert.Equal(McpErrorCodes.NotFound, error.Error.Code);
         Assert.Single(Calls(machine));
         Assert.All(machine.Server.Requests, r => Assert.Equal("/mcp", r.Uri.AbsolutePath));
-        Assert.True((bool?)Calls(machine)[0]["arguments"]!["dryRun"]);
+        Assert.True((bool?)Calls(machine)[0]["arguments"]!["resumeOnly"]);
     }
 
     [Fact]
@@ -65,7 +65,24 @@ public sealed class RetargetTests
         Assert.True(result.AlreadyApplied);
         Assert.False(result.DryRun);
         Assert.Equal("msg_new", result.MessageId);
-        Assert.Single(Calls(machine));
+        var arguments = Assert.Single(Calls(machine))["arguments"]!;
+        Assert.True((bool?)arguments["resumeOnly"]);
+        Assert.NotEqual(true, (bool?)arguments["dryRun"]);
+        Assert.All(machine.Server.Requests, r => Assert.Equal("/mcp", r.Uri.AbsolutePath));
+    }
+
+    [Fact]
+    public async Task Explicit_resume_of_an_absent_operation_does_not_prepare_a_new_one()
+    {
+        using var machine = new TestMachine();
+        using var http = Server(machine, needsReseal: true);
+        await using var tools = Tools(machine, http);
+
+        var call = await Call(tools, Input() with { ResumeOnly = true });
+
+        var error = Assert.Throws<McpToolException>(() => McpToolCatalog.ReadResult<RetargetResult>(call));
+        Assert.Equal(McpErrorCodes.RetargetOperationAbsent, error.Error.Code);
+        Assert.True((bool?)Assert.Single(Calls(machine))["arguments"]!["resumeOnly"]);
         Assert.All(machine.Server.Requests, r => Assert.Equal("/mcp", r.Uri.AbsolutePath));
     }
 
@@ -85,15 +102,17 @@ public sealed class RetargetTests
         var result = McpToolCatalog.ReadResult<RetargetResult>(await tools.CallAsync("mbus-cli", McpToolNames.Retarget, args, Ct));
         Assert.Equal(ThreadStatus.Working, result.Status);
         var calls = Calls(machine);
-        Assert.Equal(2, calls.Count);
+        Assert.Equal(3, calls.Count);
         foreach (var call in calls)
         {
             Assert.Equal("operation-test", (string?)call["arguments"]!["operationId"]);
             Assert.Equal("msg_old", (string?)call["arguments"]!["expectedTaskMessageId"]);
             Assert.Equal("capabilities", (string?)call["arguments"]!["to"]!["kind"]);
         }
-        Assert.True((bool?)calls[0]["arguments"]!["dryRun"]);
-        Assert.NotEqual(true, (bool?)calls[1]["arguments"]!["dryRun"]);
+        Assert.True((bool?)calls[0]["arguments"]!["resumeOnly"]);
+        Assert.True((bool?)calls[1]["arguments"]!["dryRun"]);
+        Assert.NotEqual(true, (bool?)calls[2]["arguments"]!["dryRun"]);
+        Assert.NotEqual(true, (bool?)calls[2]["arguments"]!["resumeOnly"]);
     }
 
     [Theory]
@@ -119,7 +138,7 @@ public sealed class RetargetTests
         var call = await Call(tools, Input());
         var error = Assert.Throws<McpToolException>(() => McpToolCatalog.ReadResult<RetargetResult>(call));
         Assert.Equal(McpErrorCodes.Conflict, error.Error.Code);
-        Assert.Single(Calls(machine));
+        Assert.Equal(2, Calls(machine).Count);
         Assert.All(machine.Server.Requests, r => Assert.Equal("/mcp", r.Uri.AbsolutePath));
     }
 
@@ -155,7 +174,7 @@ public sealed class RetargetTests
         Assert.Equal(McpErrorCodes.Forbidden, error.Error.Code);
         Assert.Contains("mbus retarget", error.Message);
         Assert.Contains("original role/workspace keys", error.Message);
-        Assert.Single(Calls(machine));
+        Assert.Equal(2, Calls(machine).Count);
         Assert.DoesNotContain(machine.Server.Requests, r => r.Uri.AbsolutePath.Contains("attachments") || r.Method == HttpMethod.Put);
     }
 
@@ -243,8 +262,12 @@ public sealed class RetargetTests
                     }
                     var args = rpc["params"]!["arguments"]!;
                     var preview = (bool?)args["dryRun"] == true;
+                    var resume = (bool?)args["resumeOnly"] == true;
+                    if (alreadyApplied) Assert.True(resume);
+                    var absent = resume && !alreadyApplied && failure is null;
                     var value = failure is "tool-error" or "conflict"
                         ? new JsonObject { ["code"] = failure == "conflict" ? "conflict" : "not-found", ["message"] = failure == "conflict" ? "Already picked up." : "Unknown tool retarget" }
+                        : absent ? new JsonObject { ["code"] = McpErrorCodes.RetargetOperationAbsent, ["message"] = "No operation was accepted." }
                         : new JsonObject
                         {
                             ["threadId"] = "thr_task", ["messageId"] = preview && !alreadyApplied ? "msg_old" : "msg_new", ["previousMessageId"] = previous,
@@ -252,7 +275,7 @@ public sealed class RetargetTests
                             ["status"] = preview ? "queued" : "working", ["dryRun"] = preview && !alreadyApplied, ["needsReseal"] = needsReseal,
                             ["alreadyApplied"] = alreadyApplied,
                         };
-                    result = new JsonObject { ["isError"] = failure is not null, ["content"] = new JsonArray(new JsonObject { ["type"] = "text", ["text"] = value.ToJsonString() }) };
+                    result = new JsonObject { ["isError"] = failure is not null || absent, ["content"] = new JsonArray(new JsonObject { ["type"] = "text", ["text"] = value.ToJsonString() }) };
                     break;
                 default: throw new InvalidOperationException($"Unexpected RPC method: {rpc["method"]}.");
             }

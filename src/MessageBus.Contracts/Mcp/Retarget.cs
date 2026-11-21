@@ -14,6 +14,8 @@ public sealed record RetargetInput
     public string? Reason { get; init; }
     /// <summary>Preview routing and resealing requirements without changing or uploading anything.</summary>
     public bool DryRun { get; init; }
+    /// <summary>Resolve the original operation before examining the current task. Requires the original request and no replacement content.</summary>
+    public bool ResumeOnly { get; init; }
     /// <summary>The current task message to replace; required for a mutation to prevent stale previews.</summary>
     public string? ExpectedTaskMessageId { get; init; }
     /// <summary>A caller-generated idempotency id; required for a mutation and retained for retries.</summary>
