@@ -456,6 +456,33 @@ runner interprets every drain request as a manual drain. A managed request ignor
 
 Defined in `src/MessageBus.Contracts/Runner/RunnerProtocol.cs`; the transport is `src/MessageBus.Runner.Transport`.
 
+Built-in CLI and environment runners obtain fresh anonymous discovery and reconcile the durable
+binding floor before every WebSocket connect or reconnect. `IRunnerHostContext.ConnectAsync`
+and `ReverseConnectionClientOptions.ExecuteConnect` wrap the actual handshake in a single-send
+authorization, retaining the profile security reservation until the upgrade completes. The older
+header factory and `PrepareRequest` signatures remain available for existing integrations; custom
+hosts must implement the asynchronous wrapper to participate in durable binding enforcement.
+Preparation runs before that wrapper, so v2 signs the actual workspace header, GET target and
+empty body. Only the transport scheme is mapped from wss to https (ws to http for legacy);
+the canonical signing authority comes from the validated binding, with no host substitution.
+The selected API path prefix is retained in the default runner connect path.
+
+The WebSocket handshake uses the .NET 10 `ConnectAsync(Uri, HttpMessageInvoker, CancellationToken)`
+over an explicitly cookie-free, credential-free handler with redirects disabled. Any 3xx response
+stops the connection without replay. Binding/protocol/durable-state refusals are terminal;
+discovery network failures may retry only the same selected endpoint, with no credential send or
+v1/host fallback. Existing subprotocol, keepalive and server close-code behavior is unchanged.
+
+The independent environment runner's HTTP factory now uses the shared authenticated pipeline,
+without credential-bearing default headers. It checks the exact selected endpoint before applying
+the configured API key, and revalidates discovery/binding for each request. Trusted
+`MBUS_SERVER_BINDING` provisioning requires explicit writable `MBUS_HOME` before discovery or
+caller probes; deployment remains responsible for mounting that home durably. Runner-key
+enrollment POSTs also use this gated transport. Enrollment checkpoint and previously enrolled
+API-key reuse still require a separate endpoint/binding/key-fingerprint lifecycle review; this
+transport checkpoint does not establish that those flows or the regional acceptance matrix are
+complete. Native runtime, old-server and combined review gates remain required before release.
+
 1. The runner opens an outbound WebSocket to `/api/runner/connect` with subprotocol `mbus.v1`, signed as its machine,
    with `X-Mbus-Session` (its process's session id) and `X-Mbus-Slots` (free slots).
 2. HTTP/2 runs over that socket with the **service as the HTTP client**: the service calls the runner's routes
