@@ -28,14 +28,33 @@ public sealed class OpenCodeRuntimeProofTests
         var evidenceRoot = Environment.GetEnvironmentVariable("MBUS_TEST_OPENCODE_EVIDENCE");
         Assert.False(string.IsNullOrWhiteSpace(evidenceRoot), "An evidence directory is required, including for failures.");
         var evidence = Directory.CreateDirectory(Path.Combine(evidenceRoot!, "fake-runtime-" + Guid.NewGuid().ToString("N"))).FullName;
+        using var log = new StringWriter();
+        try { await RunProof(executable!, evidence, log); }
+        catch (Exception e)
+        {
+            await File.WriteAllTextAsync(Path.Combine(evidence, "FAIL.json"),
+                JsonSerializer.Serialize(new { error = e.ToString() }), CancellationToken.None);
+            throw;
+        }
+        finally
+        {
+            await File.WriteAllTextAsync(Path.Combine(evidence, "isolation.log"), log.ToString(), CancellationToken.None);
+        }
+    }
+
+    private static async Task RunProof(string executable, string evidence, StringWriter log)
+    {
+        log.WriteLine("setup: loopback endpoints");
+        await using var registry = new OpenCodeProofEndpoint();
         await using var local = new OpenCodeProofEndpoint();
         await using var cloud = new OpenCodeProofEndpoint();
         var owned = Directory.CreateDirectory(Path.Combine(evidence, "owned")).FullName;
+        log.WriteLine("setup: workspace");
         using var workspace = RunWorkspace.Create(owned, "dlv_native_proof", 1);
         Directory.CreateDirectory(workspace.WorkTree);
         var home = Directory.CreateDirectory(Path.Combine(workspace.Root, "original-home")).FullName;
         var profile = PermissionProfiles.Defaults(PermissionProfiles.Worker) with { Network = NetworkAccess.Open };
-        var log = new StringWriter();
+        log.WriteLine("setup: isolation");
         var sandbox = RunIsolation.Create(new RunIsolationOptions
         {
             WorkRoot = owned, HomeDirectory = home, Requested = IsolationLevel.OsSandbox,
@@ -53,6 +72,11 @@ public sealed class OpenCodeRuntimeProofTests
             Assert.Equal(Environment.GetEnvironmentVariable("MBUS_TEST_OPENCODE_SHA256")?.ToUpperInvariant(), digest);
             await Save("binary.json", new { executable, sha256 = digest, expectedVersion = OpenCodeLocalRuntime.Version });
             var env = OriginalEnvironment();
+            // Config starts @opencode-ai/plugin installs even for an import-free file plugin;
+            // Plugin.init joins those fibers before debug config can print anything. Keep npm
+            // off the public registry, with a real HTTP 404 and no retry from an owned listener.
+            // Upstream logs the optional dependency failure and still executes our file plugin.
+            await Save("registry-policy.json", new { registry = registry.Url, status = 404, retries = 0 });
             var git = CommandLocator.Find("git", Environment.GetEnvironmentVariable, []);
             Assert.NotNull(git);
             Assert.Equal(0, (await Execute("git-init", Raw(["init", "--quiet"], env) with { FileName = git! }, control: true)).Exit);
@@ -93,6 +117,7 @@ public sealed class OpenCodeRuntimeProofTests
             Assert.Contains(cloud.Requests, r => JsonSerializer.Serialize(r).Contains("/api/config", StringComparison.Ordinal));
             Assert.Contains("HOSTILE_PLUGIN", (await Execute("positive-plugin", Raw(["run", "--model", "proof-cloud/paid", "--format", "json", "Reply LOCAL_OK"], env), control: true)).Out);
             Assert.NotEmpty(cloud.Models); // Counter positive control, not merely a direct test-client request.
+            Assert.Contains(registry.Requests, r => JsonSerializer.Serialize(r).Contains("opencode-ai", StringComparison.Ordinal));
             controls.Ended(workspace);
             await Save("positive-cloud-requests.json", cloud.Requests.ToArray());
             var baseline = cloud.Requests.Count;
@@ -154,8 +179,8 @@ public sealed class OpenCodeRuntimeProofTests
             var serverLaunch = Command(["serve", "--hostname", "127.0.0.1", "--port", port.ToString()]);
             using var server = Start(serverLaunch);
             sandbox.Started(workspace, server.Id);
-            var serverOut = server.StandardOutput.ReadToEndAsync();
-            var serverErr = server.StandardError.ReadToEndAsync();
+            var serverOut = Capture(server.StandardOutput, TestContext.Current.CancellationToken);
+            var serverErr = Capture(server.StandardError, TestContext.Current.CancellationToken);
             try
             {
                 using var http = new HttpClient(new SocketsHttpHandler { UseProxy = false }) { BaseAddress = new Uri($"http://127.0.0.1:{port}"), Timeout = TimeSpan.FromSeconds(35) };
@@ -237,6 +262,7 @@ public sealed class OpenCodeRuntimeProofTests
             Assert.All(local.Models, m => Assert.Equal(OpenCodeProofEndpoint.ApiId, m));
             Assert.Empty(local.Errors);
             Assert.Empty(cloud.Errors);
+            Assert.Empty(registry.Errors);
             await Save("PASS.json", new { localInference = local.Models.Count, cloudRequestsAfterControl = cloud.Requests.Count - baseline, cloudInferenceAfterControl = cloud.Models.Count - modelBaseline });
 
             ProcessLaunch Command(IReadOnlyList<string> args)
@@ -246,7 +272,6 @@ public sealed class OpenCodeRuntimeProofTests
                 return launch with { Arguments = launch.Arguments.Take(prefix).Concat(args).ToArray() };
             }
         }
-        catch (Exception e) { await Save("FAIL.json", new { error = e.ToString() }); throw; }
         finally
         {
             await Save("local-requests.json", local.Requests.ToArray());
@@ -254,7 +279,8 @@ public sealed class OpenCodeRuntimeProofTests
             await Save("counters.json", new { localModels = local.Models.ToArray(), cloudModels = cloud.Models.ToArray(), localErrors = local.Errors.ToArray(), cloudErrors = cloud.Errors.ToArray() });
             sandbox.Ended(workspace);
             controls.Ended(workspace);
-            await File.WriteAllTextAsync(Path.Combine(evidence, "isolation.log"), log.ToString(), CancellationToken.None);
+            await Save("registry-requests.json", registry.Requests.ToArray());
+            await Save("registry-errors.json", registry.Errors.ToArray());
         }
 
         Dictionary<string, string?> OriginalEnvironment() => new()
@@ -266,6 +292,13 @@ public sealed class OpenCodeRuntimeProofTests
             ["OPENCODE_CONFIG_CONTENT"] = "{}", ["OPENCODE_AUTH_CONTENT"] = "", ["OPENCODE_SERVER_PASSWORD"] = "",
             ["GIT_CONFIG_NOSYSTEM"] = "1", ["GIT_CONFIG_GLOBAL"] = Path.Combine(home, ".gitconfig"),
             ["OPENCODE_DB"] = Path.Combine(home, "accounts.db"),
+            ["OPENCODE_PRINT_LOGS"] = "1", ["OPENCODE_LOG_LEVEL"] = "DEBUG",
+            ["NPM_CONFIG_REGISTRY"] = registry.Url + "/",
+            ["NPM_CONFIG_FETCH_RETRIES"] = "0", ["NPM_CONFIG_FETCH_TIMEOUT"] = "5000",
+            ["NPM_CONFIG_AUDIT"] = "false", ["NPM_CONFIG_FUND"] = "false",
+            ["NPM_CONFIG_USERCONFIG"] = Path.Combine(home, ".npmrc"),
+            ["NPM_CONFIG_GLOBALCONFIG"] = Path.Combine(home, "global.npmrc"),
+            ["NPM_CONFIG_CACHE"] = Path.Combine(home, ".npm-cache"),
             ["OPENCODE_DISABLE_MODELS_FETCH"] = "true", ["OPENCODE_DISABLE_AUTOUPDATE"] = "true",
             ["OPENCODE_DISABLE_DEFAULT_PLUGINS"] = "true", ["OPENCODE_DISABLE_PROJECT_CONFIG"] = "false", ["OPENCODE_PURE"] = "false",
         };
@@ -334,12 +367,21 @@ public sealed class OpenCodeRuntimeProofTests
     {
         var result = new StringBuilder();
         var buffer = new char[4096];
+        const int limit = 1024 * 1024;
+        var truncated = false;
         try
         {
             int size;
-            while ((size = await reader.ReadAsync(buffer.AsMemory(), deadline)) > 0) result.Append(buffer, 0, size);
+            while ((size = await reader.ReadAsync(buffer.AsMemory(), deadline)) > 0)
+            {
+                var keep = Math.Min(size, limit - result.Length);
+                result.Append(buffer, 0, keep);
+                truncated |= keep < size;
+                // Continue draining after the evidence cap so the child cannot block on a full pipe.
+            }
         }
         catch (OperationCanceledException) when (deadline.IsCancellationRequested) { }
+        if (truncated) result.Append("\n[proof output truncated after 1048576 characters]\n");
         return result.ToString();
     }
     private static int FreePort() { var listener = new TcpListener(IPAddress.Loopback, 0); listener.Start(); var port = ((IPEndPoint)listener.LocalEndpoint).Port; listener.Stop(); return port; }

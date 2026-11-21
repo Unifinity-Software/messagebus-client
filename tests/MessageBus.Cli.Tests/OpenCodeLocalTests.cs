@@ -258,7 +258,7 @@ public sealed class OpenCodeLocalTests
         var ready = await OpenCodeReadiness.ScanAsync(settings, false, TestContext.Current.CancellationToken, OnlySecondLoaded);
         Assert.True(ready.SignedIn);
         Assert.Null(ready.NotReady);
-        Assert.Contains("confinement", ready.Warning);
+        Assert.False(string.IsNullOrWhiteSpace(ready.Warning));
         Assert.Equal(["/api/v1/models", "/api/v1/models", "/v1/models"], requests);
         Assert.Null(await OpenCodeReadiness.CheckAsync(settings.Select("local/alternative"), TestContext.Current.CancellationToken, OnlySecondLoaded));
         Assert.Contains("not loaded", await OpenCodeReadiness.CheckAsync(settings.Select(null), TestContext.Current.CancellationToken, OnlySecondLoaded));

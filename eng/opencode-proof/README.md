@@ -73,6 +73,25 @@ seed synthetic values (never a personal DB). Positive control requires config/fi
 parse, both auth/account remote requests to reach the counter, the plugin sentinel to execute,
 and a real OpenCode inference to hit fake cloud. Only then is the counter baseline taken.
 
+The owned npm environment points at a third loopback listener, separate from both inference
+counters, with retries disabled and a five-second fetch timeout. Unknown paths return HTTP 404.
+This is needed because the pinned config loader starts an `@opencode-ai/plugin` dependency
+install for each config directory, and instance bootstrap initializes plugins before `debug
+config` prints. When a file plugin is present, plugin initialization joins those installs.
+A public-registry install was therefore an unbounded external dependency in the positive
+control. The upstream loader logs a failed background install and continues; the fixture's
+import-free file plugin must still execute and fake-cloud inference must still occur. No
+installed SDK is fabricated and no config/plugin path is disabled. Registry requests/errors
+are saved separately, and a positive assertion requires the real package lookup to reach it.
+
+Source evidence at the pinned commit: [config install fibers](https://github.com/anomalyco/opencode/blob/810c0eba1a7348036f8bdf61e6632d0c36c6876c/packages/opencode/src/config/config.ts#L452),
+[plugin dependency join](https://github.com/anomalyco/opencode/blob/810c0eba1a7348036f8bdf61e6632d0c36c6876c/packages/opencode/src/plugin/index.ts#L184),
+[instance bootstrap](https://github.com/anomalyco/opencode/blob/810c0eba1a7348036f8bdf61e6632d0c36c6876c/packages/opencode/src/project/bootstrap.ts#L35),
+and [npm environment configuration](https://github.com/anomalyco/opencode/blob/810c0eba1a7348036f8bdf61e6632d0c36c6876c/packages/core/src/npm-config.ts).
+The wellknown and account response envelopes both correctly contain `config`; they are not
+changed to work around the timeout. This source-backed timeout explanation still needs the
+native coordinator's runtime confirmation; compilation alone does not establish a fix.
+
 The confined launch comes from **AgentRun.AgentProcessLaunch + actual RunIsolation.Wrap**, including
 environment scrubbing and the platform's sandbox wrapper. It retains the final wrapped executable,
 environment and wrapper prefix when invoking `debug config`, `models`, `run` and `serve`. It records
@@ -98,7 +117,10 @@ Pinned upstream source (`810c0eba1a7348036f8bdf61e6632d0c36c6876c`):
 
 Every command stores argv/stdout/stderr/exit/timeout before assertions. Session request/response,
 effective config, final sanitized launch, server output, counters, HTTP logs and FAIL.json are
-kept on failure too. Each command has a 45-second tree-kill deadline, server readiness 20 seconds,
+kept on failure too. An outer evidence guard also records endpoint/workspace/isolation setup
+exceptions in FAIL.json and retains setup stages in isolation.log. Native initialization DEBUG
+logs go to stderr; each output stream retains its first 1 MiB of characters (with a truncation
+marker) while continuing to drain the pipe. Each command has a 45-second tree-kill deadline, server readiness 20 seconds,
 session request timeout 35 seconds. A schema/API incompatibility or inability to trigger a path is
 an explicit acceptance failure/gap, never inferred success. Fake-provider PASS does not establish
 that LM Studio performs real inference locally or that a coding model is suitable for the role.
