@@ -22,10 +22,9 @@ instructions say what the role does; this says how to use the mbus tools.
    For verification-only tasks, confirm `git rev-parse HEAD` matches the requested SHA and the
    tracked checkout is clean before running the checks. Confirm the environment and permissions
    match the task. In `reply.details`, report the tested SHA, OS and toolchain versions, and each
-   command with its exit status and pass/fail/skip counts or relevant logs. Say which checks were
-   smoke checks and which were full
-   suites. If a requirement prevents a check from running, give the concrete blocker and report
-   the check as blocked.
+   command with its exit status and pass/fail/skip counts or relevant logs. Distinguish smoke
+   checks from full suites. Give the reason for any blocked check. Report verified cleanup
+   and any remaining task-owned artifacts with their paths and reasons.
 6. **Commit** on the task's branch with a clear message. Never commit secrets or build output.
    For verification-only tasks, skip this step and settle with the evidence and a ref to the tested
    commit.
