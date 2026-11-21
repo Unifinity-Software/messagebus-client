@@ -337,6 +337,145 @@ public sealed class LoginTests
         Assert.Empty(machine.Browser.Opened);
     }
 
+    [Fact]
+    public Task Trust_damage_at_the_actual_enrollment_retry_after_a_successful_refresh_refuses_the_send() =>
+        CheckEnrollmentRefreshRetryAsync(damageTrust: true);
+
+    [Fact]
+    public Task Legacy_server_enrollment_retries_with_the_refreshed_token_and_keeps_the_current_account() =>
+        CheckEnrollmentRefreshRetryAsync(damageTrust: false);
+
+    private static async Task CheckEnrollmentRefreshRetryAsync(bool damageTrust)
+    {
+        using var machine = new TestMachine();
+        machine.Env[ConfigStore.KeyStoreVariable] = "file";
+        var store = new ConfigStore(machine.MbusFolder, "file");
+        using var previousKey = MessageBus.Cli.Security.MachineKey.Create();
+        store.Save(new CliConfig { Server = FakeServer.Url, MachineId = "mch_previous", WorkspaceId = "w101",
+            KeyFingerprint = previousKey.Fingerprint, KeyStore = "file" });
+        store.SaveKeyPem(previousKey.ExportPrivateKeyPem());
+        var savedSession = new CliSessionFile
+        {
+            Server = FakeServer.Url, AccessToken = "fixture-saved-access", RefreshToken = "fixture-saved-refresh",
+            AccessExpiresAt = machine.Time.GetUtcNow().AddHours(1), SessionId = "fixture-session",
+            AccountName = "Current account", AccountEmail = "member@example.test", SignedInAt = machine.Time.GetUtcNow(),
+        };
+        store.SaveSession(savedSession);
+        KeyTrust.Save(machine.MbusFolder, "w101", new TrustedWorkspace(), FakeServer.Url);
+        var configBytes = File.ReadAllBytes(store.ConfigPath);
+        var keyBytes = File.ReadAllBytes(store.KeyPath);
+        var trustPath = Path.Combine(machine.MbusFolder, KeyTrust.FileName);
+        var trustBytes = File.ReadAllBytes(trustPath);
+        var damaged = Encoding.UTF8.GetBytes("""{"servers":{"http://127.0.0.1:5200":{"w101":{"keys":null,"signers":{}}}}}""");
+        RecordedRequest? firstEnroll = null;
+        MachineEnrollRequest? enrolledBody = null;
+        var refreshed = false;
+        var retryBoundaryReached = false;
+        var retryDiscoveryIndex = -1;
+        machine.Server.On(HttpMethod.Get, "/api/server", _ =>
+        {
+            // The first discovery after a completed refresh is the retry's actual send gate.
+            // The enrollment body and its earlier trust check already ran before the first POST.
+            if (refreshed && !retryBoundaryReached)
+            {
+                Assert.NotNull(firstEnroll);
+                Assert.Equal("fixture-refreshed-access", store.LoadSession()!.AccessToken);
+                retryBoundaryReached = true;
+                retryDiscoveryIndex = machine.Server.Requests.Count - 1;
+                if (damageTrust) File.WriteAllBytes(trustPath, damaged);
+            }
+            // Exact old-server wire shape: no binding descriptors or capability tokens.
+            return Text("""{"product":"messagebus.ai","version":"0.1.0","signIn":{"microsoft":true,"cliApprovalUrl":"http://127.0.0.1:5200/cli-login"}}""");
+        });
+        machine.Server
+            .On(HttpMethod.Post, ApiRoutes.MachineEnroll, request =>
+            {
+                if (firstEnroll is null)
+                {
+                    Assert.False(refreshed);
+                    Assert.False(retryBoundaryReached);
+                    Assert.Equal("MbusCli fixture-saved-access", request.Header("Authorization"));
+                    Assert.Null(request.Header(MbusHeaders.Workspace));
+                    Assert.Null(request.Header(MbusHeaders.Signature));
+                    enrolledBody = MessageBusJson.Deserialize<MachineEnrollRequest>(request.BodyText)!;
+                    Assert.Equal("w101", enrolledBody.WorkspaceId);
+                    Assert.Equal("test-mac", enrolledBody.Name);
+                    Assert.Equal("Fixture desk", enrolledBody.Location);
+                    Assert.Equal("mch_previous", enrolledBody.Inventory.MachineId);
+                    Assert.NotEmpty(enrolledBody.PublicKey);
+                    Assert.NotEqual(previousKey.PublicKeyBase64, enrolledBody.PublicKey);
+                    firstEnroll = request;
+                    return new(HttpStatusCode.Unauthorized);
+                }
+                Assert.False(damageTrust);
+                Assert.True(retryBoundaryReached);
+                Assert.Equal("MbusCli fixture-refreshed-access", request.Header("Authorization"));
+                Assert.Equal(firstEnroll.Body, request.Body);
+                return FakeServer.Json(EnrollResponse(enrolledBody!));
+            })
+            .On(HttpMethod.Post, "/api/cli/auth/refresh", request =>
+            {
+                Assert.NotNull(firstEnroll);
+                Assert.False(refreshed);
+                Assert.False(retryBoundaryReached);
+                Assert.Null(request.Header("Authorization"));
+                Assert.Equal("""{"refreshToken":"fixture-saved-refresh"}""", request.BodyText);
+                refreshed = true;
+                return Text("""{"accessToken":"fixture-refreshed-access","refreshToken":"fixture-refreshed-refresh","expiresIn":3600}""");
+            })
+            .On(HttpMethod.Put, ApiRoutes.MachineInventory, _ => new(HttpStatusCode.NoContent));
+
+        var run = await machine.RunAsync("login", "--server", FakeServer.Url, "--workspace", "w101",
+            "--location", "Fixture desk", "--no-browser");
+
+        Assert.NotNull(firstEnroll);
+        Assert.True(refreshed, "The first enrollment's 401 must trigger a successful refresh.");
+        Assert.True(retryBoundaryReached, "The actual retry discovery must run after refresh publication.");
+        machine.Server.Single(HttpMethod.Post, "/api/cli/auth/refresh");
+        Assert.Equal(savedSession with
+        {
+            AccessToken = "fixture-refreshed-access", RefreshToken = "fixture-refreshed-refresh",
+            AccessExpiresAt = machine.Time.GetUtcNow().AddHours(1),
+        }, store.LoadSession());
+        Assert.Empty(machine.Browser.Opened);
+        Assert.DoesNotContain(machine.Server.Requests, r => r.Uri.AbsolutePath is "/api/cli/auth/start" or "/api/cli/auth/token");
+        if (damageTrust)
+        {
+            Assert.NotEqual(0, run.ExitCode);
+            Assert.Contains(trustPath, run.Error);
+            Assert.Same(firstEnroll, machine.Server.Single(HttpMethod.Post, ApiRoutes.MachineEnroll));
+            Assert.DoesNotContain(machine.Server.Requests, r => r.Uri.AbsolutePath == ApiRoutes.MachineInventory);
+            Assert.All(machine.Server.Requests.Skip(retryDiscoveryIndex), request =>
+            {
+                Assert.Null(request.Header("Authorization"));
+                Assert.Null(request.Header(MbusHeaders.Workspace));
+                Assert.Null(request.Header(MbusHeaders.Signature));
+                Assert.Empty(request.Body);
+            });
+            Assert.Equal(configBytes, File.ReadAllBytes(store.ConfigPath));
+            Assert.Equal(keyBytes, File.ReadAllBytes(store.KeyPath));
+            Assert.Equal(damaged, File.ReadAllBytes(trustPath));
+            Assert.DoesNotContain(Directory.EnumerateFiles(store.Directory), file =>
+                Path.GetFileName(file).StartsWith("machine-key.", StringComparison.Ordinal) && file != store.KeyPath);
+        }
+        else
+        {
+            Assert.True(run.ExitCode == 0, run.Error);
+            Assert.Equal(2, machine.Server.Requests.Count(r => r.Method == HttpMethod.Post && r.Uri.AbsolutePath == ApiRoutes.MachineEnroll));
+            var inventory = machine.Server.Single(HttpMethod.Put, ApiRoutes.MachineInventory);
+            Assert.Equal("MbusMachine mch_test", inventory.Header("Authorization"));
+            Assert.Equal("w101", inventory.Header(MbusHeaders.Workspace));
+            Assert.True(SignatureIsValid(inventory, enrolledBody!.PublicKey));
+            Assert.Equal("mch_test", MessageBusJson.Deserialize<MachineInventory>(inventory.BodyText)!.MachineId);
+            Assert.Equal("mch_test", store.Load().MachineId);
+            Assert.Equal("w101", store.Load().WorkspaceId);
+            Assert.Null(store.Load().ServerBinding);
+            using var publishedKey = MessageBus.Cli.Security.MachineKey.FromPem(store.LoadKeyPem()!);
+            Assert.Equal(enrolledBody.PublicKey, publishedKey.PublicKeyBase64);
+            Assert.Equal(trustBytes, File.ReadAllBytes(trustPath));
+        }
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
