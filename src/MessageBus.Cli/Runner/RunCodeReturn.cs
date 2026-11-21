@@ -40,32 +40,47 @@ internal static class RunCodeReturn
         {
             var args = start.ArgumentList.ToArray();
             start.ArgumentList.Clear();
+            if (run.VerifiedReturnRevision is not null)
+            {
+                start.FileName = VerificationProcess.Git;
+                start.Environment.Clear();
+                start.Environment["PATH"] = "/usr/bin:/bin";
+                start.Environment["GIT_CONFIG_GLOBAL"] = "/dev/null";
+                start.Environment["GIT_NO_REPLACE_OBJECTS"] = "1";
+            }
             foreach (var entry in RunCommits.GitEnvironment(run)) start.Environment[entry.Key] = entry.Value;
             if (!RunCommits.IsLocalRepository(run) || !RunCommits.HasSafeConfigAsync(start.FileName, run).GetAwaiter().GetResult())
                 throw new InvalidOperationException("The run repository is unsafe; keeping it for recovery.");
             foreach (var arg in RunCommits.GitArguments(run).Concat(args)) start.ArgumentList.Add(arg);
         });
         var task = delivery.Envelope;
-        // The settle file excludes attachments. Read the service's accepted replies instead.
-        using var response = await http.GetAsync($"api/w/{Uri.EscapeDataString(workspace)}/threads/{Uri.EscapeDataString(task.ThreadId)}/messages", ct).ConfigureAwait(false);
-        response.EnsureSuccessStatusCode();
-        using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false));
-        var messages = document.RootElement.EnumerateArray().Select(e => e.Deserialize<MessageEnvelope>(MessageBusJson.Options)).OfType<MessageEnvelope>();
         var head = await Git.CommitIdAsync(run.WorkTree, "refs/heads/" + branch, ct).ConfigureAwait(false);
-        // Agents can return bundles without commit refs (as the local settle tool does).
-        foreach (var attachment in messages.Where(m => m.Type == task.Type + ".reply" && m.ParentId == task.Id
-            && m.Sender.AgentId == delivery.AgentId).SelectMany(m => m.Attachments)
-            .Where(a => a.Format == AttachmentFormat.GitBundle))
+        if (run.VerifiedReturnRevision is { } expected)
         {
-            if (attachment.Branch == branch) return true;
-            if (attachment.Branch is not { Length: > 0 } returnedBranch) continue;
-            try
+            if (head != expected) return false;
+        }
+        else
+        {
+            // The settle file excludes attachments. Read the service's accepted replies instead.
+            using var response = await http.GetAsync($"api/w/{Uri.EscapeDataString(workspace)}/threads/{Uri.EscapeDataString(task.ThreadId)}/messages", ct).ConfigureAwait(false);
+            response.EnsureSuccessStatusCode();
+            using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false));
+            var messages = document.RootElement.EnumerateArray().Select(e => e.Deserialize<MessageEnvelope>(MessageBusJson.Options)).OfType<MessageEnvelope>();
+            // Agents can return bundles without commit refs (as the local settle tool does).
+            foreach (var attachment in messages.Where(m => m.Type == task.Type + ".reply" && m.ParentId == task.Id
+                && m.Sender.AgentId == delivery.AgentId).SelectMany(m => m.Attachments)
+                .Where(a => a.Format == AttachmentFormat.GitBundle))
             {
-                if (await Git.CommitIdAsync(run.WorkTree, "refs/heads/" + returnedBranch, ct).ConfigureAwait(false) == head) return true;
-            }
-            catch (GitException)
-            {
-                // A reply may name a branch that is absent from this checkout.
+                if (attachment.Branch == branch) return true;
+                if (attachment.Branch is not { Length: > 0 } returnedBranch) continue;
+                try
+                {
+                    if (await Git.CommitIdAsync(run.WorkTree, "refs/heads/" + returnedBranch, ct).ConfigureAwait(false) == head) return true;
+                }
+                catch (GitException)
+                {
+                    // A reply may name a branch that is absent from this checkout.
+                }
             }
         }
 
@@ -75,8 +90,14 @@ internal static class RunCodeReturn
         // A person with no ReplyTo reads the workspace key, just as in LocalTools.SettleAsync.
         var key = await recipient(task.ReplyTo as RoleTarget, ct).ConfigureAwait(false);
         var attachments = new AttachmentClient(http, links, workspace, Directory.CreateDirectory(Path.Combine(run.Root, "tmp")).FullName);
-        var bundle = await attachments.SendBundleAsync(run.WorkTree, target, key, branch, baseCommit, task.ThreadId, ct).ConfigureAwait(false);
-        var body = new MessageBody { Summary = "The runner returned the task's commits before cleaning up its worktree." };
+        var (attachmentRef, bundle) = await attachments.SendGitBundleAsync(run.WorkTree, target, key, branch, baseCommit, task.ThreadId, ct).ConfigureAwait(false);
+        if (run.VerifiedReturnRevision is { } verified && bundle.HeadCommit != verified) return false;
+        var body = new MessageBody
+        {
+            Summary = run.VerifiedReturnRevision is null
+                ? "The runner returned the task's commits before cleaning up its worktree."
+                : "The runner returned the exact commit used for required verification.",
+        };
         var sealedBody = BodyCrypto.Seal(body, key);
         var transport = new HttpClientTransport(new HttpClientTransportOptions
         {
@@ -91,7 +112,7 @@ internal static class RunCodeReturn
             ThreadId = task.ThreadId, DeliveryId = delivery.DeliveryId, ReplyOnly = true,
             Result = new SettleResult { Status = SettleStatus.Succeeded, Summary = body.Summary, Refs = [new Ref { Kind = "git.commit", Sha = head }] },
             SealedReply = sealedBody.ToSealedBody(),
-            Attachments = [bundle],
+            Attachments = [attachmentRef],
         };
         var json = JsonSerializer.SerializeToElement(input, MessageBusJson.Options);
         var result = await client.CallToolAsync(new CallToolRequestParams

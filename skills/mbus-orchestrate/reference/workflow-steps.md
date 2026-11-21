@@ -41,3 +41,43 @@ Each step is a `### N. <Name>` heading with bullets:
 
 Keep a row per step: `ran / passed / failed / skipped (reason)`, with the thread and agent that did
 it. Show it in the plan (as "will run") and in the final report.
+
+## Approved frontend verification
+
+1. For each frontend implementation, test or review task, read the work item's required checks and the
+   repository workflow at the trusted base commit. Read the workflow from the Git object
+   (`git show <base-sha>:.messagebus/workflow.md`), so edits on the task branch cannot change the
+   requirements. Combine the applicable requirements and map required frontend tests, type checks
+   and builds to the stable keys `test`, `typecheck` and `build`. Keep separate workflow steps,
+   such as a lint step, in the plan. If a check must run in the approved environment and no
+   compatible recipe covers it, report that check as blocked. When the task expressly calls
+   for a static-only review and the trusted workflow permits it, record that in the plan and omit
+   `verification`. Tasks with no applicable verification requirements use the usual dispatch.
+2. Resolve the target repository through the user's authorized GitHub connection. For example,
+   `gh api repos/{owner}/{repo}` returns the canonical `full_name` and numeric `id`. Form
+   `github:<id>` and query the local tool with
+   `directory { "verificationRepositoryId": "github:<id>" }`. Use the repository named for the
+   task, which may differ from the repository hosting the work item. If you cannot establish its
+   identity from authorized metadata, report a verification blocker.
+3. Require `verification.registryVersion == 1` and `verification.requiredTaskRequestsSupported == true`.
+   Match each approved environment to its recipe using both `recipeId` and `recipeRevision`. For
+   the current frontend workflow, select the single approved environment whose `node-npm-ci` recipe
+   at revision 1 uses Node 24 and covers every required key. If discovery is missing or unsupported,
+   no profile matches, or multiple profiles match, report the exact verification blocker and hold
+   the affected task. Send even when the selected profile shows zero approved shared machines or the
+   role has no free agents. Keep the project's execution scope. The service evaluates runner
+   eligibility and can create a blocked task that appears in Projects.
+4. Pin the input to a full commit SHA from the same authorized GitHub repository. For implementation
+   use the starting commit, and for review use the commit to be reviewed. For example, use
+   `gh api repos/{owner}/{repo}/commits/{ref}` and confirm its `sha` matches the local input.
+   Create the task branch at that SHA if attaching a bundle. Include an existing
+   `github.commit` ref in the send with canonical `repo`, full `sha`, and the canonical commit
+   `url`. See [verified send and provenance](tool-calls.md#verified-send-and-provenance).
+5. Keep the selected role and add
+   `"verification": { "environment": "<approved-environment-id>", "requiredChecks": ["test", "build"] }`
+   to the task's local `send` arguments (or its message in `send_many`), using the actual required
+   keys. The runner uses the approved recipe for those checks. Host installs and
+   ad-hoc dependency setup are outside this workflow. Keep verification requirements on follow-up tasks
+   that must run those checks and pin each follow-up's own input commit. If the service refuses
+   verification or reports it blocked, report the reason and keep the requirement in effect. Use
+   the thread's verification status when reporting the outcome.
