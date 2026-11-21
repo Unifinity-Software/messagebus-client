@@ -487,7 +487,7 @@ public sealed class RunIsolation : IRunSandbox
         var wrapped = launch with { Environment = environment };
         if (_aci is not null && workspace.PrivateSocketDirectory is { } sockets)
         {
-            return AciSandbox.Wrap(wrapped, workspace.Root, sockets);
+            return _aci.Wrap(wrapped, workspace.Root, sockets);
         }
         if (_options.RequireAciSandbox) throw new IOException("The protected ACI task has no network socket.");
         if (_mac is not null && (_mac.NestingAllowed || !MacSandbox.StartsItsOwnSandbox(launch)))

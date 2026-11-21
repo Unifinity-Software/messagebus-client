@@ -204,8 +204,12 @@ files and a local test endpoint to verify the same task launcher used for real
 work. If the container denies the required namespace operations, the runner
 stays connected and reports its harnesses as unavailable. It won't run tasks
 with basic isolation. Confirm that the target deployment passes the check
-before assigning roles. The original unprivileged ACI deployment failed the
-namespace probe at UID 10001.
+before assigning roles. When the kernel denies a fresh procfs mount, the runner
+repeats the checks with a private, empty, read-only `/proc` and the same mount,
+PID and network namespaces. A standalone Node.js fixture in a disposable,
+unprivileged ACI container verified this layout under UID 10001. It wrote its
+own file and could not see dummy files or the loopback listener outside the
+sandbox.
 
 - **Files and processes.** A task gets its own home, worktree, temporary
   directories and PID namespace. The runner's settings, machine key and other
@@ -218,8 +222,10 @@ namespace probe at UID 10001.
 - **Harnesses.** Claude Code and Codex start with a fresh home. Use credentials
   supplied by the deployment, no saved sign-ins or tools from the runner's
   home. A harness that fails its protected launch check is unavailable. Codex
-  also has to start its nested command sandbox. Resumed harness sessions
-  aren't supported in this mode.
+  also has to start its nested command sandbox. In local offline checks with
+  an empty `/proc`, Claude Code 2.1.330 and GitHub Copilot CLI 1.0.114 passed
+  startup. Codex 0.171.0 failed its nested sandbox probe and OpenCode 1.19.6
+  failed to start. Resumed harness sessions aren't supported in this mode.
 
 `infra/runner-aci.bicep` provisions a Linux ACI runner that enrolls itself in Azure. You do not
 run an enrollment container on your computer or copy a machine private key into a deployment.

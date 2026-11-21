@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Globalization;
 using System.Net;
 using System.Net.Sockets;
@@ -19,15 +20,17 @@ internal sealed class AciSandbox
     private const string Bwrap = "/usr/bin/bwrap";
     private const string Node = "/usr/local/bin/node";
     private const string FixtureHost = "mbus-probe.invalid";
+    private const string ProcMountDenied = "bwrap: Can't mount proc on /proc: Operation not permitted";
     private readonly Dictionary<string, string?> _agents = new(StringComparer.Ordinal);
     private readonly AciEgress _egress;
+    private bool _mountProc = true;
 
     private AciSandbox(string identityHost) => _egress = new(identityHost);
 
     internal string? AgentProblem(AgentKind kind) => _agents.TryGetValue(AgentKinds.Command(kind), out var problem)
         ? problem : "The harness has not passed the protected ACI launch check. Restart the runner after installing it.";
 
-    internal static AciSandbox? TryCreate(RunIsolationOptions options, out string problem)
+    internal static AciSandbox? TryCreate(RunIsolationOptions options, out string problem, IProbeRunner? probeRunner = null)
     {
         problem = "Protected ACI runs require the Linux runner image running as UID 10001.";
         if (!OperatingSystem.IsLinux() || EffectiveUid() != 10001) return null;
@@ -51,7 +54,7 @@ internal sealed class AciSandbox
         var sandbox = new AciSandbox(identityHost);
         try
         {
-            if (sandbox.Probe(options) is { } failure)
+            if (sandbox.Probe(options, probeRunner ?? new ProcessProbeRunner()) is { } failure)
             {
                 problem = failure;
                 return null;
@@ -86,7 +89,7 @@ internal sealed class AciSandbox
     internal RunNetwork StartNetwork(string directory, HostAllowList allow, TextWriter log, string runName) =>
         RunNetwork.StartAci(Path.Combine(directory, SocketName), allow, log, runName, _egress.ConnectAsync);
 
-    internal static ProcessLaunch Wrap(ProcessLaunch launch, string run, string sockets)
+    internal ProcessLaunch Wrap(ProcessLaunch launch, string run, string sockets)
     {
         var home = Path.Combine(run, "home");
         var environment = new Dictionary<string, string?>(launch.Environment, StringComparer.Ordinal)
@@ -107,7 +110,8 @@ internal sealed class AciSandbox
             // device tree, shared temporary directories, or any runner home files.
             Arguments = [
                 "--unshare-user", "--unshare-pid", "--unshare-net", "--unshare-ipc", "--unshare-uts", "--cap-drop", "ALL", "--new-session",
-                "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--tmpfs", "/var/tmp", "--tmpfs", "/dev/shm",
+                .. (_mountProc ? new[] { "--proc", "/proc" } : ["--tmpfs", "/proc", "--remount-ro", "/proc"]),
+                "--dev", "/dev", "--tmpfs", "/tmp", "--tmpfs", "/var/tmp", "--tmpfs", "/dev/shm",
                 "--ro-bind", "/usr", "/usr", "--symlink", "usr/bin", "/bin", "--symlink", "usr/sbin", "/sbin",
                 "--symlink", "usr/lib", "/lib", "--symlink", "usr/lib64", "/lib64",
                 "--ro-bind", "/etc/ssl/certs", "/etc/ssl/certs", "--ro-bind", "/etc/passwd", "/etc/passwd", "--ro-bind", "/etc/group", "/etc/group",
@@ -140,7 +144,7 @@ internal sealed class AciSandbox
         });
         """;
 
-    private string? Probe(RunIsolationOptions options)
+    private string? Probe(RunIsolationOptions options, IProbeRunner runner)
     {
         var root = Directory.CreateDirectory(Path.Combine(options.WorkRoot, $".aci-probe-{Guid.NewGuid():N}")).FullName;
         string? sockets = null;
@@ -179,25 +183,33 @@ internal sealed class AciSandbox
                     }
                 });
 
-            var runner = new ProcessProbeRunner();
             var environment = RunEnvironmentScrubber.Build(Environment.GetEnvironmentVariables(), [],
-                new Dictionary<string, string?> { ["PATH"] = "/usr/local/bin:/usr/bin:/bin" });
+                new Dictionary<string, string?> { ["PATH"] = "/usr/local/bin:/usr/bin:/bin", ["LC_ALL"] = "C" });
             ProbeOutcome Run(string file, params string[] args)
             {
                 var launch = new ProcessLaunch { FileName = file, Arguments = args, WorkingDirectory = run, Environment = environment };
                 return runner.Run(new ProbeCommand("protected ACI launch", Wrap(launch, run, sockets), launch, Sandboxed: true));
             }
 
-            var pid = new FileInfo("/proc/self/ns/pid").LinkTarget!;
-            var net = new FileInfo("/proc/self/ns/net").LinkTarget!;
-            var check = Run(Node, "-e", Fixture, "--", machineKey, otherFile, pid, net,
-                port.ToString(CultureInfo.InvariantCulture), ProxyPort.ToString(CultureInfo.InvariantCulture), FixtureHost);
+            ProbeOutcome Check(string pid, string net, string markerPid) =>
+                Run(Node, "-e", Fixture, "--", machineKey, otherFile, pid, net, markerPid,
+                    port.ToString(CultureInfo.InvariantCulture), ProxyPort.ToString(CultureInfo.InvariantCulture), FixtureHost);
+            var check = Check(new FileInfo("/proc/self/ns/pid").LinkTarget!, new FileInfo("/proc/self/ns/net").LinkTarget!, "");
+            if (check.ExitCode == 1 && check.Output.TrimEnd().Equals(ProcMountDenied, StringComparison.Ordinal))
+            {
+                // Some ACI hosts allow namespaces but deny a fresh procfs mount.
+                // Keep all namespaces and give the task a private, empty /proc.
+                _mountProc = false;
+                check = CheckWithOutsideProcess(pid => Check("", "", pid));
+            }
             if (check.ExitCode != 0 || !check.Output.Contains("aci-fixture-ok", StringComparison.Ordinal))
                 return "The protected ACI file, process and network launch check failed. Task execution requires non-root namespace support.";
 
             foreach (var agent in options.ProbeAgents)
             {
                 string? reason = Run(agent.Executable, "--version").ExitCode == 0 ? null : "The harness did not start inside the protected ACI sandbox.";
+                if (reason is null && !_mountProc && Run(agent.Executable, "--help").ExitCode != 0)
+                    reason = "The harness did not start with an empty /proc inside the protected ACI sandbox.";
                 if (reason is null && agent.Name == "codex"
                     && Run(agent.Executable, "sandbox", "--", "/bin/true").ExitCode != 0
                     && Run(agent.Executable, "sandbox", "linux", "--", "/bin/true").ExitCode != 0)
@@ -221,6 +233,29 @@ internal sealed class AciSandbox
         }
     }
 
+    private static ProbeOutcome CheckWithOutsideProcess(Func<string, ProbeOutcome> check)
+    {
+        // Only the dummy subprocess is used to check PID visibility. Its input
+        // pipe keeps it alive until the check returns.
+        var start = new ProcessStartInfo("/usr/bin/cat")
+        {
+            UseShellExecute = false,
+            RedirectStandardInput = true,
+        };
+        start.Environment.Clear();
+        using var marker = Process.Start(start) ?? throw new IOException("Could not start the protected ACI fixture process.");
+        try
+        {
+            var result = check(marker.Id.ToString(CultureInfo.InvariantCulture));
+            return marker.HasExited ? new ProbeOutcome(1, "The outside fixture process stopped.") : result;
+        }
+        finally
+        {
+            marker.StandardInput.Close();
+            marker.WaitForExit();
+        }
+    }
+
     private static async Task ReplyAsync(TcpListener listener, CancellationToken ct)
     {
         using var client = await listener.AcceptSocketAsync(ct).ConfigureAwait(false);
@@ -234,12 +269,23 @@ internal sealed class AciSandbox
         const fs = require('node:fs');
         const { connect } = require('node:net');
         const { get } = require('node:http');
-        const [key, other, pidNs, netNs, outside, proxy, host] = process.argv.slice(1);
+        const [key, other, pidNs, netNs, markerPid, outside, proxy, host] = process.argv.slice(1);
+        function outsideProcessIsHidden() {
+          if (!markerPid) {
+            return fs.readlinkSync('/proc/self/ns/pid') !== pidNs && fs.readlinkSync('/proc/self/ns/net') !== netNs;
+          }
+          if (fs.readdirSync('/proc').length !== 0 || Number(markerPid) <= process.pid) return false;
+          try {
+            process.kill(Number(markerPid), 0); // Only check visibility. No signal is sent.
+          } catch (error) {
+            return error.code === 'ESRCH';
+          }
+          return false;
+        }
         (async () => {
           fs.writeFileSync('own-file', 'mine');
           if (fs.readFileSync('own-file', 'utf8') !== 'mine' || fs.existsSync(key) || fs.existsSync(other)
-            || process.getuid() !== 10001 || fs.readlinkSync('/proc/self/ns/pid') === pidNs
-            || fs.readlinkSync('/proc/self/ns/net') === netNs) process.exit(1);
+            || process.getuid() !== 10001 || !outsideProcessIsHidden()) process.exit(1);
           await new Promise((resolve, reject) => {
             const client = connect({ host: '127.0.0.1', port: Number(outside) });
             client.once('connect', () => { client.destroy(); reject(new Error('direct outside connection')); });
