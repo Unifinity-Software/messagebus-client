@@ -50,6 +50,7 @@ RUN npm install -g --no-fund --no-audit --allow-scripts=@anthropic-ai/claude-cod
 
 COPY --from=build /out/mbus /usr/local/bin/mbus
 COPY docker/runner/entrypoint.sh /usr/local/bin/mbus-entrypoint
+COPY docker/runner/aci-bootstrap.mjs /usr/local/lib/mbus/aci-bootstrap.mjs
 # Strip CRs in case the script was checked out with Windows line endings.
 RUN sed -i 's/\r$//' /usr/local/bin/mbus-entrypoint && chmod 755 /usr/local/bin/mbus-entrypoint /usr/local/bin/mbus
 

@@ -49,6 +49,8 @@ jobs:
           fi
           "$bin/bin/gitleaks" dir . --redact
       - run: python eng/check-public-contracts.py
+      - name: Test Azure runner bootstrap
+        run: node --test docker/runner/aci-bootstrap.test.mjs
       - run: dotnet build MessageBus.Client.slnx -c Release
       - name: Test
         run: >-

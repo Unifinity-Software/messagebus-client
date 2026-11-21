@@ -42,6 +42,9 @@ public sealed record CliConfig
     /// </summary>
     public string? EnrolledWithApiKey { get; init; }
 
+    /// <summary>Bootstrap checkpoint: the runner API-key fingerprint whose pre-saved machine key must be reused until enrollment completes.</summary>
+    public string? PendingRunnerEnrollment { get; init; }
+
     /// <summary>The settings file's name.</summary>
     public const string FileName = "config.json";
 

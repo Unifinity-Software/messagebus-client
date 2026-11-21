@@ -1,6 +1,6 @@
 # Build context for docker/runner/Dockerfile (the repository root): only global.json, the shared
 # build/package props, the .NET sources under src/, the skills built into mbus (skills/) and the
-# entry point are used. Docker reads this file automatically; with Podman pass
+# entry point and ACI bootstrap are used. Docker reads this file automatically; with Podman pass
 # --ignorefile docker/runner/Dockerfile.dockerignore.
 *
 !global.json
@@ -10,6 +10,7 @@
 !src/
 !skills/
 !docker/runner/entrypoint.sh
+!docker/runner/aci-bootstrap.mjs
 src/client/
 **/bin/
 **/obj/

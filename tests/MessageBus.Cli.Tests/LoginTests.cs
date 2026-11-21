@@ -280,6 +280,40 @@ public sealed class LoginTests
         Assert.Single(machine.Server.Requests, r => r.Uri.AbsolutePath == ApiRoutes.MachineEnroll);
     }
 
+    [Fact]
+    public async Task Pending_Azure_enrollment_reuses_the_persisted_key_after_a_lost_response()
+    {
+        Assert.SkipWhen(InsideRun.Now, InsideRun.MbusReason);
+        using var machine = new TestMachine();
+        machine.Env["MBUS_SERVER"] = FakeServer.Url;
+        machine.Env["MBUS_API_KEY"] = "mbk_fixture_runner";
+        machine.Env["MBUS_KEY_STORE"] = "file";
+        using var key = MessageBus.Cli.Security.MachineKey.Create();
+        var store = new ConfigStore(machine.MbusFolder, "file");
+        store.SaveKeyPem(key.ExportPrivateKeyPem());
+        store.Save(new CliConfig { Server = FakeServer.Url, KeyStore = "file",
+            PendingRunnerEnrollment = MessageBus.Cli.Runner.RunnerKeyEnrollment.Fingerprint("mbk_fixture_runner") });
+        var attempts = 0;
+        machine.Server
+            .On(HttpMethod.Get, ApiRoutes.Caller, _ => Text("""{"kind":"api-key","scopes":["runner"]}"""))
+            .On(HttpMethod.Post, ApiRoutes.MachineEnroll, request =>
+            {
+                var body = MessageBusJson.Deserialize<MachineEnrollRequest>(request.BodyText)!;
+                Assert.Equal(key.PublicKeyBase64, body.PublicKey);
+                if (++attempts == 1) throw new HttpRequestException("Simulated enrollment response loss");
+                return FakeServer.Json(EnrollResponse(body));
+            })
+            .On(HttpMethod.Put, ApiRoutes.MachineInventory, _ => new HttpResponseMessage(HttpStatusCode.NoContent));
+        Assert.NotEqual(0, (await machine.RunAsync("login")).ExitCode);
+        Assert.NotNull(store.Load().PendingRunnerEnrollment);
+        var retry = await machine.RunAsync("login");
+        Assert.True(retry.ExitCode == 0, retry.Error);
+        Assert.Null(store.Load().PendingRunnerEnrollment);
+        Assert.Equal("mch_test", store.Load().MachineId);
+        using var restored = MessageBus.Cli.Security.MachineKey.FromPem(store.LoadKeyPem()!);
+        Assert.Equal(key.PublicKeyBase64, restored.PublicKeyBase64);
+    }
+
     [Theory]
     [InlineData("not messagebus.ai")]
     [InlineData("no browser approval")]

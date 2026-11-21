@@ -16,6 +16,14 @@ An ordinary scan on another deployment clears the detailed metadata; an older in
 existing deployment information intact. Azure action and managed drain behavior starts only after the service
 has a verified binding and has read the runner's `supportsManagedDrain` capability.
 
+Azure-only ACI bootstrap checkpoints a newly generated private key in a private Azure blob before enrollment.
+The local `config.json` may contain optional `pendingRunnerEnrollment` (the runner API-key fingerprint) until
+enrollment succeeds. In that state the CLI reuses the saved key, so retrying a lost enrollment response sends
+the same public key and the service returns the existing machine. The bootstrap stores the completed identity
+before starting the runner and restores it on subsequent starts. This adds no service route or required wire field.
+Blob access uses the container's managed identity and an exclusive lease; the blob's Azure resource binding is
+a bootstrap ownership check and never authorizes mbus lifecycle management.
+
 - **JSON** is camelCase, written and read through the source-generated context in
   `src/MessageBus.Contracts/Json/MessageBusJson.cs`, which ignores fields it doesn't know. A new field is optional
   for both sides; an absent field means the old behaviour.
