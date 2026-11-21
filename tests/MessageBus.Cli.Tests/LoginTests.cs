@@ -21,6 +21,30 @@ namespace MessageBus.Cli.Tests;
 public sealed class LoginTests
 {
     [Theory]
+    [InlineData("")]
+    [InlineData(""", "capabilities":["approvalAffectedV1","settleAttemptV1"]""")]
+    [InlineData(""", "capabilities":["approvalAffectedV1","settleAttemptV1","roleProposalsV1"], "roleProposals":{"version":1,"baselineVersion":"role-proposal-readonly-v1","normalizerVersion":"role-definition-v1"}""")]
+    public async Task Login_discovers_servers_with_optional_capability_tokens_and_saves_the_connection(string discoveryFields)
+    {
+        using var machine = new TestMachine();
+        machine.Env["MBUS_API_KEY"] = "mbk_test";
+        // Raw wire data keeps this regression independent of the CLI's discovery DTO.
+        machine.Server
+            .On(HttpMethod.Get, "/api/server", _ => Text(
+                """{"product":"messagebus.ai","version":"0.1.0","signIn":{"microsoft":true,"cliApprovalUrl":"http://127.0.0.1:5200/cli-login"}"""
+                + discoveryFields + "}"))
+            .On(HttpMethod.Get, ApiRoutes.Caller, _ => Text("""{"kind":"api-key","scopes":["send"],"permissions":[]}"""))
+            .On(HttpMethod.Put, ApiRoutes.MachineInventory, _ => new HttpResponseMessage(HttpStatusCode.NoContent));
+
+        var run = await machine.RunAsync("login", "--server", FakeServer.Url);
+
+        Assert.True(run.ExitCode == 0, run.Error);
+        Assert.Equal(FakeServer.Url, new ConfigStore(machine.MbusFolder).Load().Server);
+        machine.Server.Single(HttpMethod.Get, "/api/server");
+        Assert.Equal("MbusKey mbk_test", machine.Server.Single(HttpMethod.Put, ApiRoutes.MachineInventory).Header("Authorization"));
+    }
+
+    [Theory]
     [InlineData("https://old.example", false)]
     [InlineData(FakeServer.Url + "/", true)]
     public async Task Login_keeps_the_update_record_only_for_the_same_server(string previousServer, bool keepRecord)
