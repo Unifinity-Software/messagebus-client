@@ -35,11 +35,11 @@ trap 'kill "$server_pid" 2>/dev/null || true' EXIT
 # env -i prevents real runner configuration or proxy settings entering this fixture.
 # Restore is offline and bounded. No packages, tools or images are downloaded here.
 runuser -u mbusproof -- env -i PATH="$PATH" HOME="$proof_root/home" \
-    NUGET_PACKAGES="$NUGET_PACKAGES" DOTNET_CLI_TELEMETRY_OPTOUT=1 \
+    NUGET_PACKAGES="$proof_root/packages" NUGET_FALLBACK_PACKAGES="$NUGET_PACKAGES" DOTNET_CLI_TELEMETRY_OPTOUT=1 \
     MBUS_LINUX_PROOF_ROOT="$proof_root" \
     timeout 600 bash -euc '
         cd "$MBUS_LINUX_PROOF_ROOT/source"
-        dotnet restore tests/MessageBus.Cli.Tests --source "$MBUS_LINUX_PROOF_ROOT/feed"
+        dotnet restore tests/MessageBus.Cli.Tests -p:RestoreFallbackFolders="$NUGET_FALLBACK_PACKAGES" --source "$MBUS_LINUX_PROOF_ROOT/feed"
         dotnet test --project tests/MessageBus.Cli.Tests --no-restore \
             -- --filter-class "*LinuxNodeImportProofTests"
     ' 2>&1 | tee "$proof_root/proof.log"
