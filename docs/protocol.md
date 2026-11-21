@@ -90,6 +90,46 @@ plaintext, which is protected in transit and at rest but not end to end.
 Adding a tool, or a field to a tool's input or result, follows the compatibility rules above: an older local server
 must keep working against a newer service, and the reverse.
 
+## Optional approval impact and settlement attempt
+
+`GET /api/server` may include `capabilities: ["approvalAffectedV1", "settleAttemptV1"]`.
+Trust these only when `product` is `messagebus.ai`. Each upgraded producer checks the actual
+configured target through its authenticated HTTP client, without a positive cache (request
+`Cache-Control: no-cache, no-store`). Missing, unknown or failed discovery means unsupported.
+Servers advertise each capability only when its complete implementation is deployed and enabled.
+
+`request_approval.affected` and `ApprovalResult.affected` are optional plain text. It is an
+author-supplied impact description, never verified targets or authority to act. Normalize CRLF
+and CR to LF, trim leading/trailing whitespace, and map empty to null. Validate before sending:
+at most 1000 Unicode scalar values after normalization (supplementary characters count once),
+reject invalid surrogates and controls other than LF/TAB; never truncate. Controls are rejected
+before trimming too. The local proxy scans affected for secrets alongside title/detail.
+Both local and remote generated schemas expose affected with `maxLength: 1000`.
+
+For every non-null affected request, the local producer first freshly verifies
+`approvalAffectedV1`; unsupported discovery refuses before POST. It never drops affected and
+retries. The server must also refuse affected-bearing requests when the feature is disabled,
+including a rollout race after discovery. Request and wait responses echo the normalized
+affected and `requestDigest`. The local proxy rejects a missing/different echo or missing digest
+as a protocol failure, never authorization. For requests made in the same local session it also
+checks later wait responses against the original affected and digest. Affected participates in
+the server's v1 digest exactly as normalized and displayed; omitted/null affected uses the legacy
+digest path. Stored old digests must not be rewritten. New client/old server supports omitted
+affected and explicitly refuses affected; old client/new server remains unchanged. A new
+client/new server round-trips affected only with the capability and exact response echo.
+
+`SettleInput.attempt` and `RunnerSettle.attempt` are optional integers copied from
+`TaskDelivery.attempt`. With `settleAttemptV1`, the server must reject a stale mismatched attempt
+or return that attempt's immutable prior receipt, never apply it to a newer lease. Direct remote
+MCP callers may supply the delivered attempt; the local agent's schema hides it. Runner-owned
+local tools inject only their trusted in-memory delivery attempt, overriding agent arguments
+and kept-answer files, and never trust the agent-writable delivery file for it. `AgentRun` also
+copies its own delivery attempt, never the agent's settle file. Both network producers freshly
+gate the field on `settleAttemptV1` and omit it against older/unknown servers, preserving the
+existing settlement behavior. Old untagged submissions cannot prove identity across a reused
+delivery: consumers must qualify that history as identity-incomplete rather than inventing an
+attempt or claiming exactly-once observations. No wire lease history is added.
+
 ## The runner connection
 
 `RunnerStatus.supportsManagedDrain` enables reversible idle-stop drains. When true, the service

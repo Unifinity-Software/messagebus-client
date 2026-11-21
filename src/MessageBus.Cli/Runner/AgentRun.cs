@@ -1109,7 +1109,7 @@ internal sealed class AgentRun
         }
         var settle = new RunnerSettle
         {
-            DeliveryId = DeliveryId, Result = result, Declined = _declined, UnreadableRole = _unreadableRole,
+            DeliveryId = DeliveryId, Attempt = Delivery.Attempt, Result = result, Declined = _declined, UnreadableRole = _unreadableRole,
             Verification = _verification,
             VerificationAttempt = Delivery.Verification is null ? null : Delivery.Attempt,
             VerificationDigest = Delivery.Verification?.Digest,

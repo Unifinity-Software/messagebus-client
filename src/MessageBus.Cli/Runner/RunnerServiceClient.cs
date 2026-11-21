@@ -68,6 +68,8 @@ public sealed class HttpRunnerServiceClient(HttpClient http) : IRunnerServiceCli
     /// <inheritdoc />
     public async Task SettleAsync(RunnerSettle settle, CancellationToken cancellationToken)
     {
+        if (settle.Attempt is not null && !await MessageBus.Mcp.TargetCapabilities.SupportsAsync(http, "settleAttemptV1", cancellationToken).ConfigureAwait(false))
+            settle = settle with { Attempt = null };
         using var _ = await SendAsync(HttpMethod.Post, ServiceRoutes.Settle, settle, cancellationToken).ConfigureAwait(false);
     }
 

@@ -80,6 +80,7 @@ public static class MessageBusJson
     UseStringEnumConverter = true,
     AllowOutOfOrderMetadataProperties = true)]
 [JsonSerializable(typeof(JsonElement))]
+[JsonSerializable(typeof(Http.ServerCapabilitiesResponse))]
 // Messaging
 [JsonSerializable(typeof(MessageEnvelope))]
 [JsonSerializable(typeof(MessageTarget))]
