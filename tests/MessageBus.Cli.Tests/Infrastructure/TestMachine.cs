@@ -58,7 +58,7 @@ public sealed class TestMachine : IDisposable
     internal Func<HttpMessageHandler>? DiscoveryHttpHandler { get; set; }
     internal Func<HttpMessageHandler> LocalModelHandler { get; set; } = MessageBus.Cli.Agents.OpenCodeReadiness.Handler;
 
-    public FakeTimeProvider Time { get; } = new(new DateTimeOffset(2026, 11, 13, 9, 0, 0, TimeSpan.Zero));
+    public FakeTimeProvider Time { get; init; } = new(new DateTimeOffset(2026, 11, 13, 9, 0, 0, TimeSpan.Zero));
 
     /// <summary>The person's browser for mbus login: records what mbus asked it to open.</summary>
     public RecordingBrowser Browser { get; } = new();

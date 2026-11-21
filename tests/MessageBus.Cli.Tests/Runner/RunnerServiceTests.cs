@@ -1,6 +1,7 @@
 using System.Xml.Linq;
 using MessageBus.Cli.Runner.Service;
 using MessageBus.Cli.Tests.Infrastructure;
+using Microsoft.Extensions.Time.Testing;
 using Xunit;
 using MessageBus.Tests.Shared;
 
@@ -299,28 +300,25 @@ public sealed class RunnerServiceTests
     public async Task Mac_install_waits_for_start_and_reports_a_timeout_with_the_start_command(bool starts, bool buildFolder)
     {
         Assert.SkipWhen(InsideRun.Now, InsideRun.MbusReason);
-        using var machine = new TestMachine();
+        var time = new StartupWaitClock();
+        using var machine = new TestMachine { Time = time };
         SignIn(machine);
         machine.Env["CLAUDE_CODE_OAUTH_TOKEN"] = "test-agent-sign-in";
         machine.MbusCommand = new(buildFolder ? "dotnet" : Path.Combine(machine.Home, "installed", "mbus"), ["mcp"]);
         machine.InstallAgent("mbus", "another mbus");
         using var running = new ServiceRunner(machine);
-        var kicked = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var steps = new List<ServiceStep>();
         machine.RunnerServices = () => new ServiceManager(ServicePlatform.MacOs, "dev", 501, (step, _) =>
         {
             steps.Add(step);
-            if (step.Arguments[0] == "kickstart") kicked.TrySetResult();
             return Task.FromResult((0, ""));
         });
         var install = machine.RunAsync("runner", "install");
-        await kicked.Task;
-        // Let the command reach its wait without advancing real time.
-        await Task.Yield();
-        machine.Time.Advance(TimeSpan.FromSeconds(10));
+        await time.Registration.Task.WaitAsync(TestContext.Current.CancellationToken);
         Assert.False(install.IsCompleted);
         if (starts) running.Run(new ServiceStep("/bin/launchctl", ["kickstart"]));
-        var result = await WithTimePassing(machine, install);
+        time.Advance(RunnerStartup.StartWait);
+        var result = await install;
         Assert.Equal(["bootout", "bootstrap", "kickstart"], steps.Select(s => s.Arguments[0]));
         Assert.Equal(["kickstart", "gui/501/ai.messagebus.runner"], steps[^1].Arguments);
         Assert.Contains("CLAUDE_CODE_OAUTH_TOKEN", result.Output);
@@ -661,6 +659,18 @@ public sealed class RunnerServiceTests
         {
             _instance?.Dispose();
             _instance = null;
+        }
+    }
+
+    private sealed class StartupWaitClock : FakeTimeProvider
+    {
+        public TaskCompletionSource Registration { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
+        {
+            var timer = base.CreateTimer(callback, state, dueTime, period);
+            Registration.TrySetResult();
+            return timer;
         }
     }
 
