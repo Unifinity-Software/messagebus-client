@@ -448,6 +448,10 @@ its description and input schema. The catalog shared by the service's remote `/m
 `find_project`, `complete_project`, `directory`, `describe_role`, `subscribe`, `fetch_attachment`, `retry`,
 `request_approval`, `wait_approval`, `open_inbox`.
 
+Taking passive replies addressed to a session inbox can auto-complete them. The `inbox` result then
+reports `delivery.status` as `settled`, and the client can still fetch their attachments. Call `settle`
+only for deliveries returned as `leased`.
+
 `fetch_attachment` and `retry` exist only on the local server (`McpToolNames.LocalOnly`): they need this machine's
 keys and git. The local server (`src/MessageBus.Mcp`) is an encrypting proxy to `/mcp`: agents write and read
 plaintext message bodies; the local server seals them into `sealedBody` before calling the service and opens them on
