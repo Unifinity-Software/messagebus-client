@@ -20,6 +20,9 @@ public sealed record RunToolScope
     /// <summary>The run's folder: every path a tool reads or writes must be inside it.</summary>
     public required string Root { get; init; }
 
+    /// <summary>Trusted origin supplied by the runner; a nullable allowlist never grants proposal access.</summary>
+    public ProposalAuthority ProposalAuthority { get; init; } = ProposalAuthority.Worker;
+
     /// <summary>The tools the run may call; null for all of them (a resumed orchestrator, or a role that allows every mbus tool).</summary>
     public IReadOnlySet<string>? Tools { get; init; }
 
@@ -41,6 +44,8 @@ public sealed record RunToolScope
     /// <param name="started">Threads this run started (its own sub-tasks), which it may also name.</param>
     public McpError? Check(string tool, IDictionary<string, JsonElement>? arguments, IReadOnlySet<string> started)
     {
+        if (McpToolNames.IsRoleProposal(tool) && ProposalAuthority != ProposalAuthority.ResumedCoordinator)
+            return Refuse(null, "This task has no original coordinator authority for role proposals.");
         if (Tools is not null && !Tools.Contains(tool))
             return Refuse(null, $"This task's run can't use {tool}: its role doesn't allow it.");
         if (OtherThreads || arguments is null) return null;

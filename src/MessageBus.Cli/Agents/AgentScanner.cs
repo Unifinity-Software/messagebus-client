@@ -176,6 +176,13 @@ internal static partial class AgentScanner
         // the original issue: its default model and the models it lists, read alongside the sign-in check.
         var models = await ModelCatalog.ReadAsync(spec.Kind, located.Path, version, locations, env, cancellationToken).ConfigureAwait(false);
         var check = await checking.ConfigureAwait(false);
+        if (spec.Kind == AgentKind.OpenCode)
+        {
+            var settings = OpenCodeSettings.Read(env.Get, host.HomeDirectory, version);
+            models = settings.Inventory;
+            check = await OpenCodeReadiness.ScanAsync(settings, File.Exists(locations.OpenCodeAuth), cancellationToken,
+                host.CreateLocalModelHttpHandler, host.Time).ConfigureAwait(false);
+        }
         var agent = new DetectedAgent
         {
             Kind = spec.Kind,

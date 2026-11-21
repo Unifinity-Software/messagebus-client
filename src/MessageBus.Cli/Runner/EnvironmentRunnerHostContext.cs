@@ -1,5 +1,9 @@
 using System.Globalization;
 using System.Runtime.InteropServices;
+using MessageBus.Cli.Configuration;
+using MessageBus.Cli.Hosting;
+using MessageBus.Cli.Security;
+using MessageBus.Cli.Server;
 using MessageBus.Cli.Runner.Agents;
 using MessageBus.Contracts.Http;
 using MessageBus.Contracts.Machines;
@@ -229,13 +233,28 @@ public sealed class EnvironmentRunnerHostContext : IRunnerHostContext
     /// <inheritdoc />
     public HttpClient CreateServiceClient()
     {
-        var client = new HttpClient(_createHandler(), disposeHandler: true) { BaseAddress = new Uri(ServerUrl.AbsoluteUri.TrimEnd('/') + "/") };
-        foreach (var (name, value) in Headers())
-        {
-            client.DefaultRequestHeaders.TryAddWithoutValidation(name, value);
-        }
-        return client;
+        var store = CreateBindingStore();
+        var handler = AuthenticatingHandler.WithApiKey(ServerHttpTransport.Restrict(_createHandler()),
+            ApiKey(), RunnerEnvironment.NonEmpty(_env(RunnerEnvVars.Workspace)), "runner", RunnerEnvironment.Version,
+            new ServerSendGate(store, ServerUrl, _createHandler, _env));
+        return ServerAttachmentTransfers.Bind(new HttpClient(handler, disposeHandler: true) { BaseAddress = CliSettings.BaseAddress(ServerUrl) },
+            () => new ServerSendGate(store, ServerUrl, _createHandler, _env));
     }
+
+    /// <summary>Validates current discovery and durable binding before each actual environment-runner handshake.</summary>
+    public async Task ConnectAsync(MessageBus.Runner.Transport.ConnectRequest request,
+        Func<CancellationToken, Task> connect, CancellationToken cancellationToken)
+    {
+        using var gate = new ServerSendGate(CreateBindingStore(), ServerUrl, _createHandler, _env);
+        await RunnerHandshake.ConnectAsync(gate, request, null, ApiKey(),
+            RunnerEnvironment.NonEmpty(_env(RunnerEnvVars.Workspace)), connect, cancellationToken).ConfigureAwait(false);
+    }
+
+    private ConfigStore CreateBindingStore() => new(
+        _env(EnvVars.Home) ?? Path.Combine(HomeDirectory, ".mbus"), "file", _env);
+
+    private string ApiKey() => RunnerEnvironment.NonEmpty(_env(RunnerEnvVars.ApiKey))
+        ?? throw new InvalidOperationException($"Set {RunnerEnvVars.ApiKey} to this machine's API key, or sign in with mbus login.");
 
     /// <inheritdoc />
     public IReadOnlyList<KeyValuePair<string, string>> CreateConnectHeaders(string method, string pathAndQuery) => Headers();

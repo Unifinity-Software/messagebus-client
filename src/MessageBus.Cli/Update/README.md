@@ -60,14 +60,17 @@ The runner keeps taking work while other processes hold this install, reporting 
 number of holders (its local log lists their process ids and names). Once clear, it drains its tasks, checks again,
 prepares the update and exits 75. It never kills sessions. Before each service start, `update/wrapper.sh` or
 `wrapper.cmd` starts a private applier copy outside the tool store, which runs `dotnet tool update` with an isolated
-package source and keeps a copy of the installed package so a failed update can be restored. The new version's
-`--version` decides success; a failed check, or three starts without a runner connection, restores the previous
-version.
+package source. The updater reads the package ID and normalized version from the tool store entry containing the
+running assembly, and verifies and saves that package for offline recovery before updating. If the identity or
+recovery archive cannot be verified, the runner reports the reason and keeps the current installation.
+The applier checks the newly installed package version and uses `--version` to check that the launcher starts.
+A failed start check or three starts without a runner connection restores the saved package. `mbus --version`
+continues to show the assembly's informational version, which can include build metadata.
 
 Files under the settings folder's `update/`:
 
 - `waiting.json`: the requested version and pin intent, kept across runner restarts.
-- `attempt.json`: the attempt id, from/to versions, pin intent, start count, confirmation, retry and final state.
+- `attempt.json`: the attempt id, package ID, from/to versions, pin intent, start count, confirmation, retry and final state.
 - `applier/`: a private copy of mbus and its dependencies, unaffected by the tool being replaced.
 - `recovery/`: the installed `.nupkg`, copied before dotnet removes the previous version.
 - `NuGet.Config`: `<clear/>` plus nuget.org, replaced by the machine's `MBUS_UPDATE_NUGET_SOURCE` when set.
@@ -77,6 +80,13 @@ Files under the settings folder's `update/`:
 - `last-failure.txt`: a diagnostic and repair command if automatic recovery fails; also logged at startup.
 
 ## Standalone files
+
+HTTP(S) feeds use a separate public transport without cookies, profile headers or ambient credentials. Redirects
+are refused, including same-origin redirects; configure the final feed URL. Feed URLs cannot contain userinfo,
+query or fragment. The machine's `MBUS_UPDATE_FEED` overrides the workspace mirror, which overrides the selected
+server's feed. A mirror supplies artifacts only. Release signatures and payload hashes establish release
+authenticity; the signed manifest does not identify a mirror origin, hosting geography or workspace authority.
+Code constructing `HttpReleaseSource` must use `HttpReleaseSource.CreateHttpClient()` without adding default headers.
 
 ### What it checks before replacing anything
 

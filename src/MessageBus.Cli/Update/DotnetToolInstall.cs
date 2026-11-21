@@ -1,3 +1,5 @@
+using NuGet.Versioning;
+
 namespace MessageBus.Cli.Update;
 
 /// <summary>
@@ -20,6 +22,8 @@ public sealed record DotnetToolInstall(string? ToolsPath, bool Global)
     /// <summary>The file dotnet's tool packages carry beside the program.</summary>
     public const string SettingsFile = "DotnetToolSettings.xml";
 
+    internal DotnetToolPackage? Package { get; init; }
+
     /// <summary>The script dotnet starts mbus with, in <see cref="ToolsPath"/>; null when there is none.</summary>
     public string? Shim => ToolsPath is null ? null :
         new[] { OperatingSystem.IsWindows() ? "mbus.exe" : "mbus", "mbus.cmd" }
@@ -27,12 +31,12 @@ public sealed record DotnetToolInstall(string? ToolsPath, bool Global)
 
     /// <summary>The command that updates this install; with <paramref name="version"/>, to exactly that version.</summary>
     /// <param name="version">A pinned version, or null for the latest.</param>
-    /// <param name="currentVersion">The running version; defaults to the CLI assembly version.</param>
+    /// <param name="currentVersion">The running version; defaults to the installed package version when known.</param>
     public string UpdateCommand(string? version = null, string? currentVersion = null)
     {
         var where = ToolsPath is null ? "" : Global ? "-g " : $"--tool-path {Quote(ToolsPath)} ";
         var suffix = version is not null ? $" --version {version}"
-            : (currentVersion ?? Hosting.CliHost.Version).Split('+')[0].Contains('-') ? " --prerelease" : "";
+            : (currentVersion ?? Package?.Version ?? Hosting.CliHost.Version).Split('+')[0].Contains('-') ? " --prerelease" : "";
         return $"dotnet tool update {where}{PackageId}{suffix}";
     }
 
@@ -52,20 +56,29 @@ public sealed record DotnetToolInstall(string? ToolsPath, bool Global)
     /// <param name="mbusPath">The mbus program (the running one, or <c>MBUS_UPDATE_TARGET</c>).</param>
     public static DotnetToolInstall? Find(string? mbusPath)
     {
-        if (string.IsNullOrEmpty(mbusPath) || Path.GetDirectoryName(Path.GetFullPath(mbusPath)) is not { } folder
-            || !File.Exists(Path.Combine(folder, SettingsFile)))
+        if (string.IsNullOrEmpty(mbusPath) || Path.GetDirectoryName(Path.GetFullPath(mbusPath)) is not { } folder)
         {
             return null;
         }
-        // <tools>\.store\<id>\<version>\<id>.<rid>\<version>\tools\<tfm>\<rid>\mbus.exe; a local tool runs from the NuGet cache.
+        var hasSettings = File.Exists(Path.Combine(folder, SettingsFile));
+        // A local manifest tool runs from the NuGet cache. For a global or --tool-path installation,
+        // identify the outer store entry containing this program, even if other versions are present.
         for (var dir = new DirectoryInfo(folder); dir.Parent is { } parent; dir = parent)
         {
             if (string.Equals(dir.Name, ".store", StringComparison.OrdinalIgnoreCase))
             {
-                return new DotnetToolInstall(parent.FullName, SamePath(parent.FullName, GlobalToolsPath()));
+                var parts = Path.GetRelativePath(dir.FullName, mbusPath).Split(Path.DirectorySeparatorChar);
+                var isMbusPackage = parts[0].Equals(PackageId, StringComparison.OrdinalIgnoreCase);
+                if (!hasSettings && !isMbusPackage) return null;
+                var package = hasSettings && File.Exists(mbusPath) && isMbusPackage && parts.Length >= 3
+                    && NuGetVersion.TryParse(parts[1], out var version)
+                    && parts[1].Equals(version.ToNormalizedString(), StringComparison.OrdinalIgnoreCase)
+                    ? new DotnetToolPackage(parts[0], version.ToNormalizedString(), Path.Combine(dir.FullName, parts[0], parts[1]))
+                    : null;
+                return new DotnetToolInstall(parent.FullName, SamePath(parent.FullName, GlobalToolsPath())) { Package = package };
             }
         }
-        return new DotnetToolInstall(null, false);
+        return hasSettings ? new DotnetToolInstall(null, false) : null;
     }
 
     /// <summary>Where <c>dotnet tool install -g</c> puts tools: <c>DOTNET_CLI_HOME</c>, else the user's home, then <c>.dotnet\tools</c>.</summary>

@@ -20,6 +20,15 @@ namespace MessageBus.Contracts.Mcp;
 /// </remarks>
 public static class McpToolNames
 {
+    /// <summary>Submit a role definition for editable owner review; local coordinators only.</summary>
+    public const string ProposeRole = "propose_role";
+    /// <summary>Read a role proposal belonging to the original local coordinator.</summary>
+    public const string GetRoleProposal = "get_role_proposal";
+    /// <summary>Wait for authoritative role proposal state, up to 30 seconds.</summary>
+    public const string WaitRoleProposal = "wait_role_proposal";
+
+    /// <summary>Whether this tool requires original coordinator proposal authority.</summary>
+    public static bool IsRoleProposal(string name) => name is ProposeRole or GetRoleProposal or WaitRoleProposal;
     /// <summary>Send one message (a task, a question, an event).</summary>
     public const string Send = "send";
     /// <summary>Send several messages at once, optionally with a join.</summary>
@@ -77,11 +86,11 @@ public static class McpToolNames
     [
         Send, SendMany, Wait, Watch, Inbox, Progress, Settle, Status, Cancel, Retarget, Move,
         EnsureProject, FindProject, CompleteProject, Directory, DescribeRole, Subscribe, FetchAttachment, Retry,
-        RequestApproval, WaitApproval, OpenInbox, SendVerified, SendManyVerified,
+        RequestApproval, WaitApproval, OpenInbox, SendVerified, SendManyVerified, ProposeRole, GetRoleProposal, WaitRoleProposal,
     ];
 
     /// <summary>Tools only the local <c>mbus mcp</c> server has (the remote endpoint can't decrypt or touch this machine's files).</summary>
-    public static IReadOnlyList<string> LocalOnly { get; } = [FetchAttachment, Retry];
+    public static IReadOnlyList<string> LocalOnly { get; } = [FetchAttachment, Retry, ProposeRole, GetRoleProposal, WaitRoleProposal];
 
     /// <summary>Tools that require a hosted service implementation and are never exposed by the local server.</summary>
     public static IReadOnlyList<string> ServiceOnly { get; } = [SendVerified, SendManyVerified];
@@ -90,6 +99,8 @@ public static class McpToolNames
 /// <summary>Error codes a tool (or a REST call, in <see cref="Http.MbusHeaders.Error"/>) returns.</summary>
 public static class McpErrorCodes
 {
+    /// <summary>The server does not advertise a supported feature protocol.</summary>
+    public const string Unsupported = "unsupported";
     /// <summary>An argument is missing or malformed. Fix the call; don't retry as is.</summary>
     public const string InvalidInput = "invalid-input";
     /// <summary>The thread, project, role or agent doesn't exist (or isn't visible to the caller).</summary>
@@ -122,6 +133,15 @@ public sealed record McpError
 
     /// <summary>Wait at least this long before retrying.</summary>
     public int? RetryAfterSeconds { get; init; }
+
+    /// <summary>Related role proposal, when supplied by a proposal endpoint.</summary>
+    public string? ProposalId { get; init; }
+
+    /// <summary>Authoritative proposal state on a conflict.</summary>
+    public RoleProposalStatus? Status { get; init; }
+
+    /// <summary>Current server review revision on stale-review.</summary>
+    public string? CurrentRevision { get; init; }
 
     /// <summary>The argument at fault, for <see cref="McpErrorCodes.InvalidInput"/>.</summary>
     public string? Field { get; init; }

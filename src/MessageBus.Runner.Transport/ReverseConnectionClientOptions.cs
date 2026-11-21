@@ -9,6 +9,10 @@ namespace MessageBus.Runner.Transport;
 /// <summary>Settings for <see cref="ReverseConnectionClient"/>. <see cref="RunnerTransport.ClientOptions"/> fills in the <c>mbus.v1</c> values.</summary>
 public sealed record ReverseConnectionClientOptions
 {
+    // Friend fixtures may trust an ephemeral CA without changing process or machine trust.
+    // No validation callback is exposed: the handler still checks the hostname and chain.
+    internal System.Security.Cryptography.X509Certificates.X509ChainPolicy? CertificateChainPolicy { get; init; }
+
     /// <summary>The server's address, for example <c>https://messagebus.example.com</c>. http becomes ws, https becomes wss.</summary>
     public required Uri ServerAddress { get; init; }
 
@@ -32,6 +36,15 @@ public sealed record ReverseConnectionClientOptions
     /// session id, version. The <see cref="ConnectRequest.Uri"/> says exactly what is being requested.
     /// </summary>
     public Func<ConnectRequest, CancellationToken, ValueTask>? PrepareRequest { get; init; }
+
+    /// <summary>
+    /// Runs after PrepareRequest and wraps authorization and the actual handshake. The callback must await
+    /// <c>connect</c> before returning; credentials must never escape for a later handshake.
+    /// </summary>
+    public Func<ConnectRequest, Func<CancellationToken, Task>, CancellationToken, Task>? ExecuteConnect { get; init; }
+
+    /// <summary>Identifies local authorization failures that must stop reconnecting rather than retry.</summary>
+    public Func<Exception, bool>? IsTerminalPreparationException { get; init; }
 
     /// <summary>Ping and silence timing (Groundhog's 15 s / 45 s by default).</summary>
     public KeepAlive KeepAlive { get; init; } = KeepAlive.Default;
@@ -73,6 +86,7 @@ public sealed record ReverseConnectionClientOptions
 public sealed class ConnectRequest
 {
     private readonly ClientWebSocketOptions _options;
+    private readonly Dictionary<string, string> _headers = new(StringComparer.OrdinalIgnoreCase);
 
     internal ConnectRequest(Uri uri, ClientWebSocketOptions options)
     {
@@ -92,7 +106,14 @@ public sealed class ConnectRequest
     /// <summary>Adds or replaces a request header.</summary>
     /// <param name="name">Header name.</param>
     /// <param name="value">Header value.</param>
-    public void SetHeader(string name, string value) => _options.SetRequestHeader(name, value);
+    public void SetHeader(string name, string value)
+    {
+        _options.SetRequestHeader(name, value);
+        _headers[name] = value;
+    }
+
+    /// <summary>The final value set for a header on this attempt, or null when absent.</summary>
+    public string? GetHeader(string name) => _headers.GetValueOrDefault(name);
 }
 
 /// <summary>Where the client is.</summary>

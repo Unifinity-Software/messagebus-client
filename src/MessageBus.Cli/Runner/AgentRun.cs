@@ -51,7 +51,7 @@ internal sealed record RunServices(
 internal sealed class AgentRun
 {
     private readonly RunServices _s;
-    private readonly IAgentAdapter _adapter;
+    private IAgentAdapter _adapter;
     private readonly string _executable;
     private readonly PermissionProfile _profile;
     private readonly bool _restricted;
@@ -83,9 +83,10 @@ internal sealed class AgentRun
     /// <param name="profile">What the run may do.</param>
     /// <param name="restricted">The orchestrator profile, enforced by the runner.</param>
     /// <param name="resume">the original issue: the closed session to resume in its own folder, instead of a new session in a worktree.</param>
+    /// <param name="proposalAuthority">Trusted origin verified by the runner for this exact session.</param>
     /// <param name="alreadyHandled">the original issue: nothing to run (the session already read this reply); settles as succeeded with this summary.</param>
     public AgentRun(RunServices services, TaskDelivery delivery, IAgentAdapter adapter, string executable, PermissionProfile profile, bool restricted,
-        MessageBus.Mcp.SessionRecord? resume = null, string? alreadyHandled = null)
+        MessageBus.Mcp.SessionRecord? resume = null, string? alreadyHandled = null, MessageBus.Mcp.ProposalAuthority proposalAuthority = MessageBus.Mcp.ProposalAuthority.Worker)
     {
         _s = services;
         Delivery = delivery;
@@ -94,6 +95,7 @@ internal sealed class AgentRun
         _profile = profile;
         _restricted = restricted;
         Resume = resume;
+        ProposalAuthority = proposalAuthority;
         _alreadyHandled = alreadyHandled;
         LeaseExpiresAt = delivery.LeaseExpiresAt;
         // Started now, on the caller's thread, so the clock starts when the delivery is accepted; for a run that needs its
@@ -111,6 +113,8 @@ internal sealed class AgentRun
         _timeout = new CancellationTokenSource(limit, _s.Time);
         _timeout.Token.Register(() => Stop(StopReason.TimedOut, $"Stopped after {(int)limit.TotalSeconds} seconds, the role's time limit."));
     }
+
+    private MessageBus.Mcp.ProposalAuthority ProposalAuthority { get; }
 
     public TaskDelivery Delivery { get; }
 
@@ -199,7 +203,17 @@ internal sealed class AgentRun
             }
             else
             {
-                await PrepareAndRunAsync().ConfigureAwait(false);
+                if (_adapter is OpenCodeAdapter openCode)
+                {
+                    var selected = await openCode.SelectAsync(Delivery.Model, _stop.Token).ConfigureAwait(false);
+                    _adapter = selected.Adapter;
+                    if (selected.Error is { } error)
+                    {
+                        _declined = DeclineReason.MachineNotReady;
+                        failure = (SettleStatus.Abandoned, error);
+                    }
+                }
+                if (failure is null) await PrepareAndRunAsync().ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException) when (_stop.IsCancellationRequested)
@@ -223,6 +237,7 @@ internal sealed class AgentRun
         {
             // the original issue: a resumed session works in its own folder; the run's directory holds only the run's files.
             workspace = RunWorkspace.Create(_s.Options.WorkRoot, DeliveryId, Delivery.Attempt, Resume?.Folder);
+            workspace.LocalModelEndpoint = (_adapter as OpenCodeAdapter)?.LocalEndpoint;
             await File.WriteAllTextAsync(workspace.DeliveryFile, MessageBusJson.Serialize(Delivery)).ConfigureAwait(false);
             var prompt = Resume is null ? TaskPrompt.Build(Delivery, _s.Host.MachineName, _restricted) : TaskPrompt.BuildResume(Delivery, _s.Host.MachineName);
             if (verifier is not null && !NodeVerification.IsReview(Delivery))
@@ -290,6 +305,7 @@ internal sealed class AgentRun
                 _tools = await tools.StartAsync(new RunToolsRequest(workspace, Delivery, _profile, Sandboxed)
                 {
                     Session = Resume,
+                    ProposalAuthority = ProposalAuthority,
                     RecordVerifiedTaskSettle = verifier is null ? null : input => Volatile.Write(ref _verifiedAgentSettle, input),
                     Refused = (name, error) =>
                     {

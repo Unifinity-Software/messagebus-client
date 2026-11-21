@@ -28,6 +28,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="MessageBus.Cli.Tests" />
     <None Update="README.md" Pack="true" PackagePath="/README.md" />
   </ItemGroup>
 

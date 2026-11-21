@@ -5,6 +5,7 @@ using MessageBus.Cli.Readiness;
 using MessageBus.Cli.Runner;
 using MessageBus.Cli.Runner.Agents;
 using MessageBus.Cli.Runner.Sandbox;
+using MessageBus.Cli.Server;
 using MessageBus.Contracts.Machines;
 using Spectre.Console;
 
@@ -14,7 +15,8 @@ namespace MessageBus.Cli.Commands;
 /// <c>mbus doctor</c>: every check a runner makes before it takes work, in one place, with what to do
 /// about each problem (the original issue, the original issue, the original issue): git works (not macOS's placeholder), each agent can use its
 /// sign-in from this session, this machine is signed in to messagebus.ai, and which toolchains tasks
-/// can use. Read-only: it runs version and status commands, never a model, and changes nothing.
+/// can use. It runs version and status commands, never a model. Anonymous discovery may persist a
+/// restrictive authority pin before any credential is sent; it never enrolls or changes key trust.
 /// It starts with what a runner here would start with (the original issue: version, server, workspace, run isolation, network,
 /// updates) and the server's view of this machine (<see cref="DoctorServerView"/>), so a machine the server thinks
 /// is offline can tell.
@@ -59,6 +61,30 @@ internal static class DoctorCommand
         var settings = context.Settings;
         var rows = RunnerFacts.Identity(Hosting.CliHost.Version, settings.Server, settings.MachineName, settings.Location,
             server.WorkspaceName ?? settings.Stored.WorkspaceName ?? settings.Stored.WorkspaceId).ToList();
+        if (settings.Server is { } selected)
+        {
+            rows.Add(new("Selected API endpoint", ServerEndpoint.Parse(selected.AbsoluteUri).Value));
+            rows.Add(new("Transport origin", ServerEndpoint.Parse(selected.AbsoluteUri).Origin));
+            if (settings.Stored.ServerBinding is { } saved)
+                rows.Add(new("Saved credential authority", $"{saved.Binding.Issuer} (stamp {saved.Binding.StampId}); endpoint {saved.SelectedEndpoint}"));
+            if (server.PersistedBinding is { } pin)
+                rows.Add(new("Persisted origin pin", $"{pin.Issuer} (stamp {pin.StampId})"));
+            if (host.GetEnvironmentVariable(ServerBindingExpectation.EnvironmentVariable) is { } expectedJson)
+            {
+                try
+                {
+                    var expected = ServerBindingExpectation.Parse(expectedJson);
+                    rows.Add(new("Expected authority", $"{expected.Binding.Issuer} (stamp {expected.Binding.StampId}); transport {expected.TransportOrigin}"));
+                }
+                catch (ServerBindingException) { rows.Add(new("Expected authority", "Invalid local binding configuration.", SummaryTone.Bad)); }
+            }
+            if (server.PreparedBinding is { } prepared)
+                rows.Add(new("Validated authority", $"{prepared.Binding.Issuer} (stamp {prepared.Binding.StampId}); signature v2"));
+            rows.Add(new("Reported hosting", server.Discovery?.Binding is { } binding
+                ? $"{binding.Issuer} (stamp {binding.StampId}); geography {server.Discovery.Info.Stamp?.Geography}; Azure region {server.Discovery.Info.Stamp?.AzureRegion} (server-reported)"
+                : "Unknown/custom: no validated isolated authority. A tunnel or server name does not establish a region."));
+            rows.Add(new("Execution location", settings.Location is { } location ? $"{location} (runner label)" : "No runner location label."));
+        }
         rows.Add(new SummaryRow("Machine key", context.Store.KeyVault.Description + (context.Store.KeyStoreName == "file" ? ". Programs running as you can read it without Keychain protection." : "")));
         rows.AddRange(server.Rows());
         try
@@ -114,7 +140,11 @@ internal static class DoctorCommand
             console.MarkupLineInterpolated($"{capacity}");
 
         // This machine and messagebus.ai.
-        if (context.Settings.Server is { } server && context.Settings.CanAuthenticate(context.Store))
+        if ((view.BindingRefused || view.Suspended) && view.Problem is { } serverProblem)
+        {
+            Bad("mbus server", serverProblem);
+        }
+        else if (context.Settings.Server is { } server && context.Settings.CanAuthenticate(context.Store))
         {
             Good("mbus", $"signed in to {CommandContext.ServerText(server)}{(context.Settings.Stored.MachineId is { } id ? $" as {id}" : "")}");
         }
@@ -159,7 +189,7 @@ internal static class DoctorCommand
             }
             else
             {
-                Good(name, $"{agent.Version ?? "version unknown"}, signed in");
+                Good(name, $"{agent.Version ?? "version unknown"}, {(agent.Kind == AgentKind.OpenCode ? "provider available" : "signed in")}");
             }
             if (warning is not null)
             {

@@ -120,6 +120,12 @@ public sealed class RunNetwork : IDisposable
     /// <summary>What the run may reach; null: any host (a role set to any host, on the runner's one proxy).</summary>
     public HostAllowList? Allowed { get; }
 
+    internal Uri? LocalModelEndpoint { get; set; }
+
+    internal bool AllowsLocalModel(string host, int port) => LocalModelEndpoint is { } endpoint
+        && port == endpoint.Port && host.Trim('[', ']').Equals(endpoint.Host.Trim('[', ']'), StringComparison.OrdinalIgnoreCase)
+        && MessageBus.Cli.Agents.OpenCodeSettings.IsLoopback(host);
+
     /// <summary>The run, for the log.</summary>
     internal string RunName { get; }
 

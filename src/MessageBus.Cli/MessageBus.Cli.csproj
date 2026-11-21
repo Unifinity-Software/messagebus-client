@@ -17,6 +17,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Include="..\Shared\CredentialFreeProxy.cs" Link="Http\CredentialFreeProxy.cs" />
     <InternalsVisibleTo Include="MessageBus.Cli.Tests" />
   </ItemGroup>
 
@@ -45,6 +46,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <PackageReference Include="NuGet.Versioning" />
     <PackageReference Include="OpenTelemetry" />
     <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" />
     <PackageReference Include="Spectre.Console" />

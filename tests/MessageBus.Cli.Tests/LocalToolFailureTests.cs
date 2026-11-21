@@ -17,7 +17,7 @@ public sealed class LocalToolFailureTests
         var refusals = new List<(string Tool, McpError Error)>();
         await using var tools = new LocalTools(new LocalServerOptions
         {
-            Http = http, Links = http, WorkspaceId = "ws_test", ConfigDirectory = machine.Home,
+            Http = http, Links = machine.Server.Links, WorkspaceId = "ws_test", ConfigDirectory = machine.Home,
             Input = Stream.Null, Output = Stream.Null, Refused = (name, error) =>
             {
                 refusals.Add((name, error));

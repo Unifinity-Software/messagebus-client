@@ -50,6 +50,7 @@ public static class RunnerUpdateSetup
                     ? "Run mbus runner install once on this machine so it can update itself." : null;
             var dotnet = MessageBus.Cli.Agents.ExecutableLocator.Find(host, "dotnet")?.Path;
             reason ??= installedTool.ToolsPath is null ? "Local manifest tools cannot update through the runner service."
+                : installedTool.Package is null ? DotnetToolPackage.IdentityUnknown
                 : dotnet is null ? "The dotnet SDK could not be found on this machine." : null;
             ability = new() { CanUpdate = reason is null, Via = RunnerInstallKind.DotnetTool, Reason = reason };
             if (reason is not null) { log.WriteLine("Updates: off. " + reason); return null; }

@@ -19,8 +19,11 @@ namespace MessageBus.Cli.Security;
 /// </remarks>
 /// <param name="configDirectory">The settings folder (names the item, like <see cref="KeychainKeyVault"/>).</param>
 /// <param name="viaTool">The same item through Apple's tool, for items written before mbus was Developer ID signed.</param>
-internal sealed class AppOnlyKeychainKeyVault(string configDirectory, KeychainKeyVault viaTool) : IKeychainVault
+internal sealed class AppOnlyKeychainKeyVault(string configDirectory, KeychainKeyVault viaTool) : IKeychainVault, IGenerationMachineKeyVault
 {
+    public IMachineKeyVault ForGeneration(string generation) =>
+        new AppOnlyKeychainKeyVault(ConfigDirectory, (KeychainKeyVault)viaTool.ForGeneration(generation));
+
     private readonly byte[] _service = Encoding.UTF8.GetBytes(KeychainKeyVault.Service);
     private readonly byte[] _account = Encoding.UTF8.GetBytes(viaTool.Account);
 

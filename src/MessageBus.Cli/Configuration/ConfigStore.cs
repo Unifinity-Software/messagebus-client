@@ -9,13 +9,17 @@ namespace MessageBus.Cli.Configuration;
 /// so an interrupted write never leaves half a settings file. The machine's private key goes to the
 /// OS's own store where there is one (<see cref="Security.IMachineKeyVault"/>, the original issue).
 /// </summary>
-public sealed class ConfigStore
+public sealed partial class ConfigStore
 {
     /// <summary><c>os</c> (the default: DPAPI on Windows, the Keychain on macOS) or <c>file</c> (the owner-only PEM file everywhere).</summary>
     public const string KeyStoreVariable = "MBUS_KEY_STORE";
 
-    private readonly Security.FileKeyVault _keyFile;
+    private Security.FileKeyVault _keyFile;
     private readonly Security.IMachineKeyVault? _osVault;
+    private string? _keyGeneration;
+    private string? _selectedKeyStore;
+    private bool _keySelectionInitialized;
+    private readonly string? _initialKeyStore;
 
     // Runner reads check the actual keychain lock state before using the trusted tool.
     internal bool RunnerKeyReads { get; set; }
@@ -36,8 +40,9 @@ public sealed class ConfigStore
         _environment = environment;
         _keyFile = new Security.FileKeyVault(Path.Combine(directory, CliConfig.MachineKeyFile), WriteOwnerOnly);
         _osVault = osVault;
-        var choice = Load().KeyStore ?? keyStore;
-        KeyVault = string.Equals(choice?.Trim(), "file", StringComparison.OrdinalIgnoreCase) ? _keyFile : PlatformVault() ?? _keyFile;
+        _initialKeyStore = keyStore;
+        KeyVault = _keyFile;
+        InSecurityTransaction(tx => tx.RefreshKeySelection());
     }
 
     /// <summary>The folder.</summary>
@@ -66,30 +71,48 @@ public sealed class ConfigStore
     /// removes the new one. A runner that is still running reads the old copy until it stops (the original issue).
     /// </summary>
     public KeyStoreChange PrepareKeyStoreChange(string choice)
+        => InSecurityTransaction(tx => tx.PrepareKeyStoreChange(choice));
+
+    private KeyStoreChange PrepareKeyStoreChangeLocked(string choice)
     {
         if (_environment is not null && Security.RunContext.IsInsideRun(_environment))
             throw new CliException(Security.RunContext.KeyRefused);
         if (choice is not ("file" or "keychain")) throw new CliException("Choose --key-store file or keychain.");
-        var target = KeyStoreName == choice ? KeyVault : choice == "file" ? _keyFile : PlatformVault() ?? throw new CliException("The Keychain is unavailable on this computer.");
-        var config = Load();
-        if (config.KeyStore == choice && KeyStoreName == choice) return new KeyStoreChange(null, choice, target, null);
-        if (config.MachineId is null && !HasKey) return new KeyStoreChange(this, choice, target, null);
+        var config = ReadBindingState().Config;
+        SelectKeyGeneration(config);
+        var vault = KeyVault;
+        var keyFile = _keyFile;
+        var keyStore = ReferenceEquals(vault, keyFile) ? "file" : "keychain";
+        var target = keyStore == choice ? vault : choice == "file" ? keyFile
+            : config.MachineKeyGeneration is { } generation ? GenerationVault(generation, false)
+            : PlatformVault() ?? throw new CliException("The Keychain is unavailable on this computer.");
+        // A legacy file moves to an independent native item as well. Its selector is published only
+        // after readback, so a refused/abandoned migration cannot replace the legacy Keychain item.
+        string? targetGeneration = null;
+        if (choice == "keychain" && keyStore != choice && config.MachineKeyGeneration is null
+            && target is Security.IGenerationMachineKeyVault generations)
+        {
+            targetGeneration = Guid.NewGuid().ToString("N");
+            target = generations.ForGeneration(targetGeneration);
+        }
+        if (config.KeyStore == choice && keyStore == choice) return new KeyStoreChange(null, choice, target, null);
+        if (config.MachineId is null && !HasKeyLocked(config)) return new KeyStoreChange(this, choice, target, null, expected: config);
         // the original issue: the file first when it holds this machine's key, so a locked Keychain (with an older copy, say) doesn't
         // stop a move to the file. The Keychain is read only when the file can't be used.
-        var source = KeyVault;
+        var source = vault;
         string? pem;
-        if (!ReferenceEquals(source, _keyFile) && _keyFile.Load() is { } fileKey && MatchesStoredFingerprint(fileKey))
+        if (!ReferenceEquals(source, keyFile) && keyFile.Load() is { } fileKey && MatchesStoredFingerprint(fileKey, config))
         {
-            source = _keyFile;
+            source = keyFile;
             pem = fileKey;
         }
         else
         {
             pem = LoadForChange(source, choice);
         }
-        if (pem is null && !ReferenceEquals(source, _keyFile))
+        if (pem is null && !ReferenceEquals(source, keyFile))
         {
-            source = _keyFile;
+            source = keyFile;
             pem = source.Load();
         }
         if (pem is null) throw new CliException("This machine has no saved key. Run mbus login first.");
@@ -98,7 +121,7 @@ public sealed class ConfigStore
             throw new CliException("The saved key does not match this machine. The key store was not changed.");
         if (ReferenceEquals(source, target) && choice == "keychain")
         {
-            return new KeyStoreChange(this, choice, target, null);
+            return new KeyStoreChange(this, choice, target, null, expected: config);
         }
         if (choice == "file" && !OperatingSystem.IsWindows())
         {
@@ -106,7 +129,7 @@ public sealed class ConfigStore
             File.SetUnixFileMode(Directory, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
         }
         // The current store's copy is never removed for a failed or abandoned change: it was in use before.
-        var newCopy = ReferenceEquals(source, target) || ReferenceEquals(target, KeyVault) ? null : target;
+        var newCopy = ReferenceEquals(source, target) || ReferenceEquals(target, vault) ? null : target;
         try
         {
             target.Save(pem);
@@ -129,8 +152,8 @@ public sealed class ConfigStore
                 : "The key store was not changed: " + ex.Message, 1, ex);
         }
         // Moving from the Keychain to the file: its copy goes too, also when the file was the source (an older one, say).
-        var oldCopies = new[] { source, KeyVault }.Distinct().Where(v => !ReferenceEquals(v, target)).ToArray();
-        return new KeyStoreChange(this, choice, target, oldCopies, newCopy);
+        var oldCopies = new[] { source, vault }.Distinct().Where(v => !ReferenceEquals(v, target)).ToArray();
+        return new KeyStoreChange(this, choice, target, oldCopies, newCopy, targetGeneration, config, key.Fingerprint);
     }
 
     /// <summary>Reads the key to move it, saying what to do when the Keychain is locked.</summary>
@@ -156,23 +179,47 @@ public sealed class ConfigStore
         private readonly Security.IMachineKeyVault _target;
         private readonly Security.IMachineKeyVault[] _oldCopies;
         private readonly Security.IMachineKeyVault? _newCopy;
+        private readonly string? _targetGeneration;
+        private readonly CliConfig? _expected;
+        private readonly string? _fingerprint;
 
         internal KeyStoreChange(ConfigStore? store, string choice, Security.IMachineKeyVault target, Security.IMachineKeyVault[]? oldCopies,
-            Security.IMachineKeyVault? newCopy = null)
+            Security.IMachineKeyVault? newCopy = null, string? targetGeneration = null, CliConfig? expected = null, string? fingerprint = null)
         {
             _store = store;
             _choice = choice;
             _target = target;
             _oldCopies = oldCopies ?? [];
             _newCopy = newCopy;
+            _targetGeneration = targetGeneration;
+            _expected = expected;
+            _fingerprint = fingerprint;
         }
 
         /// <summary>Switches to the new store and deletes the old copy; returns a warning when that copy couldn't be deleted.</summary>
         public string? Commit()
         {
             if (_store is null) return null;
-            _store.Save(_store.Load() with { KeyStore = _choice });
-            _store.KeyVault = _target;
+            return _store.InSecurityTransaction(tx => tx.CommitKeyStoreChange(this));
+        }
+
+        internal string? CommitLocked()
+        {
+            var store = _store!;
+            var current = store.ReadBindingState().Config;
+            store.SelectKeyGeneration(current);
+            if (current != _expected)
+                throw new Server.ServerBindingException("The profile changed during key store migration.");
+            if (_fingerprint is not null)
+            {
+                using var key = Security.MachineKey.FromPem(_target.Load()
+                    ?? throw new Server.ServerBindingException("The prepared key store copy is missing."));
+                if (key.Fingerprint != _fingerprint)
+                    throw new Server.ServerBindingException("The prepared key store copy changed.");
+            }
+            if (_targetGeneration is null) store.SaveConfigLocked(current with { KeyStore = _choice });
+            else store.PublishKeyStoreGenerationLocked(current, _choice, _targetGeneration);
+            store.SelectKeyGeneration(store.ReadBindingState().Config);
             string? warning = null;
             foreach (var old in _oldCopies)
             {
@@ -193,14 +240,43 @@ public sealed class ConfigStore
         /// <summary>Removes the new copy and leaves everything as it was.</summary>
         public void Abandon()
         {
+            if (_store is null) return;
             try
             {
-                _newCopy?.Delete();
+                _store.InSecurityTransaction(tx => tx.AbandonKeyStoreChange(this));
             }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or CliException)
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or CliException or System.Security.Cryptography.CryptographicException)
             {
                 // A second copy of the same key, in a store that isn't used: harmless, and replaced by the next change.
             }
+        }
+
+        internal bool AbandonLocked()
+        {
+            var current = _store!.ReadBindingState().Config;
+            _store.SelectKeyGeneration(current);
+            // A different operation may have selected this very target (including the same generation
+            // in another backend). Stale preparations own no cleanup rights over the new profile.
+            if (current != _expected) return false;
+            if (current.MachineKeyGeneration == (_targetGeneration ?? _expected!.MachineKeyGeneration)
+                && _store.KeyStoreName == _choice) return false;
+            if (current.PendingRunnerIdentity is { } pending
+                && pending.KeyGeneration == (_targetGeneration ?? _expected!.MachineKeyGeneration)
+                && pending.KeyStore == _choice) return false;
+            if (_newCopy is Security.FileKeyVault && _fingerprint is not null)
+            {
+                // A later failed OS-store save can make this same file the only surviving active
+                // copy without changing config. Never remove it unless the selected vault verifies.
+                var vault = _store.KeyVault;
+                if (vault is Security.IKeychainVault keychain && keychain.LockState() != Security.KeychainLockState.Unlocked)
+                    return false;
+                var pem = vault is Security.IKeychainVault native ? native.LoadWithoutPrompts() : vault.Load();
+                if (pem is null) return false;
+                using var key = Security.MachineKey.FromPem(pem);
+                if (key.Fingerprint != _fingerprint) return false;
+            }
+            _newCopy?.Delete();
+            return true;
         }
     }
 
@@ -214,7 +290,8 @@ public sealed class ConfigStore
     {
         if (OperatingSystem.IsWindows())
         {
-            return new Security.DpapiKeyVault(Path.Combine(Directory, CliConfig.ProtectedMachineKeyFile), WriteOwnerOnly);
+            return new Security.DpapiKeyVault(Path.Combine(Directory, _keyGeneration is { } generation
+                ? $"machine-key.{generation}.dpapi" : CliConfig.ProtectedMachineKeyFile), WriteOwnerOnly);
         }
         if (OperatingSystem.IsMacOS() && File.Exists(Security.SecurityTool.Path))
         {
@@ -227,25 +304,39 @@ public sealed class ConfigStore
 
     /// <summary>The stored settings, or empty settings when there are none.</summary>
     public CliConfig Load()
+        => InSecurityTransaction(context => context.Load());
+
+    private CliConfig ReadConfig()
     {
-        if (!File.Exists(ConfigPath))
+        var json = ReadOptionalProfileFile(ConfigPath);
+        if (json is null)
         {
             return new CliConfig();
         }
         try
         {
-            return JsonSerializer.Deserialize(File.ReadAllText(ConfigPath), CliJsonContext.Default.CliConfig) ?? new CliConfig();
+            ValidateSavedJson(json);
+            return JsonSerializer.Deserialize(json, CliJsonContext.Default.CliConfig) ?? throw new Server.ServerBindingException("Empty settings state.");
         }
         catch (JsonException ex)
         {
-            throw new CliException($"The settings file {ConfigPath} can't be read ({ex.Message}). Delete it and run mbus login again.");
+            throw new Server.ServerBindingException("Unreadable settings state; restore the profile before using credentials.", ex);
         }
     }
 
     /// <summary>Saves the settings.</summary>
     public void Save(CliConfig config)
+        => InSecurityTransaction(context => { context.Save(config); return true; });
+
+    private void SaveConfigLocked(CliConfig config)
     {
-        var previousServer = Load().Server;
+        var state = ReadBindingState();
+        if (config.MachineKeyGeneration is not null && config.MachineKeyGeneration != state.Config.MachineKeyGeneration)
+            throw new Server.ServerBindingException("Only an enrollment transaction may publish a new machine key generation.");
+        config = config with { MachineKeyGeneration = config.MachineKeyGeneration ?? state.Config.MachineKeyGeneration };
+        config = config with { ServerBinding = MergeSnapshot(state.Config.ServerBinding, config.ServerBinding, config.Server, state.Ledger) };
+        BindingWriteBoundary?.Invoke("before-config-save");
+        var previousServer = state.Config.Server;
         if (previousServer != config.Server)
             MessageBus.Mcp.KeyTrust.BindLegacy(Directory, previousServer ?? config.Server ?? "");
         // the original issue: every login path saves here, including enrollment with a runner API key.
@@ -286,15 +377,21 @@ public sealed class ConfigStore
     /// once the store gives the same key back; if the store can't take it, the file keeps working.
     /// </summary>
     public string? LoadKeyPem()
+        => InSecurityTransaction(tx => tx.LoadKeyPem());
+
+    private string? LoadKeyPemLocked(CliConfig config)
     {
+        SelectKeyGeneration(config);
+        var vault = KeyVault;
+        var keyFile = _keyFile;
         if (_environment is not null && Security.RunContext.IsInsideRun(_environment))
         {
             throw new CliException(Security.RunContext.KeyRefused);
         }
-        if (RunnerKeyReads && KeyVault is Security.IKeychainVault keychain)
+        if (RunnerKeyReads && vault is Security.IKeychainVault keychain)
         {
             // Leave legacy-file migration to an interactive CLI command; no identity changes while waiting.
-            if (_keyFile.Load() is { } fileKey && MatchesStoredFingerprint(fileKey))
+            if (keyFile.Load() is { } fileKey && MatchesStoredFingerprint(fileKey, config))
             {
                 // Every request reads the key: say it once (the original issue).
                 if (KeyReadLog is { } log && !_leftoverFileLogged)
@@ -306,18 +403,18 @@ public sealed class ConfigStore
             }
             return keychain.LoadWithoutPrompts();
         }
-        if (ReferenceEquals(KeyVault, _keyFile) || _keyFile.Load() is not { } legacy)
+        if (ReferenceEquals(vault, keyFile) || keyFile.Load() is not { } legacy)
         {
-            return KeyVault.Load();
+            return vault.Load();
         }
-        if (!MatchesStoredFingerprint(legacy) && Load().KeyFingerprint is not null)
-            return KeyVault.Load(); // Never replace the registered identity with a different leftover file.
-        if (Load().KeyFingerprint is null)
+        if (!MatchesStoredFingerprint(legacy, config) && config.KeyFingerprint is not null)
+            return vault.Load(); // Never replace the registered identity with a different leftover file.
+        if (config.KeyFingerprint is null)
         {
             // With no registered fingerprint, preserve any identity already in the protected store.
             try
             {
-                if (KeyVault.Load() is { } existing) return existing;
+                if (vault.Load() is { } existing) return existing;
             }
             catch (Exception ex) when (ex is IOException or CliException)
             {
@@ -326,10 +423,10 @@ public sealed class ConfigStore
         }
         try
         {
-            KeyVault.Save(legacy);
-            if (KeyVault.Load() == legacy)
+            vault.Save(legacy);
+            if (vault.Load() == legacy)
             {
-                _keyFile.Delete();
+                keyFile.Delete();
             }
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.Cryptography.CryptographicException or CliException
@@ -340,33 +437,42 @@ public sealed class ConfigStore
         return legacy;
     }
 
-    private bool MatchesStoredFingerprint(string pem)
+    private static bool MatchesStoredFingerprint(string pem, CliConfig config)
     {
-        if (Load().KeyFingerprint is not { } expected) return false;
+        if (config.KeyFingerprint is not { } expected) return false;
         try
         {
             using var key = Security.MachineKey.FromPem(pem);
             return key.Fingerprint == expected;
         }
-        catch (CliException) { return false; }
+        catch (Exception ex) when (ex is CliException or System.Security.Cryptography.CryptographicException) { return false; }
     }
 
     /// <summary>Whether a machine key is saved here (without decrypting it).</summary>
-    public bool HasKey => File.Exists(KeyPath) || (!ReferenceEquals(KeyVault, _keyFile) && SafeHasProtectedKey());
-
-    private bool SafeHasProtectedKey()
+    public bool HasKey
     {
-        if (KeyVault is Security.DpapiKeyVault)
+        get => InSecurityTransaction(tx => tx.HasKey());
+    }
+
+    private bool HasKeyLocked(CliConfig config)
+    {
+        SelectKeyGeneration(config);
+        var vault = KeyVault;
+        var keyFile = _keyFile;
+        if (File.Exists(keyFile.Path)) return true;
+        if (ReferenceEquals(vault, keyFile)) return false;
+        if (vault is Security.DpapiKeyVault)
         {
-            return File.Exists(Path.Combine(Directory, CliConfig.ProtectedMachineKeyFile));
+            return File.Exists(Path.Combine(Directory, config.MachineKeyGeneration is { } generation
+                ? $"machine-key.{generation}.dpapi" : CliConfig.ProtectedMachineKeyFile));
         }
-        if (KeyVault is Security.IKeychainVault keychain)
+        if (vault is Security.IKeychainVault keychain)
         {
             return keychain.Exists();
         }
         try
         {
-            return (RunnerKeyReads ? LoadKeyPem() : KeyVault.Load()) is not null;
+            return (RunnerKeyReads ? LoadKeyPemLocked(config) : vault.Load()) is not null;
         }
         catch (CliException)
         {
@@ -376,13 +482,23 @@ public sealed class ConfigStore
 
     /// <summary>Saves the machine's private key in the OS store, or in the owner-only file when the store refuses it.</summary>
     public void SaveKeyPem(string pem)
+        => InSecurityTransaction(tx => { tx.SaveKeyPem(pem); return true; });
+
+    private void SaveKeyPemLocked(string pem)
     {
-        if (!ReferenceEquals(KeyVault, _keyFile))
+        var config = ReadBindingState().Config;
+        SelectKeyGeneration(config);
+        // PEM obtained before another enrollment must never overwrite that enrollment's key.
+        if (config.KeyFingerprint is not null && !MatchesStoredFingerprint(pem, config))
+            throw new Server.ServerBindingException("The key does not match the current machine identity.");
+        var vault = KeyVault;
+        var keyFile = _keyFile;
+        if (!ReferenceEquals(vault, keyFile))
         {
             try
             {
-                KeyVault.Save(pem);
-                _keyFile.Delete();
+                vault.Save(pem);
+                keyFile.Delete();
                 return;
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.Cryptography.CryptographicException
@@ -391,53 +507,96 @@ public sealed class ConfigStore
                 // A locked keychain over SSH, say: the file works everywhere, and moves to the store later.
             }
         }
-        _keyFile.Save(pem);
+        keyFile.Save(pem);
     }
 
     /// <summary>Deletes the machine's private key, wherever it is.</summary>
     public void DeleteKey()
+        => InSecurityTransaction(tx => { tx.DeleteKey(); return true; });
+
+    private void DeleteKeyLocked()
     {
-        _keyFile.Delete();
-        if (!ReferenceEquals(KeyVault, _keyFile))
+        SelectKeyGeneration(ReadBindingState().Config);
+        var vault = KeyVault;
+        var keyFile = _keyFile;
+        keyFile.Delete();
+        if (!ReferenceEquals(vault, keyFile))
         {
-            KeyVault.Delete();
+            vault.Delete();
         }
+    }
+
+    public sealed partial class ProfileSecurityTransaction
+    {
+        internal bool RefreshKeySelection() => Execute(() =>
+        { _store.SelectKeyGeneration(_store.ReadBindingState().Config); return true; });
+        internal KeyStoreChange PrepareKeyStoreChange(string choice) => Execute(() => _store.PrepareKeyStoreChangeLocked(choice));
+        internal string? CommitKeyStoreChange(KeyStoreChange change) => Execute(change.CommitLocked);
+        internal bool AbandonKeyStoreChange(KeyStoreChange change) => Execute(change.AbandonLocked);
+
+        /// <summary>Reads or migrates the current key while holding the profile transaction.</summary>
+        public string? LoadKeyPem() => Execute(() => _store.LoadKeyPemLocked(_store.ReadBindingState().Config));
+        /// <summary>Checks the selected key backend while holding the profile transaction.</summary>
+        public bool HasKey() => Execute(() => _store.HasKeyLocked(_store.ReadBindingState().Config));
+        /// <summary>Saves a matching key without allowing an enrollment to change its destination.</summary>
+        public void SaveKeyPem(string pem) => Execute(() => { _store.SaveKeyPemLocked(pem); return true; });
+        /// <summary>Deletes the selected key while holding the profile transaction.</summary>
+        public void DeleteKey() => Execute(() => { _store.DeleteKeyLocked(); return true; });
     }
 
     /// <summary>Full path of the person's mbus sign-in (<see cref="CliSessionFile"/>).</summary>
     public string SessionPath => Path.Combine(Directory, CliSessionFile.FileName);
 
-    /// <summary>The saved sign-in, or null when there is none (or it can't be read: then mbus signs in again).</summary>
+    /// <summary>The saved sign-in, or null when absent. Unreadable state refuses rather than erasing a possible floor.</summary>
     public CliSessionFile? LoadSession()
+        => InSecurityTransaction(context => context.LoadSession());
+
+    private CliSessionFile? ReadSession()
     {
-        if (!File.Exists(SessionPath))
+        var json = ReadOptionalProfileFile(SessionPath);
+        if (json is null)
         {
             return null;
         }
         try
         {
-            return JsonSerializer.Deserialize(File.ReadAllText(SessionPath), CliJsonContext.Default.CliSessionFile);
+            ValidateSavedJson(json);
+            return JsonSerializer.Deserialize(json, CliJsonContext.Default.CliSessionFile)
+                ?? throw new Server.ServerBindingException("Empty saved sign-in state.");
         }
-        catch (JsonException)
+        catch (JsonException ex)
         {
-            return null;
+            throw new Server.ServerBindingException("Unreadable saved sign-in state; restore the profile before using credentials.", ex);
         }
     }
 
     /// <summary>Saves the sign-in (owner-only, replaced in one step).</summary>
-    public void SaveSession(CliSessionFile session) =>
+    public void SaveSession(CliSessionFile session) => InSecurityTransaction(context =>
+    { context.SaveSession(session); return true; });
+
+    private void SaveSessionLocked(CliSessionFile session)
+    {
+        var state = ReadBindingState();
+        session = session with { ServerBinding = MergeSnapshot(state.Session?.ServerBinding, session.ServerBinding, session.Server, state.Ledger) };
         WriteOwnerOnly(SessionPath, JsonSerializer.Serialize(session, CliJsonContext.Default.CliSessionFile));
+    }
 
     /// <summary>Forgets the sign-in.</summary>
     public void DeleteSession()
+        => InSecurityTransaction(context => { context.DeleteSession(); return true; });
+
+    private void DeleteSessionLocked()
     {
+        _ = ReadBindingState(); // A surviving snapshot may never be discarded to repair a missing/corrupt ledger.
         if (File.Exists(SessionPath))
         {
             File.Delete(SessionPath);
+            DurableProfileFile.FlushDirectory(Directory);
         }
     }
 
-    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, SemaphoreSlim> SessionGates = new(StringComparer.Ordinal);
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, SemaphoreSlim> SessionGates = new(
+        OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
 
     /// <summary>
     /// Runs <paramref name="body"/> while holding the sign-in lock, so two mbus processes (or two
@@ -446,8 +605,33 @@ public sealed class ConfigStore
     /// the callers; across processes an exclusive lock file does. Whoever waited must read the
     /// sign-in again once inside: another process may have refreshed it meanwhile.
     /// </summary>
-    public async Task<T> WithSessionLockAsync<T>(Func<Task<T>> body, CancellationToken ct)
+    public Task<T> WithSessionLockAsync<T>(Func<ProfileSecurityTransaction, Task<T>> body, CancellationToken ct) =>
+        WithProfileSecurityLockAsync(body, ct);
+
+    /// <summary>
+    /// Runs a legacy sign-in callback under the profile lock. Ordinary Load/Save and session operations on
+    /// this store use the held transaction's operation guard, including after awaits. Overlapping operations
+    /// refuse before state access; inherited callbacks cannot use the transaction after its completion.
+    /// Use the explicit-context overload for new code and helpers that prepare or consume sends.
+    /// </summary>
+    [Obsolete("Use the overload receiving ProfileSecurityTransaction for new code.")]
+    public Task<T> WithSessionLockAsync<T>(Func<Task<T>> body, CancellationToken ct)
     {
+        ArgumentNullException.ThrowIfNull(body);
+        return WithProfileSecurityLockAsync(async context =>
+        {
+            var previous = _compatibilitySession.Value;
+            _compatibilitySession.Value = context;
+            try { return await body().ConfigureAwait(false); }
+            finally { _compatibilitySession.Value = previous; }
+        }, ct);
+    }
+
+    /// <summary>Runs a serialized profile transaction. Pass its context to nested helpers.</summary>
+    public async Task<T> WithProfileSecurityLockAsync<T>(Func<ProfileSecurityTransaction, Task<T>> body, CancellationToken ct)
+    {
+        if (_compatibilitySession.Value is not null)
+            throw new InvalidOperationException("A legacy session callback cannot acquire another profile transaction. Use the explicit-context overload and pass its context to helpers.");
         EnsureDirectory();
         var lockPath = Path.GetFullPath(Path.Combine(Directory, CliSessionFile.LockFileName));
         var gate = SessionGates.GetOrAdd(lockPath, _ => new SemaphoreSlim(1, 1));
@@ -455,7 +639,9 @@ public sealed class ConfigStore
         try
         {
             using var file = await AcquireLockFileAsync(lockPath, ct).ConfigureAwait(false);
-            return await body().ConfigureAwait(false);
+            var context = new ProfileSecurityTransaction(this);
+            try { return await body(context).ConfigureAwait(false); }
+            finally { await context.CompleteAsync().ConfigureAwait(false); }
         }
         finally
         {
@@ -517,7 +703,7 @@ public sealed class ConfigStore
                 // Retain owner-only permissions even if the process umask removed an owner permission.
                 File.SetUnixFileMode(temp, UnixFileMode.UserRead | UnixFileMode.UserWrite);
             }
-            File.Move(temp, path, overwrite: true);
+            DurableProfileFile.Replace(temp, path);
         }
         catch
         {
@@ -558,13 +744,23 @@ public sealed class ConfigStore
 
     private void EnsureDirectory()
     {
+        DurableProfileFile.RejectDirectoryAliases(Directory);
         if (OperatingSystem.IsWindows())
         {
-            System.IO.Directory.CreateDirectory(Directory);
+            DurableProfileFile.CreatePrivateDirectory(Directory);
             return;
         }
         // A new folder is owner-only; an existing one (MBUS_HOME pointed somewhere) is left as it is,
         // and the files in it are owner-only either way.
+        var missing = new List<string>();
+        var current = Path.GetFullPath(Directory);
+        while (!System.IO.Directory.Exists(current))
+        {
+            missing.Add(current);
+            current = Path.GetDirectoryName(current) ?? throw new IOException("Cannot locate the profile parent directory.");
+        }
         System.IO.Directory.CreateDirectory(Directory, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        // A flushed file in a new home is insufficient if the home's own parent entry can disappear on a crash.
+        foreach (var created in missing) DurableProfileFile.FlushDirectory(Path.GetDirectoryName(created)!);
     }
 }

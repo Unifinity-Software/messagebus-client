@@ -27,6 +27,9 @@ public sealed class ScriptSession : IAsyncDisposable
     /// <summary>The client name the calls are made under (no agent kind: the machine sends as its owner, as a person's session does).</summary>
     public const string ClientName = "mbus-cli";
 
+    /// <summary>The original inbox opened or resumed by this local tool session, if any.</summary>
+    public string? CoordinatorInboxId => _tools.CoordinatorInboxId;
+
     private readonly LocalTools _tools;
     private readonly HttpClient? _ownLinks;
 
@@ -35,7 +38,7 @@ public sealed class ScriptSession : IAsyncDisposable
     {
         ArgumentNullException.ThrowIfNull(options);
         if (options.WorkspaceId is null) throw new ArgumentException("The machine isn't enrolled in a workspace.", nameof(options));
-        _ownLinks = options.Links is null ? new HttpClient { Timeout = TimeSpan.FromHours(1) } : null;
+        _ownLinks = options.Links is null ? MessageBus.Attachments.Client.AttachmentTransfers.CreateHttpClient() : null;
         // the original issue: a script's send ends before a runner could ask it for earlier history, so its bundles carry the whole history.
         _tools = new LocalTools(options with { Links = options.Links ?? _ownLinks, IncrementalBundles = false });
     }

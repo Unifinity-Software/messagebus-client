@@ -362,7 +362,9 @@ public sealed class RunNetworkProxy : IDisposable
             return;
         }
 
-        if (run.Allowed is { } allow && !allow.Allows(host))
+        var localModel = run.AllowsLocalModel(host, port);
+        var self = port == Port && MessageBus.Cli.Agents.OpenCodeSettings.IsLoopback(host);
+        if (self || run.Allowed is { } allow && !allow.Allows(host) && !localModel)
         {
             if (run.Refuse(host))
             {
@@ -376,6 +378,12 @@ public sealed class RunNetworkProxy : IDisposable
         if (tunnel)
         {
             via = _upstream?.For(host, tunnel: true);
+        }
+        if (localModel)
+        {
+            // Only canonical localhost and IP literals are accepted; never resolve a user-controlled DNS alias.
+            host = host.Equals("localhost", StringComparison.OrdinalIgnoreCase) ? "127.0.0.1" : host.Trim('[', ']');
+            via = null;
         }
         Stream upstream;
         try

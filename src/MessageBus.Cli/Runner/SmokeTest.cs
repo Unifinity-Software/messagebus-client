@@ -87,9 +87,16 @@ internal sealed class SmokeTest(SmokeTestOptions options)
             return new SmokeResult(agent.Kind, agent.NotReady ?? "it isn't installed.", [], null, null);
         }
 
+        if (agent.Adapter is OpenCodeAdapter openCode)
+        {
+            var selected = await openCode.SelectAsync(null, cancellationToken).ConfigureAwait(false);
+            if (selected.Error is { } error) return new(agent.Kind, error, [], null, null);
+            agent = agent with { Adapter = selected.Adapter };
+        }
         var now = options.Time.GetUtcNow();
         var id = $"smoke-{AgentKinds.Name(agent.Kind)}-{now.ToString("yyyyMMddHHmmss", CultureInfo.InvariantCulture)}";
         var workspace = RunWorkspace.Create(options.WorkRoot, id, 1);
+        workspace.LocalModelEndpoint = (agent.Adapter as OpenCodeAdapter)?.LocalEndpoint;
         var profile = PermissionProfiles.Defaults(PermissionProfiles.Worker);
         var project = options.Dotnet is { } dotnet ? ScratchProject.Dotnet(dotnet) : ScratchProject.Shell();
         var steps = new List<SmokeStep>();
@@ -122,6 +129,7 @@ internal sealed class SmokeTest(SmokeTestOptions options)
             var launch = agent.Adapter.BuildLaunch(new AgentLaunchContext(prompt, workspace.PromptFile, TestCommands.Apply(profile, workspace.WorkTree), workspace.WorkTree,
                 new Dictionary<string, string> { [Hosting.EnvVars.Home] = noMbus }, RunnerSandboxed: options.Sandbox.ConfinesAgents, RunDirectory: workspace.Root,
                 RunnerIsolationEnabled: options.Sandbox.IsolationEnabled));
+            if (launch.CannotStart is { } cannotStart) return new(agent.Kind, cannotStart, [], null, workspace.Root);
             var agentEnvironment = WithStoredSignIns(environment);
             foreach (var (name, value) in launch.Environment)
             {

@@ -5,6 +5,7 @@ using System.Text.Json.Serialization.Metadata;
 using MessageBus.Contracts.Attachments;
 using MessageBus.Contracts.Json;
 using MessageBus.Contracts.Messaging;
+using MessageBus.Contracts.Roles;
 using ModelContextProtocol.Protocol;
 
 namespace MessageBus.Contracts.Mcp;
@@ -142,6 +143,12 @@ public static class McpToolCatalog
             "Block until a person answers the approval or timeoutSeconds passes (the local server returns by its client's limit, as for wait). " +
             "Returns status approved (do exactly what was asked), rejected (don't; carry on without it or stop), expired (treat as rejected) " +
             "or pending with timedOut (call again), plus decidedBy and comment.", ReadOnly: true),
+        new(McpToolNames.ProposeRole, typeof(ProposeRoleInput), typeof(RoleProposalSubmitted), "Propose a role change",
+            "Submit a complete create/update definition for a workspace owner's editable dashboard review. Nothing is applied until the owner explicitly applies it. Requires a supported server and an original interactive coordinator session; workers cannot submit. Keep idempotencyKey unchanged only for identical retries.") { Features = McpCatalogFeatures.RoleProposals },
+        new(McpToolNames.GetRoleProposal, typeof(GetRoleProposalInput), typeof(RoleProposalDetail), "Read your role proposal",
+            "Read the authoritative state/result bound to this original coordinator record, even after its inbox expires. Only approved means the role was applied. Owners decide in the dashboard.", ReadOnly: true) { Features = McpCatalogFeatures.RoleProposals },
+        new(McpToolNames.WaitRoleProposal, typeof(WaitRoleProposalInput), typeof(RoleProposalDetail), "Wait for your role proposal",
+            "Wait 0-30 seconds for authoritative proposal state. Pending or applying at the deadline is not rejection or failure; call again. Original coordinator only; workers cannot read proposal payloads.", ReadOnly: true) { Features = McpCatalogFeatures.RoleProposals },
         new(McpToolNames.OpenInbox, typeof(OpenInboxInput), typeof(OpenInboxResult), "Get woken for late replies",
             "Before ending your turn with tasks still running: open this session's inbox. Replies to what you send afterwards go there " +
             "(the local server sets replyTo itself), and one that arrives after this session has closed resumes this same session on this machine " +

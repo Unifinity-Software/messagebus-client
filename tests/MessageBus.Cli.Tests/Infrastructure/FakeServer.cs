@@ -21,6 +21,16 @@ public sealed record RecordedRequest(HttpMethod Method, Uri Uri, IReadOnlyDictio
 /// </summary>
 public sealed class FakeServer : HttpMessageHandler
 {
+    private HttpClient? _links;
+    // A distinct client prevents fixture defaults or authentication handlers being reused for signed links.
+    public HttpClient Links => _links ??= MessageBus.Attachments.Client.AttachmentTransfers.CreateTestHttpClient(this, disposeHandler: false);
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing) _links?.Dispose();
+        base.Dispose(disposing);
+    }
+
     public const string Url = "http://127.0.0.1:5200";
 
     private readonly Dictionary<string, Func<RecordedRequest, HttpResponseMessage>> _routes = new(StringComparer.Ordinal);
@@ -33,6 +43,7 @@ public sealed class FakeServer : HttpMessageHandler
         Product = "messagebus.ai",
         Version = "0.1.0",
         Url = Url,
+        Capabilities = [], // Feature-specific tests opt in to their supported protocols.
         SignIn = new ServerSignIn
         {
             Microsoft = true,
@@ -64,7 +75,8 @@ public sealed class FakeServer : HttpMessageHandler
     {
         Content = new StringContent(
             value is ServerInfoResponse info
-                ? System.Text.Json.JsonSerializer.Serialize(info, new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web))
+                ? System.Text.Json.JsonSerializer.Serialize(info, new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web)
+                { DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull })
                 : MessageBusJson.Serialize(value),
             Encoding.UTF8, "application/json"),
     };

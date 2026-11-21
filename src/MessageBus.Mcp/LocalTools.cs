@@ -50,6 +50,8 @@ internal sealed partial class LocalTools : IAsyncDisposable
     // the original issue: this session's inbox once open_inbox opened it (or the runner resumed this session for it).
     private readonly SessionRecords _sessions;
     private SessionRecord? _session;
+    // Only a host-opened or runner-supplied record binds proposal payloads. Tool arguments cannot adopt one.
+    private string? _proposalCoordinatorRecordId;
     private string? _coordinationInboxId;
     private bool _coordinationAcquired;
     private DateTimeOffset _nextSessionPrune;
@@ -60,6 +62,8 @@ internal sealed partial class LocalTools : IAsyncDisposable
     // the original issue: attachment id to fetched commit, persisted beside sent-code.json.
     private readonly SentCode _fetchedCode;
 
+    internal string? CoordinatorInboxId => _session?.InboxId;
+
     public LocalTools(LocalServerOptions options)
     {
         _o = options;
@@ -68,6 +72,7 @@ internal sealed partial class LocalTools : IAsyncDisposable
         _attachments = new AttachmentClient(options.Http, options.Links!, _ws, options.TempDirectory);
         _sessions = new SessionRecords(options.ConfigDirectory);
         _session = options.Session;
+        _proposalCoordinatorRecordId = options.Session?.CoordinatorRecordId;
         _sentCode = new SentCode(options.ConfigDirectory, options.Time);
         _fetchedCode = new SentCode(options.ConfigDirectory, options.Time, "fetched-code.json");
     }
@@ -88,6 +93,8 @@ internal sealed partial class LocalTools : IAsyncDisposable
 
     private Task<CallToolResult> CallCoreAsync(string? clientName, string name, IDictionary<string, JsonElement>? arguments, CancellationToken ct)
     {
+        if (McpToolNames.IsRoleProposal(name) && !HasProposalAuthority)
+            return Task.FromResult(McpToolCatalog.Error(new McpError { Code = McpErrorCodes.Forbidden, Message = "This host has no original coordinator authority for role proposals." }));
         // The runner's task scope (the original issue): only its tools and threads; git inside its sandbox.
         if (_o.Scope?.Check(name, arguments, new HashSet<string>(_started.Keys, StringComparer.Ordinal)) is { } refused)
             return Task.FromResult(McpToolCatalog.Error(refused));
@@ -95,9 +102,12 @@ internal sealed partial class LocalTools : IAsyncDisposable
         {
             using var git = Git.PrepareWith(_o.PrepareGit);
             _clientKind ??= AgentKindOf(clientName);
-            _agent ??= _o.Agent ?? Delivery?.AgentId ?? _clientKind;
+            _agent ??= _o.Agent ?? _o.Session?.AgentId ?? Delivery?.AgentId ?? _clientKind;
             return name switch
             {
+                McpToolNames.ProposeRole => Ok(await ProposeRoleAsync(ReadProposeRole(arguments), ct)),
+                McpToolNames.GetRoleProposal => Ok(await GetRoleProposalAsync(Read<GetRoleProposalInput>(arguments).ProposalId, null, ct)),
+                McpToolNames.WaitRoleProposal => Ok(await WaitRoleProposalAsync(Read<WaitRoleProposalInput>(arguments), ct)),
                 McpToolNames.Send => Ok(await SendAsync(Read<SendInput>(arguments), ct)),
                 McpToolNames.SendMany => Ok(await SendManyAsync(Read<SendManyInput>(arguments), ct)),
                 McpToolNames.Wait => Ok(await WaitAsync(Read<WaitInput>(arguments), ct)),
@@ -1140,7 +1150,8 @@ internal sealed partial class LocalTools : IAsyncDisposable
         var folder = Path.GetFullPath(_o.WorkingDirectory);
         // Good for at least another hour, or a new one: replies to tasks sent now must still find it.
         bool Lasting(SessionRecord r) => r.ExpiresAt > (_coordinationAcquired ? now : now.AddHours(1));
-        if (_coordinationAcquired && _session is { } coordinated && coordinated.ExpiresAt <= now)
+        if ((_coordinationAcquired || _o.ProposalAuthority == ProposalAuthority.ResumedCoordinator || _session?.CoordinationRecovery == true)
+            && _session is { } coordinated && coordinated.ExpiresAt <= now)
             throw new McpToolException(new McpError { Code = McpErrorCodes.Conflict, Message = "This coordinator inbox expired. Stop dispatch and resolve the old project before starting a replacement." });
 
         var record = _session is { } mine && Lasting(mine) ? (_sessions.Find(mine.InboxId) ?? mine) : null;
@@ -1154,7 +1165,10 @@ internal sealed partial class LocalTools : IAsyncDisposable
             {
                 InboxId = opened.InboxId, WorkspaceId = _ws, AgentId = opened.AgentId, AgentKind = kind, Folder = folder,
                 SessionId = sessionId, CreatedAt = now, ExpiresAt = opened.ExpiresAt,
+                OriginAuthority = _o.ProposalAuthority == ProposalAuthority.ResumedCoordinator ? ProposalAuthority.Unknown : _o.ProposalAuthority,
+                CoordinatorRecordId = Guid.NewGuid().ToString("N"), MachineId = _o.MachineId,
             };
+            _proposalCoordinatorRecordId = record.CoordinatorRecordId;
             _coordinationInboxId = opened.InboxId;
         }
         // Who holds the session open now: this mbus mcp, or (served by the runner, the original issue) the runner's run.

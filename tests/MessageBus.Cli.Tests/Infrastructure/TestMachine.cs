@@ -15,7 +15,22 @@ namespace MessageBus.Cli.Tests.Infrastructure;
 /// </summary>
 public sealed class TestMachine : IDisposable
 {
-    private readonly string _root = Path.Combine(Path.GetTempPath(), "mbus-tests", Guid.NewGuid().ToString("N"));
+    private readonly string _root = Path.Combine(CanonicalTempDirectory(), "mbus-tests", Guid.NewGuid().ToString("N"));
+
+    private static string CanonicalTempDirectory()
+    {
+        // Profiles reject directory aliases. In particular macOS's system temp path may use /var -> /private/var.
+        // Resolve existing temp ancestors before creating any test-owned directory.
+        var path = Path.GetFullPath(Path.GetTempPath());
+        var root = Path.GetPathRoot(path)!;
+        var current = root;
+        foreach (var part in path[root.Length..].Split(Path.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries))
+        {
+            var directory = new DirectoryInfo(Path.Combine(current, part));
+            current = directory.ResolveLinkTarget(returnFinalTarget: true)?.FullName ?? directory.FullName;
+        }
+        return current;
+    }
 
     public TestMachine()
     {
@@ -38,8 +53,12 @@ public sealed class TestMachine : IDisposable
     public Dictionary<string, string> Env { get; } = new(StringComparer.Ordinal);
 
     public FakeServer Server { get; } = new();
+    internal Func<HttpClient>? ReleaseHttpClient { get; set; }
+    internal Func<HttpMessageHandler>? ApiHttpHandler { get; set; }
+    internal Func<HttpMessageHandler>? DiscoveryHttpHandler { get; set; }
+    internal Func<HttpMessageHandler> LocalModelHandler { get; set; } = MessageBus.Cli.Agents.OpenCodeReadiness.Handler;
 
-    public FakeTimeProvider Time { get; } = new(new DateTimeOffset(2026, 11, 13, 9, 0, 0, TimeSpan.Zero));
+    public FakeTimeProvider Time { get; init; } = new(new DateTimeOffset(2026, 11, 13, 9, 0, 0, TimeSpan.Zero));
 
     /// <summary>The person's browser for mbus login: records what mbus asked it to open.</summary>
     public RecordingBrowser Browser { get; } = new();
@@ -146,7 +165,10 @@ public sealed class TestMachine : IDisposable
             MachineName = "test-mac",
             MbusCommand = MbusCommand,
             ExtraAgentDirectories = [],
-            CreateHttpHandler = () => new NonDisposingHandler(Server),
+            CreateHttpHandler = ApiHttpHandler ?? (() => new NonDisposingHandler(Server)),
+            CreateDiscoveryHttpHandler = DiscoveryHttpHandler,
+            CreateReleaseHttpClient = ReleaseHttpClient ?? (() => MessageBus.Cli.Update.HttpReleaseSource.CreateTestHttpClient(Server, disposeHandler: false)),
+            CreateLocalModelHttpHandler = LocalModelHandler,
             Time = Time,
             Browser = Browser,
             Skills = Skills ?? new DictionarySkillSource(SkillFiles),

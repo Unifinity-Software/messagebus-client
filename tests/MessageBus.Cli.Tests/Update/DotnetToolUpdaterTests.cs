@@ -1,3 +1,4 @@
+using System.IO.Compression;
 using System.Xml.Linq;
 using MessageBus.Cli.Runner.Service;
 using MessageBus.Cli.Tests.Runner;
@@ -86,7 +87,7 @@ public sealed class DotnetToolUpdaterTests : IDisposable
     {
         var directory = Temp("mbus-update-state-");
         var root = Path.Combine(directory, "update");
-        var install = new DotnetToolInstall(Path.Combine(directory, "tools"), false);
+        var install = DotnetToolInstallTests.Install(Path.Combine(directory, "tools"), running);
         var record = RunnerUpdateRecord.In(directory);
         var updater = new DotnetToolUpdater(install, directory, DotnetPath, TextWriter.Null, record, running, TimeProvider.System, () => ProcessTable.Empty);
         DotnetToolUpdater.Write(Path.Combine(root, "attempt.json"), new ToolUpdateAttempt("id", "1.0.0", "2.0.0", false, install.ToolsPath!, MbusPath, DotnetPath, 1, false, 0));
@@ -104,7 +105,7 @@ public sealed class DotnetToolUpdaterTests : IDisposable
     {
         var directory = Temp("mbus-update-retry-");
         var root = Path.Combine(directory, "update");
-        var install = new DotnetToolInstall(ToolPath, false);
+        var install = DotnetToolInstallTests.Install(ToolPath);
         var record = RunnerUpdateRecord.In(directory);
         var updater = new DotnetToolUpdater(install, directory, DotnetPath, TextWriter.Null, record, "1.0.0", TimeProvider.System, () => ProcessTable.Empty);
         DotnetToolUpdater.Write(Path.Combine(root, "attempt.json"), new ToolUpdateAttempt("id", "1.0.0", "2.0.0", false, ToolPath, MbusPath, DotnetPath, 1, false, 0));
@@ -143,7 +144,7 @@ public sealed class DotnetToolUpdaterTests : IDisposable
         var root = Path.Combine(directory, "update");
         var tools = Path.Combine(directory, "tools");
         var shim = Path.Combine(tools, OperatingSystem.IsWindows() ? "mbus.exe" : "mbus");
-        var install = new DotnetToolInstall(tools, false);
+        var install = DotnetToolInstallTests.Install(tools);
         var table = ProcessTable.Of([new ProcessRecord(Environment.ProcessId, "runner", 0, null, shim, 1, "user"),
             new ProcessRecord(Environment.ProcessId + 1, "session", 0, null, shim, 2, "user")]);
         var record = RunnerUpdateRecord.In(directory);
@@ -332,7 +333,7 @@ public sealed class DotnetToolUpdaterTests : IDisposable
     {
         var directory = Temp("mbus-update-confirm-");
         var root = Path.Combine(directory, "update");
-        var install = new DotnetToolInstall(ToolPath, false);
+        var install = DotnetToolInstallTests.Install(ToolPath, "2.0.0");
         var updater = new DotnetToolUpdater(install, directory, DotnetPath, TextWriter.Null, RunnerUpdateRecord.In(directory),
             "2.0.0", TimeProvider.System);
         var path = Path.Combine(root, "attempt.json");
@@ -356,22 +357,90 @@ public sealed class DotnetToolUpdaterTests : IDisposable
         Directory.CreateDirectory(tools);
         var shim = Path.Combine(tools, OperatingSystem.IsWindows() ? "mbus.exe" : "mbus");
         File.WriteAllText(shim, "shim");
-        var packageRoot = Path.Combine(tools, ".store", "messagebus.ai.cli", "1.0.0");
-        Directory.CreateDirectory(packageRoot);
-        File.WriteAllText(Path.Combine(packageRoot, "messagebus.ai.cli.1.0.0.nupkg"), "recovery");
-        var entry = Path.Combine(directory, "program", "mbus.dll");
-        Directory.CreateDirectory(Path.GetDirectoryName(entry)!);
-        File.WriteAllText(entry, "applier");
+        var install = DotnetToolInstallTests.Install(tools);
+        var entry = DotnetToolInstallTests.WriteRecoverableTool(install, "applier");
         var scans = 0;
         var table = ProcessTable.Of([new(Environment.ProcessId, "runner", 0, null, shim, 1, "user"),
             new(42, "late holder", 0, null, shim, 2, "user")]);
-        var updater = new DotnetToolUpdater(new(tools, false), directory, DotnetPath, TextWriter.Null, RunnerUpdateRecord.In(directory),
+        var updater = new DotnetToolUpdater(install, directory, DotnetPath, TextWriter.Null, RunnerUpdateRecord.In(directory),
             "1.0.0", TimeProvider.System, () => ++scans == 1 ? ProcessTable.Empty : table, entryAssembly: entry);
         Assert.False(await updater.InstallAsync(new() { Version = "2.0.0" }, TestContext.Current.CancellationToken));
         Assert.Equal(2, scans);
         Assert.True(updater.WaitingAgain);
         Assert.Equal("2.0.0", updater.Waiting?.Version);
         Assert.False(File.Exists(Path.Combine(directory, "update", OperatingSystem.IsWindows() ? "pending.cmd" : "pending.sh")));
+    }
+
+    [Theory]
+    [InlineData("unknown", "2.0.0", "package ID and version could not be verified")]
+    [InlineData("missing", "2.0.0", "recovery package for MessageBus.Ai.Cli 1.0.0 is missing")]
+    [InlineData("corrupt", "2.0.0", "recovery package for MessageBus.Ai.Cli 1.0.0 could not be verified")]
+    [InlineData("changed-payload", "2.0.0", "does not match the stored checksum")]
+    [InlineData("changed-sdk-payload", "2.0.0", "does not match the dotnet tool store's second archive")]
+    [InlineData("missing-checksum", "2.0.0", "has no NuGet SHA-512 checksum")]
+    [InlineData("intact", "2.0.0+dev.012abcd", "needs an exact, valid package version")]
+    public async Task Preparation_preserves_the_install_when_the_release_or_recovery_cannot_be_verified(
+        string recovery, string requested, string reason)
+    {
+        var directory = Temp("mbus-update-refusal-");
+        var tools = Path.Combine(directory, "tools");
+        var install = DotnetToolInstallTests.Install(tools);
+        var entry = DotnetToolInstallTests.WriteRecoverableTool(install, "installed program", manifestChecksum: recovery == "changed-sdk-payload");
+        File.WriteAllText(Path.Combine(tools, OperatingSystem.IsWindows() ? "mbus.exe" : "mbus"), "shim");
+        var package = Directory.GetFiles(tools, "messagebus.ai.cli.1.0.0.nupkg", SearchOption.AllDirectories).Single();
+        if (recovery == "missing") File.Delete(package);
+        if (recovery == "corrupt") File.WriteAllText(package, "not a package");
+        if (recovery is "changed-payload" or "changed-sdk-payload") ChangeArchivePayload(package);
+        if (recovery == "missing-checksum") File.Delete(package + ".sha512");
+        if (recovery == "unknown") install = install with { Package = null };
+
+        var updater = new DotnetToolUpdater(install, directory, DotnetPath, TextWriter.Null, RunnerUpdateRecord.In(directory),
+            "1.0.0+dev.012abcd", TimeProvider.System, () => ProcessTable.Empty, entryAssembly: entry);
+        Assert.False(await updater.InstallAsync(new() { Version = requested }, TestContext.Current.CancellationToken));
+        Assert.Contains(reason, updater.LastResult?.Reason);
+        Assert.False(Directory.Exists(Path.Combine(directory, "update")));
+        Assert.Equal("installed program", File.ReadAllText(entry));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Detached_applier_refuses_a_saved_archive_with_changed_payload(bool recovery)
+    {
+        var directory = Temp("mbus-update-saved-checksum-");
+        var tools = Path.Combine(directory, "tools");
+        var install = DotnetToolInstallTests.Install(tools);
+        var entry = DotnetToolInstallTests.WriteRecoverableTool(install, "installed program");
+        File.WriteAllText(Path.Combine(tools, OperatingSystem.IsWindows() ? "mbus.exe" : "mbus"), "shim");
+        var updater = new DotnetToolUpdater(install, directory, Path.Combine(directory, "unused-dotnet"), TextWriter.Null,
+            RunnerUpdateRecord.In(directory), "1.0.0", TimeProvider.System, () => ProcessTable.Empty, entryAssembly: entry);
+        Assert.True(await updater.InstallAsync(new() { Version = "2.0.0" }, TestContext.Current.CancellationToken));
+        var root = Path.Combine(directory, "update");
+        ChangeArchivePayload(Directory.GetFiles(Path.Combine(root, "recovery"), "*.nupkg").Single());
+        var attemptPath = Path.Combine(root, "attempt.json");
+        var attempt = DotnetToolUpdater.Read<ToolUpdateAttempt>(attemptPath)!;
+        if (recovery)
+        {
+            // Simulate interrupted recovery with an unstartable shim.
+            File.Delete(Path.Combine(root, OperatingSystem.IsWindows() ? "pending.cmd" : "pending.sh"));
+            DotnetToolUpdater.Write(attemptPath, attempt with { RecoveryTries = 1 });
+        }
+
+        Assert.Equal(0, await DotnetToolUpdater.RunApplierAsync(recovery ? "start" : "apply", root));
+        var result = DotnetToolUpdater.Read<ToolUpdateResult>(Path.Combine(root, "result.json"))!;
+        Assert.Equal(RunnerUpdateOutcome.NotInstalled, result.Outcome);
+        Assert.Contains("does not match its recorded SHA-512 checksum", result.Reason);
+        Assert.Equal("installed program", File.ReadAllText(entry));
+        if (recovery) Assert.True(DotnetToolUpdater.Read<ToolUpdateAttempt>(attemptPath)!.Terminal);
+    }
+
+    private static void ChangeArchivePayload(string path)
+    {
+        using var archive = ZipFile.Open(path, ZipArchiveMode.Update);
+        using var entry = archive.GetEntry("tools/net10.0/any/mbus.dll")!.Open();
+        entry.SetLength(0);
+        using var writer = new StreamWriter(entry);
+        writer.Write("changed package payload");
     }
 
     private sealed class SessionUpdater : ISessionRunnerUpdater

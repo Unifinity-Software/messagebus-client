@@ -248,7 +248,11 @@ public sealed class RunnerEngine : IAsyncDisposable
             }
 
             var (profile, restricted) = EffectiveProfile(delivery);
-            run = new AgentRun(_services, delivery, agent.Adapter, agent.Executable, profile, restricted, resume, handled);
+            run = new AgentRun(_services, delivery, agent.Adapter, agent.Executable, profile, restricted, resume, handled,
+                resume is { OriginAuthority: MessageBus.Mcp.ProposalAuthority.Interactive, CoordinatorRecordId.Length: > 0 }
+                    && resume.MachineId is not null && resume.MachineId == _host.MachineId
+                    && resume.AgentId == delivery.AgentId && resume.InboxId == (delivery.Envelope.Target as InboxTarget)?.InboxId
+                    ? MessageBus.Mcp.ProposalAuthority.ResumedCoordinator : MessageBus.Mcp.ProposalAuthority.Worker);
             _runs[delivery.DeliveryId] = run;
             _ext.WorkActivityChanged?.Invoke(true);
             EnsureHeartbeat(TimeSpan.FromSeconds(Math.Max(1, delivery.HeartbeatSeconds)));
@@ -362,15 +366,17 @@ public sealed class RunnerEngine : IAsyncDisposable
             _update = request;
             if (_ext.SessionUpdater is { } tool)
             {
-                var comparison = Contracts.Releases.ReleaseVersion.Compare(tool.CurrentVersion, request.Version);
-                if (request.Version != RunnerUpdates.Latest && (!Contracts.Releases.ReleaseFeed.IsPinnableVersion(request.Version)
+                var comparison = DotnetToolPackage.Compare(tool.CurrentVersion, request.Version);
+                var exactRelease = DotnetToolUpdater.IsReleaseVersion(request.Version);
+                if (request.Version != RunnerUpdates.Latest && (!exactRelease
                     || comparison == 0 || (!request.Pinned && comparison > 0)))
                 {
                     tool.ClearWaiting();
                     _update = null;
                     var report = new Contracts.Releases.RunnerUpdateReport { Outcome = Contracts.Releases.RunnerUpdateOutcome.NotInstalled,
-                        FromVersion = tool.CurrentVersion, ToVersion = request.Version, At = _time.GetUtcNow(),
-                        Reason = comparison == 0 ? "This version is already installed." : "The requested version is invalid or is an unpinned downgrade." };
+                        FromVersion = tool.CurrentVersion ?? RunnerEnvironment.Version, ToVersion = request.Version, At = _time.GetUtcNow(),
+                        Reason = !exactRelease ? "The update needs an exact, valid package version."
+                            : comparison == 0 ? "This version is already installed." : "An unpinned update cannot install an older version." };
                     _ext.KeepUpdateResult?.Invoke(report);
                     ReportUpdate(Contracts.Releases.RunnerUpdateStage.Ended, null, report);
                     return;
@@ -712,8 +718,8 @@ public sealed class RunnerEngine : IAsyncDisposable
         AgentKind.ClaudeCode => new ClaudeCodeAdapter(settingsFile: ClaudeCodeAdapter.SettingsFile(_host.GetEnvironmentVariable, _host.HomeDirectory)),
         AgentKind.Codex => new CodexAdapter(CodexAdapter.ReadConfiguredModel(CodexHome), Connect.CodexTomlConfig.HasMbus(Path.Combine(CodexHome, "config.toml")), codexHome: CodexHome, getEnvironmentVariable: _host.GetEnvironmentVariable, sandboxOverride: _options.CodexSandbox),
         AgentKind.Copilot => new CopilotAdapter(copilotHome: EnvOr("COPILOT_HOME", Path.Combine(_host.HomeDirectory, ".copilot"))),
-        AgentKind.OpenCode => new OpenCodeAdapter(_agentVersions.GetValueOrDefault(AgentKind.OpenCode),
-            OpenCodeAdapter.ReadConfiguredModel(OpenCodeAdapter.ConfigDirectory(_host.GetEnvironmentVariable, _host.HomeDirectory))),
+        AgentKind.OpenCode => OpenCodeAdapter.ForRunner(_agentVersions.GetValueOrDefault(AgentKind.OpenCode), _host.GetEnvironmentVariable, _host.HomeDirectory,
+            storedEnvironment: _host.AgentEnvironment),
         _ => null,
     };
 
