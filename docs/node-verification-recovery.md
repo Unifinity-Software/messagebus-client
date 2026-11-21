@@ -110,9 +110,28 @@ batches. Client-side negotiation never substitutes for server authorization or w
 validation. Customer-visible CLI and orchestration changes need the help center updated when
 the combined feature ships.
 
-Real Linux acceptance remains pending: the existing bubblewrap fixture exercises restore/check
-file hiding and hooks; pinned private fetch/import and exact return currently use substituted
-process/delegate fixtures. A real Linux fixture must cover hostile agent Git config/alternates,
-sentinel credential/control files and the exact checked commit import/return. Windows skips are
-not boundary proof. Coordinator outside-run Windows and Linux checks remain required before push;
-inside-task machine-key, real mbus and push restrictions must be reported rather than bypassed.
+The coordinator reported completed acceptance runs on source `64f240e`. The real Linux
+[import/return fixture](../scripts/proof/README.md) passed both cases: 2 passed, 0 skipped,
+0 failed, with `return.passed`, `alternates.passed`, the final
+`MBUS_LINUX_IMPORT_RETURN_PROOF_PASSED cases=2` marker and host exit 0. It exercises real
+`VerificationProcess`/bubblewrap and Git against authenticated loopback HTTPS with dummy scoped
+credentials, hostile Git config/hooks/alternates, denied credential/control sentinel reads,
+isolated import and encrypted `RunCodeReturn`. It checks the returned bundle's exact head and
+rejects a moved branch. The inner check has zero effective capabilities and cannot connect to
+the outer HTTPS listener.
+
+Default OCI paths failed the `--disable-userns` preflight in both cases, with no skips. The
+successful proof required `SYS_ADMIN`, `seccomp=unconfined` and `unmask=ALL` on the disposable
+outer container only. These fixture prerequisites must never become production child flags
+or evidence of default ACI eligibility. No host sysctl was changed. The proof used Node 24.22.3,
+npm 11.19.1, SDK 10.0.404 and bubblewrap 0.9.0; owned proof images and containers were removed
+after evidence was retained.
+
+The coordinator's outside-run Windows suite on the same source completed with 1,052 total,
+1,023 passed, 29 platform/proof opt-in skips and 0 failed. The build, public-contract check and
+10 ACI tests also passed. Windows skips are not Linux boundary proof; inside-task restrictions
+were not bypassed. These runs establish fixture evidence only. Production #496 adapter,
+session/readiness, nonce, receipt and limits acceptance remains open, and runtime enrollment
+and advertising remain unsupported by default. Nothing has been published or rolled out to
+the hosted service. Rerun applicable local checks after subsequent changes and before push;
+report inside-task machine-key, real mbus and push restrictions rather than bypassing them.
