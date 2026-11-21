@@ -305,7 +305,11 @@ public sealed class AttachmentTransferGateTests
         var attachments = new AttachmentClient(api, links, "ws_test");
         var serving = Task.Run(async () =>
         {
-            using var socket = await source.AcceptTcpClientAsync(servingCancellation.Token);
+            TcpClient connection;
+            try { connection = await source.AcceptTcpClientAsync(servingCancellation.Token); }
+            catch (SocketException ex) when (servingCancellation.IsCancellationRequested &&
+                                             ex.SocketErrorCode == SocketError.OperationAborted) { return; }
+            using var socket = connection;
             sourceContacted = true;
             using var stream = socket.GetStream();
             // Read through headers without consuming buffered upload bytes.
@@ -339,7 +343,8 @@ public sealed class AttachmentTransferGateTests
         else
         {
             servingCancellation.Cancel();
-            try { await serving; } catch (OperationCanceledException) { }
+            try { await serving; }
+            catch (OperationCanceledException) when (servingCancellation.IsCancellationRequested) { }
             Assert.False(sourceContacted);
             Assert.Empty(links.DefaultRequestHeaders);
             if (transport == "cookies")
