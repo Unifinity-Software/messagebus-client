@@ -16,7 +16,11 @@ namespace MessageBus.Contracts.Mcp;
 /// <param name="Title">A short title.</param>
 /// <param name="Description">When to use it, what comes back and what to do on error, written for an agent.</param>
 /// <param name="ReadOnly">True when it changes nothing.</param>
-public sealed record McpToolSpec(string Name, Type Input, Type Output, string Title, string Description, bool ReadOnly = false);
+public sealed record McpToolSpec(string Name, Type Input, Type Output, string Title, string Description, bool ReadOnly = false)
+{
+    /// <summary>Service features required to list this tool; listing never grants invocation authority.</summary>
+    public McpCatalogFeatures Features { get; init; }
+}
 
 /// <summary>
 /// The tool list both MCP servers expose: names from <see cref="McpToolNames"/>, input schemas generated
@@ -35,6 +39,9 @@ public static class McpToolCatalog
         "not-found, forbidden (don't retry), conflict (re-read with status), too-large (attach large content instead), " +
         "limit-reached (wait retryAfterSeconds), unavailable (retry with backoff).";
 
+    private const string VerificationSendDescription =
+        "Required checks for a role task: `verification` {environment, requiredChecks: [test|typecheck|build|browser]}. The service must support verified sends. ";
+
     /// <summary>Every tool, in <see cref="McpToolNames.All"/> order. Descriptions are kept short: agents re-read them on every turn (the original issue).</summary>
     public static IReadOnlyList<McpToolSpec> Specs { get; } =
     [
@@ -46,6 +53,7 @@ public static class McpToolCatalog
             "it is encrypted here for the recipient, so put the real content in it, never secrets (a body that looks like one is refused). " +
             "`projectId` defaults to the project this session last ensured (or its assigned runner task’s project); without either, new tasks sent outside an inbox have no project and a notice says so; `expect: reply` for a question; `parentThreadId` for a sub-task of a task you hold. With a git bundle, a notice warns if its tip lacks the parent’s returned commits; fetch the parent’s result and send that branch or mbus/<branch>. " +
             "Local code packaging: `attach` [{format: git-bundle, path: <repo>, branch?, base?}] (or patch, or file with a path). The first git bundle can start after the last sent commit and a runner missing the rest gets it from mbus. Later bundles default to whole history. Set base: \"\" to send the whole history. Branch accepts mbus/<branch> or refs/remotes/<remote>/<branch>; a notice warns when the local branch is behind its fetched mbus copy. " +
+            VerificationSendDescription +
             "Reviews: `excludeAuthors: true` skips agents that succeeded or genuinely failed on the project's (or parent's) non-review tasks (refusals and setup failures do not count), `excludeAgents` [agt_…] skips others; " +
             "with every holder excluded it fails not-found, and `notice` says when fewer copies go out than the role asks for. " +
             "Direct task sends with labels.role return a notice if the agent lacks that role’s required capabilities (except follow-ups to an agent that held the referenced task); prefer role targets. " +
@@ -122,7 +130,7 @@ public static class McpToolCatalog
             "Retry keeps an existing local branch and warns if it is behind the fetched copy; only a missing local branch falls back to refs/remotes/mbus/<branch>, with a notice. A bundle with an empty base sends the whole history. Retrying a thread twice returns the first retry (deduplicated: true). Returns a new thread like send."),
         new(McpToolNames.RequestApproval, typeof(RequestApprovalInput), typeof(ApprovalResult), "Ask a person to approve a step",
             "Before a risky step (deleting data, a migration, anything hard to undo) or when a person must sign off (a design), ask for approval: " +
-            "`title` says exactly what will happen, `detail` why and what happens if rejected. `approver`: member:<id or email> or role:<name> " +
+            "`title` says exactly what will happen, `detail` why and what happens if rejected. Optional `affected` describes impact as plain text (1000 Unicode scalars after line-ending normalization and trimming); it is author-supplied, not verified targets or authority, and requires approvalAffectedV1 support. `approver`: member:<id or email> or role:<name> " +
             "(default: who started the project). Only a person can answer, in the dashboard; you can never approve. " +
             "Returns {approvalId, status: pending, approvers, expiresAt}: then wait_approval. Do the step only once it is approved."),
         new(McpToolNames.WaitApproval, typeof(WaitApprovalInput), typeof(ApprovalResult), "Wait for an approval",
@@ -134,6 +142,10 @@ public static class McpToolCatalog
             "(the local server sets replyTo itself), and one that arrives after this session has closed resumes this same session on this machine " +
             "through its runner, in this folder, with read-only access and the mbus tools. While the session is open, read them with inbox {inboxId} or keep using wait. " +
             "Safe to repeat: the same session gets the same inbox. Returns {inboxId, replyTo, expiresAt, resumable, sessionId?, notice?}."),
+        new(McpToolNames.SendVerified, typeof(SendInput), typeof(SendResult), "Send a task with required verification",
+            "Send one role-targeted task with `verification` {environment, requiredChecks}.") { Features = McpCatalogFeatures.VerifiedTasks },
+        new(McpToolNames.SendManyVerified, typeof(SendManyInput), typeof(SendManyResult), "Send tasks with required verification",
+            "Send a batch containing required verification. Each item of `messages` takes send's arguments.") { Features = McpCatalogFeatures.VerifiedTasks },
     ];
 
     /// <summary>
@@ -155,9 +167,15 @@ public static class McpToolCatalog
     /// The tool list. <paramref name="local"/>: the local server's (all tools, sealed fields hidden); else the remote endpoint's.
     /// <paramref name="only"/>: just these (a runner-started worker's, see <see cref="WorkerTools"/>); null for all.
     /// </summary>
-    public static IList<Tool> Tools(bool local, IReadOnlySet<string>? only = null) =>
+    public static IList<Tool> Tools(bool local, IReadOnlySet<string>? only = null) => Tools(local, only, McpCatalogFeatures.None);
+
+    /// <summary>
+    /// The tool list with optional service features and schemas enabled only for installed handlers.
+    /// Listing never replaces live registry negotiation or handler authorization.
+    /// </summary>
+    public static IList<Tool> Tools(bool local, IReadOnlySet<string>? only, McpCatalogFeatures features) =>
     [
-        .. Specs.Where(s => (local || !McpToolNames.LocalOnly.Contains(s.Name)) && (only is null || only.Contains(s.Name))).Select(s => new Tool
+        .. Specs.Where(s => (local || (features & s.Features) == s.Features) && (local ? !McpToolNames.ServiceOnly.Contains(s.Name) : !McpToolNames.LocalOnly.Contains(s.Name)) && (only is null || only.Contains(s.Name))).Select(s => new Tool
         {
             Name = s.Name,
             Title = s.Title,
@@ -165,8 +183,12 @@ public static class McpToolCatalog
                 ? "Finish a task with result {status, summary, refs, frictionKinds?}. Give only fixed kind names in result.frictionKinds; plaintext friction notes are accepted only by the local mbus tool. Put an answer in reply or sealedReply. Never claim success you didn't verify."
                 : local && s.Name is McpToolNames.Send or McpToolNames.SendMany or McpToolNames.Settle
                     ? s.Description + " Each Git bundle can set expectedHead to check its advertised branch against a full commit SHA before upload."
-                    : s.Description,
-            InputSchema = Schema(s.Input, local),
+                    : local && s.Name == McpToolNames.Directory
+                        ? s.Description + " Supply verificationRepositoryId (github:<numeric-id>) to discover approved environments in the optional verification result."
+                        : !local && (features & McpCatalogFeatures.VerifiedTasks) == 0
+                            ? s.Description.Replace(VerificationSendDescription, "", StringComparison.Ordinal)
+                            : s.Description,
+            InputSchema = Schema(s.Input, local, features),
             Annotations = new ToolAnnotations { Title = s.Title, ReadOnlyHint = s.ReadOnly, DestructiveHint = s.Name == McpToolNames.Cancel, OpenWorldHint = false },
         }),
     ];
@@ -177,13 +199,18 @@ public static class McpToolCatalog
     /// read), optional fields without their <c>null</c> alternative, and numbers without the text form the reader also
     /// accepts. <c>send_many</c>'s messages point at <c>send</c> instead of repeating its schema.
     /// </summary>
-    public static JsonElement Schema(Type input, bool local)
+    public static JsonElement Schema(Type input, bool local) => Schema(input, local, McpCatalogFeatures.None);
+
+    private static JsonElement Schema(Type input, bool local, McpCatalogFeatures features)
     {
         var node = MessageBusJson.Options.GetJsonSchemaAsNode(input, new JsonSchemaExporterOptions
         {
             TreatNullObliviousAsNonNullable = true,
             TransformSchemaNode = (ctx, schema) =>
             {
+                if (!local && (features & McpCatalogFeatures.VerifiedTasks) == 0
+                    && ctx.TypeInfo.Type == typeof(SendInput) && schema["properties"] is JsonObject send)
+                    send.Remove("verification");
                 if (ctx.TypeInfo.Type == typeof(MessageTarget) && ctx.PropertyInfo is not null)
                     return new JsonObject { ["type"] = "string", ["description"] = "role:<name>, agent:<agt_id>, capabilities:<cap>,<cap> or inbox:<inb_id>" };
                 if (ctx.TypeInfo.Type == typeof(AttachSpec) && schema["properties"] is JsonObject attachment)
@@ -202,9 +229,17 @@ public static class McpToolCatalog
         });
         if (input == typeof(SendManyInput) && node["properties"]?["messages"] is JsonObject messages)
             messages["items"] = new JsonObject { ["type"] = "object", ["description"] = "One message: send's arguments." };
+        if (!local && input == typeof(DirectoryInput) && node["properties"] is JsonObject directory)
+            directory.Remove("verificationRepositoryId");
         if (local) Strip(node);
+        if (input == typeof(RequestApprovalInput) && node["properties"]?["affected"] is JsonObject affected)
+        {
+            affected["maxLength"] = 1000;
+            affected["description"] = "Author-supplied impact, not verified targets or authority. Normalize CRLF/CR to LF, trim, empty becomes null. At most 1000 Unicode scalars; reject invalid surrogates and controls except LF/TAB. Requires approvalAffectedV1 and an exact normalized response echo.";
+        }
         if (input == typeof(SettleInput) && node["properties"] is JsonObject settle)
         {
+            if (local) settle.Remove("attempt");
             settle.Remove("frictionOnly");
             if (!local) settle.Remove("friction");
         }

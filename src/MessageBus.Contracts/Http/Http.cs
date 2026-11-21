@@ -61,6 +61,8 @@ public static class ApiRoutes
     public const string Caller = "/api/caller";
     /// <summary>GET the workspace's machines (<see cref="Machines.MachineInfo"/> list); <c>/{machineId}</c> GET, PATCH (name, location), DELETE; <c>/{machineId}/approve</c> POST (the original issue).</summary>
     public const string Machines = "/api/w/{workspaceId}/machines";
+    /// <summary>GET <c>?repositoryId=github:&lt;numeric-id&gt;</c>: discover approved verification environments for a repository.</summary>
+    public const string VerificationEnvironments = "/api/w/{workspaceId}/environments";
     /// <summary>GET the workspace's API keys (list of key metadata), POST a new key request; <c>/{keyId}</c> DELETE revokes (the original issue).</summary>
     public const string ApiKeys = "/api/w/{workspaceId}/api-keys";
     /// <summary>PUT <see cref="Machines.MachineInventory"/>: report a fresh agent scan (the original issue, called by <c>mbus login</c> and <c>mbus connect --rescan</c>).</summary>

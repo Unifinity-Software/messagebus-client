@@ -88,7 +88,8 @@ worker, not the orchestrator: follow [reference/worker.md](reference/worker.md) 
    `.messagebus/workflow.md`, add its required steps in its order
    ([reference/workflow-steps.md](reference/workflow-steps.md)). Map each task to a role from the
    directory. A role with no agents at all can't run anything: tell the user, and plan without it
-   only if the work item allows. **Large or unclear work goes to the architect first:** when the work
+   only if the work item allows. For tasks requiring approved verification, let the service decide
+   eligibility during dispatch. **Large or unclear work goes to the architect first:** when the work
    item spans several areas (say the server and the web client), has no task list of its own, or
    leaves the approach open, send it to `role:architect` as a `task.plan` with the repository
    attached, build your plan from its reply, and send that plan to `role:design-reviewer` before
@@ -111,12 +112,15 @@ worker, not the orchestrator: follow [reference/worker.md](reference/worker.md) 
    work, send that part to the role as its own task and bring its files back with `fetch_attachment`;
    don't make it yourself or with your own tools. If no role covers it, do it as you otherwise would, or
    ask the user.
+   For tasks requiring [approved frontend verification](reference/workflow-steps.md#approved-frontend-verification),
+   discover the environment and pin the input revision. Include any verification blocker in the plan.
    Show the plan to the user as the task checklist
    ([reference/terminal-output.md](reference/terminal-output.md)), then dispatch. If the work item
    or workflow asks for a person to sign off the design before code is written, send the design
    review first, then `request_approval` with the design's summary and wait for it before the
    implementation tasks.
-5. **Dispatch.** See [attachment branch and base guidance](reference/tool-calls.md#choose-the-bundle-history-and-branch) when sending fetched work. After acquiring tracker claims, call `open_inbox {}` once: answers to what you
+5. **Dispatch.** See [attachment branch and base guidance](reference/tool-calls.md#choose-the-bundle-history-and-branch)
+   when sending fetched work. After acquiring tracker claims, call `open_inbox {}` once: answers to what you
    send then also go to this session's inbox, and one that arrives after this session has closed resumes this same session
    on this machine through its runner ([reference/tool-calls.md](reference/tool-calls.md#late-answers)).
    For each task create a local branch, then `send` (one task) or `send_many`
@@ -127,7 +131,8 @@ worker, not the orchestrator: follow [reference/worker.md](reference/worker.md) 
    mbus sends it by itself while you wait. Send every review (design or code)
    with `excludeAuthors: true`, so it never goes to an agent that wrote the work; if the send fails
    because no independent agent holds the role, or its `notice` says fewer reviewers got it, tell
-   the user ([reference/tool-calls.md](reference/tool-calls.md#reviews)). Keep each `threadId`.
+   the user ([reference/tool-calls.md](reference/tool-calls.md#reviews)). Include the planned verification
+   requirements and pinned commit on the verified task's send. Keep each `threadId`.
    A task sent under the wrong project is moved with `move` instead of resent.
 6. **Wait and react.** Loop `wait {threadIds: <the thread ids you sent and haven't handled>, mode:
    "any"}`, and before each call check whether the user has said anything (they come first). Always pass the thread ids, never `projectId` alone (it skips threads that finished
@@ -139,7 +144,8 @@ worker, not the orchestrator: follow [reference/worker.md](reference/worker.md) 
    branch. A task that failed for a reason outside its code (an agent not signed in, a missing tool
    the user then installed): `retry {threadId, note}` once the cause is fixed. Returned work that
    needs changes: one `task.fix` to the same agent (`agent:<agentId>`) with the original implementation
-   thread as its parent. After two failed attempts
+   thread as its parent. When the fix requires verification, target the original role and include
+   the required checks and its own pinned input commit. After two failed attempts
    on a task, stop that line of work and tell the user. A task that stays queued while its agents
    are online may have been declined: if `status` shows `machine-not-ready`, tell the user what to
    fix on which machine, then `retry` it ([reference/tool-calls.md](reference/tool-calls.md#declines)).
@@ -152,7 +158,9 @@ worker, not the orchestrator: follow [reference/worker.md](reference/worker.md) 
    returns them as a bundle, which you review and merge like any other. Send it with
    `excludeAuthors: true` so the code's authors don't test their own work; if that leaves no
    tester, send it without and say so in one line. Skip it for a small fix whose
-   own tests cover it; if no agent holds the tester role, say so in one line and go on. Then, on the
+   own tests cover it; if no agent holds the tester role, say so in one line and go on. Apply
+   [approved frontend verification](reference/workflow-steps.md#approved-frontend-verification)
+   when the tester task requires frontend checks. Then, on the
    merged branch, run the work item's acceptance checks yourself (build, tests). A worker saying
    "tests pass" is not proof. Fix-ups go back to workers as tasks.
 8. **`complete_project`** `{projectId, summary, status: "completed" | "failed", refs, usage?}`.

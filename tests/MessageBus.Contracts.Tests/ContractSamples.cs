@@ -76,8 +76,23 @@ internal static class ContractSamples
     };
     public static readonly JoinSpec Join = new() { Mode = WaitMode.All, ThreadIds = [Thr], To = RoleTo, TimeoutSeconds = 3600 };
 
+    public static readonly VerificationRequest RequiredVerification = new() { Environment = "frontend", RequiredChecks = ["build"] };
+    public static readonly VerificationCheck BuildCheck = new() { Name = "build", State = VerificationState.Failed, Reason = "Nonzero exit." };
+    public static readonly VerificationResult Verification = new()
+    {
+        State = VerificationState.Failed, Environment = "frontend", Reason = "Build failed.",
+        Revision = new string('a', 40), Checks = [BuildCheck],
+    };
+    public static readonly VerificationSnapshot VerificationDefinition = new()
+    {
+        Environment = "frontend", Recipe = "node-npm-ci", Version = "1", Digest = new string('b', 64),
+        NodeVersion = "24.1.0", NpmVersion = "11.3.0", Repository = "gh:acme/api", Remote = "https://github.com/acme/api.git",
+        Revision = new string('a', 40), BaseRevision = new string('c', 40), RequiredChecks = ["build"],
+    };
+
     public static readonly MessageEnvelope Envelope = new()
     {
+        Verification = RequiredVerification,
         SpecVersion = "1.0", Id = Msg, Type = "task.implement", Source = $"agent://{Ws}/{Agt}", Time = T, WorkspaceId = Ws,
         Target = RoleTo, ReplyTo = new InboxTarget { InboxId = "inb_01jcz7m2v1g3x4y5z6a7b8c9d9" }, ThreadId = Thr,
         ParentId = "msg_01jcz7m2v1g3x4y5z6a7b8c9da", ProjectId = Prj, Title = "Add due dates", Labels = new Dictionary<string, string> { ["area"] = "api" },
@@ -93,6 +108,7 @@ internal static class ContractSamples
 
     public static readonly ThreadSummary Thread = new()
     {
+        Verification = Verification, CurrentFrictionKinds = ["build-or-test"],
         ThreadId = Thr, WorkspaceId = Ws, ProjectId = Prj, ExecutionOwnerSubjectId = Subject, ParentThreadId = "thr_01jcz7m2v1g3x4y5z6a7b8c9db",
         ChildThreadIds = ["thr_01jcz7m2v1g3x4y5z6a7b8c9dc"], RootMessageId = Msg, Type = "task.implement", Title = "Add due dates",
         Target = RoleTo, Sender = Sender, Expect = Expect.Outcome, Status = ThreadStatus.Settled, CreatedAt = T, UpdatedAt = T.AddMinutes(9),
@@ -228,6 +244,22 @@ internal static class ContractSamples
         Name = "developer", DisplayName = "Developer", Description = "Writes code.", BuiltIn = true, Delivery = DeliverySettings,
         RequiredCapabilities = ["tool:dotnet"], Agents = [AgentRecord], AgentsOnline = 1, AgentsFree = 1, FreeSlots = 1, QueueDepth = 2,
     };
+    private static readonly VerificationRecipe FrontendRecipe = new()
+    {
+        Id = "node-npm-ci", Revision = 1, NodeMajor = 24, Checks = ["test", "typecheck", "build"],
+    };
+
+    private static readonly VerificationEnvironmentApproval FrontendApproval = new()
+    {
+        Id = "frontend", Version = JsonSerializer.SerializeToElement("v1"), RecipeId = FrontendRecipe.Id,
+        RecipeRevision = FrontendRecipe.Revision, ApprovedSharedMachineCount = 1,
+    };
+
+    private static readonly VerificationDirectory VerificationRegistry = new()
+    {
+        RegistryVersion = 1, RequiredTaskRequestsSupported = true, Recipes = [FrontendRecipe], Environments = [FrontendApproval],
+    };
+
     public static readonly TokenPrice Price = new()
     {
         InputUsdPerMillion = 3m, OutputUsdPerMillion = 15m, CachedInputUsdPerMillion = 0.3m, CacheWriteUsdPerMillion = 3.75m, CacheWrite1hUsdPerMillion = 6m,
@@ -243,6 +275,7 @@ internal static class ContractSamples
 
     public static readonly SendInput Send = new()
     {
+        Verification = RequiredVerification,
         To = RoleTo, Type = "task.implement", Title = "Add due dates", Body = PlainBody, SealedBody = Sealed, ProjectId = Prj, ThreadId = Thr,
         ParentThreadId = "thr_01jcz7m2v1g3x4y5z6a7b8c9df", SourceThreadId = Thr, ParentId = Msg, Expect = Expect.Outcome, ReplyTo = new AgentTarget { AgentId = Agt },
         Priority = Priority.High, DedupeKey = "due-dates-api", ExpiresInSeconds = 3600, DeadlineSeconds = 7200,
@@ -258,6 +291,7 @@ internal static class ContractSamples
 
     public static readonly ThreadBrief Brief = new()
     {
+        Verification = Verification, CurrentFrictionKinds = ["build-or-test"],
         ThreadId = Thr, Title = "Add due dates", Type = "task.implement", To = "role:developer", Status = ThreadStatus.Settled,
         ParentThreadId = "thr_01jcz7m2v1g3x4y5z6a7b8c9db", AgentId = Agt, MachineId = Mch, Attempts = 1, UpdatedAt = T,
         Outcome = SettleStatus.Succeeded, Summary = "Added due dates.", RequestedModel = "claude-opus-5-5", Usage = RunUsage, LastError = "first attempt timed out",
@@ -366,8 +400,13 @@ internal static class ContractSamples
         },
         DirectoryEntry,
         Link,
+        RequiredVerification,
+        BuildCheck,
+        Verification,
+        VerificationDefinition,
         new TaskDelivery
         {
+            Verification = VerificationDefinition,
             DeliveryId = Dlv, Attempt = 1, LeaseExpiresAt = T.AddMinutes(30), AgentId = Agt, Envelope = Envelope, Role = "developer",
             Instructions = Instructions, RunEnvironment = RunEnv, HeartbeatSeconds = 60, Links = [Link], ProjectKey = "ado:contoso/web#123", ProjectOwner = Subject, InboxOwner = Subject,
             RequireRunApproval = true, Model = "claude-haiku-4-5", EconomyModel = true, CostCap = CostCap,
@@ -398,7 +437,8 @@ internal static class ContractSamples
         SuspensionSample,
         LeaseSample,
         new RunnerProgress { DeliveryId = Dlv, Progress = Progress },
-        new RunnerSettle { DeliveryId = Dlv, Result = Result, Declined = DeclineReason.MachineNotReady, UnreadableRole = "developer" },
+        new RunnerSettle { Verification = Verification, VerificationAttempt = 2, VerificationDigest = VerificationDefinition.Digest,
+            DeliveryId = Dlv, Attempt = 2, Result = Result, Declined = DeclineReason.MachineNotReady, UnreadableRole = "developer" },
         new RunnerRepoCredentialRequest { DeliveryId = Dlv, Repository = "https://github.com/acme/api.git", CanPush = true },
         new RunnerRepoCredential { UserName = "x-access-token", Secret = "ghs_x", ExpiresAt = T.AddHours(1) },
         new RunnerTelemetryCredentialRequest { DeliveryId = Dlv },
@@ -434,7 +474,7 @@ internal static class ContractSamples
         new InboxResult { Messages = [Received] },
         new ProgressInput { ThreadId = Thr, DeliveryId = Dlv, Message = "Running tests", Percent = 60, Request = CodeRequest },
         new ProgressResult { LeaseExpiresAt = T.AddMinutes(30), CancelRequested = true },
-        new SettleInput { ThreadId = Thr, DeliveryId = Dlv, Friction = [Friction], Result = Result, Reply = PlainBody, SealedReply = Sealed, ReplyOnly = true, FrictionOnly = true, Attach = [AttachSpec], Attachments = [Attachment] },
+        new SettleInput { ThreadId = Thr, DeliveryId = Dlv, Attempt = 2, Friction = [Friction], Result = Result, Reply = PlainBody, SealedReply = Sealed, ReplyOnly = true, FrictionOnly = true, Attach = [AttachSpec], Attachments = [Attachment] },
         new FetchAttachmentInput { ThreadId = Thr, AttachmentId = Att, DeliveryId = Dlv, Repository = "/src/app", Into = "refs/remotes/mbus/feature", Path = "/tmp/a.patch" },
         new FetchAttachmentResult { AttachmentId = Att, Format = AttachmentFormat.GitBundle, Commit = "0123abcd", Ref = "refs/remotes/mbus/feature", Path = "/tmp/a.patch" },
         new SettleOutput { Status = ThreadStatus.Replied, ReplyMessageId = Msg },
@@ -454,8 +494,11 @@ internal static class ContractSamples
         new EnsureProjectResult { Project = Project, Created = true, CoordinationAcquired = true, CoordinatorInboxId = "inb_session" },
         new CompleteProjectInput { ProjectId = Prj, Summary = "Done.", Status = ProjectStatus.Failed, Refs = [PrRef], Usage = RunUsage },
         new CompleteProjectResult { Project = Project, Notice = "Session usage was unavailable." },
-        new DirectoryInput { Role = "developer", Capabilities = ["os:macos"], OnlineOnly = true },
-        new DirectoryResult { Roles = [DirectoryEntry] },
+        new DirectoryInput { Role = "developer", Capabilities = ["os:macos"], OnlineOnly = true, VerificationRepositoryId = "github:12345" },
+        new DirectoryResult { Roles = [DirectoryEntry], Verification = VerificationRegistry },
+        VerificationRegistry,
+        FrontendRecipe,
+        FrontendApproval,
         new DescribeRoleInput { Role = "developer" },
         new DescribeRoleResult { Role = Role, Instructions = Instructions, AgentsOnline = 1 },
         new SubscribeInput { Refs = [PrRef], EventTypes = ["pr.merged"], ProjectId = Prj, DeliverTo = RoleTo, ExpiresInSeconds = 86400 },
@@ -469,15 +512,18 @@ internal static class ContractSamples
         new RetryInput { ThreadId = Thr, Note = "The Mac now has the .NET SDK.", Repository = "/src/app" },
         new RequestApprovalInput
         {
+            Affected = "Archived task rows.",
             Title = "Drop the archived_tasks table", Detail = "Deletes 1,200 archived rows.", Approver = "role:developer", ThreadId = Thr, ProjectId = Prj,
             HighRisk = true, ExpiresInSeconds = 3600, ReplyTo = RoleTo,
         },
         new WaitApprovalInput { ApprovalId = "apr_01jcz7m2v1g3x4y5z6a7b8c9dn", TimeoutSeconds = 55 },
         new ApprovalResult
         {
+            Affected = "Archived task rows.",
             ApprovalId = "apr_01jcz7m2v1g3x4y5z6a7b8c9dn", Status = ApprovalState.Approved, Title = "Drop the archived_tasks table", Approvers = ["Ada"],
             ExpiresAt = T.AddHours(1), DecidedBy = "Ada", DecidedAt = T.AddMinutes(5), Comment = "After the backup.", RequestDigest = "ab12", TimedOut = true,
         },
+        new MessageBus.Contracts.Http.ServerCapabilitiesResponse { Product = "messagebus.ai", Capabilities = ["approvalAffectedV1", "settleAttemptV1"] },
     }.ToDictionary(o => o.GetType());
 
 
