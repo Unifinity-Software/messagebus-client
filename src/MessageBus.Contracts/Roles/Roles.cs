@@ -488,6 +488,12 @@ public sealed record AgentRole
     /// <summary>How runs are set up.</summary>
     public RunEnvironment RunEnvironment { get; set; } = new();
 
+    /// <summary>The immutable role incarnation; null snapshots resolve only frozen legacy instructions.</summary>
+    public string? GenerationId { get; init; }
+
+    /// <summary>The frozen legacy version prefix, when this generation adopted legacy storage.</summary>
+    public int? LegacyInstructionCutoff { get; init; }
+
     /// <summary>The live instruction version.</summary>
     public int LiveInstructionVersion { get; init; }
 

@@ -33,6 +33,7 @@ public sealed class FakeServer : HttpMessageHandler
         Product = "messagebus.ai",
         Version = "0.1.0",
         Url = Url,
+        Capabilities = [], // Feature-specific tests opt in to their supported protocols.
         SignIn = new ServerSignIn
         {
             Microsoft = true,

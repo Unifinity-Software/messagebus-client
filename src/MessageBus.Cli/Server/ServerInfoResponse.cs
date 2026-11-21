@@ -1,3 +1,5 @@
+using MessageBus.Contracts.Roles;
+
 namespace MessageBus.Cli.Server;
 
 /// <summary><c>GET /api/server</c> (answered by the hosted service): what a server URL points at.</summary>
@@ -18,8 +20,11 @@ public sealed record ServerInfoResponse
     /// <summary>Descriptive stamp information; this alone never selects isolated authentication.</summary>
     public ServerStamp? Stamp { get; init; }
 
-    /// <summary>Optional additive feature tokens. Existing tokens retain their meaning.</summary>
-    public string[]? Capabilities { get; init; }
+    /// <summary>Optional feature protocol tokens; absence keeps existing operations compatible.</summary>
+    public IReadOnlyList<string>? Capabilities { get; init; }
+
+    /// <summary>Optional role proposal protocol descriptor, advertised alongside its capability token.</summary>
+    public RoleProposalsCapability? RoleProposals { get; init; }
 
     /// <summary>The product name every messagebus.ai server reports.</summary>
     public const string ProductName = "messagebus.ai";
@@ -79,3 +84,11 @@ public sealed record ServerMachineSignature
     /// <summary>Must be true for isolated authentication.</summary>
     public bool? Required { get; init; }
 }
+
+/// <summary>Optional server protocols, independent of the product version.</summary>
+public sealed record ServerCapabilities
+{
+    /// <summary>Role proposal protocol, present only when the complete implementation is enabled.</summary>
+    public RoleProposalsCapability? RoleProposals { get; init; }
+}
+
