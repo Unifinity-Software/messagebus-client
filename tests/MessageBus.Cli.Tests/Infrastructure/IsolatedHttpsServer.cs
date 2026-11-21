@@ -35,7 +35,7 @@ internal sealed class IsolatedHttpsServer : IAsyncDisposable
     internal bool Stripped { get => Volatile.Read(ref _stripped) != 0; set => Volatile.Write(ref _stripped, value ? 1 : 0); }
     internal bool ExpectTlsRejection { get; set; }
     internal string Discovery => Stripped ? """{"product":"messagebus.ai","signIn":{"microsoft":true}}"""
-        : $$$$"""{"product":"messagebus.ai","stamp":{"stampId":"fixture","geography":"eu","azureRegion":"westeurope","url":"{{{{Origin}}}}","aliases":[]},"signIn":{"authority":{"version":1,"stampId":"fixture","issuer":"{{{{Origin}}}}","audience":"{{{{Origin}}}}"},"machineSignature":{"version":2,"required":true}}}""";
+        : $$$$"""{"product":"messagebus.ai","stamp":{"stampId":"eu","geography":"eu","azureRegion":"westeurope","url":"{{{{Origin}}}}","aliases":[]},"signIn":{"authority":{"version":1,"stampId":"eu","issuer":"{{{{Origin}}}}","audience":"{{{{Origin}}}}"},"machineSignature":{"version":2,"required":true}}}""";
 
     internal IsolatedHttpsServer(CancellationToken ct)
     {

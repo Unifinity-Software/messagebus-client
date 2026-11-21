@@ -241,7 +241,7 @@ public sealed class IsolatedHttpsJourneyTests
         var signature = Base64Url.DecodeFromChars(request.Header(MbusHeaders.Signature)!);
         Assert.Equal(64, signature.Length);
         Assert.Equal(request.Header(MbusHeaders.Signature), Base64Url.EncodeToString(signature));
-        var canonical = string.Join('\n', "mbus-machine-v2", origin, "fixture", MachineId, workspace, request.Method,
+        var canonical = string.Join('\n', "mbus-machine-v2", origin, "eu", MachineId, workspace, request.Method,
             request.RawTarget, request.Header(MbusHeaders.Timestamp), nonce, Convert.ToHexStringLower(SHA256.HashData(request.Body)));
         using var verifier = ECDsa.Create();
         verifier.ImportSubjectPublicKeyInfo(Convert.FromBase64String(key.PublicKeyBase64), out _);
