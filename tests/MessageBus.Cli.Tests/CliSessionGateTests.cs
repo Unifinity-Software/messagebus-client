@@ -159,6 +159,101 @@ public sealed class CliSessionGateTests
     }
 
     [Fact]
+    public async Task Held_legacy_poll_refuses_overlapping_start_and_never_sends_its_code_under_isolated_discovery()
+    {
+        using var fixture = new Fixture { Discovery = Legacy };
+        var legacy = await fixture.StartAsync();
+        using var barrier = new RequestBarrier("/gateway/api/server");
+        fixture.Barrier = barrier;
+        var polling = fixture.Session.PollAsync(legacy.DeviceCode, Ct);
+        await barrier.Entered.WaitAsync(Ct);
+        fixture.Discovery = Isolated;
+        await RefuseOverlapAsync(fixture.StartAsync());
+        barrier.Release();
+        await Assert.ThrowsAsync<ServerBindingException>(() => polling);
+        Assert.Single(fixture.CredentialRequests); // Only the legacy start; no code-bearing POST.
+
+        fixture.Machine.Server.On(HttpMethod.Post, "/gateway/api/cli/auth/start", _ =>
+            Text("""{"deviceCode":"fixture-new-device","userCode":"IJKL-MNOP","expiresIn":600,"interval":5}"""));
+        var isolated = await fixture.StartAsync();
+        var approved = await fixture.Session.PollAsync(isolated.DeviceCode, Ct);
+        var saved = await fixture.Session.SaveApprovedAsync(approved, Ct);
+        Assert.NotNull(saved.ServerBinding);
+        var token = Assert.Single(fixture.CredentialRequests, r => r.Uri.AbsolutePath.EndsWith("/token", StringComparison.Ordinal));
+        Assert.Contains("fixture-new-device", token.BodyText);
+        Assert.DoesNotContain(fixture.CredentialRequests, r => r.BodyText.Contains(legacy.DeviceCode, StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("start")]
+    [InlineData("token")]
+    public async Task Held_device_response_refuses_overlapping_operations_and_obsolete_approval(string operation)
+    {
+        using var fixture = new Fixture();
+        fixture.SaveSession();
+        var first = await fixture.StartAsync();
+        var obsolete = await fixture.Session.PollAsync(first.DeviceCode, Ct);
+        using var barrier = new RequestBarrier("/gateway/api/cli/auth/" + operation, afterResponse: true);
+        fixture.Barrier = barrier;
+        var pending = operation == "start"
+            ? (Task)fixture.StartAsync()
+            : fixture.Session.PollAsync(first.DeviceCode, Ct);
+        await barrier.Entered.WaitAsync(Ct);
+        await RefuseOverlapAsync(fixture.StartAsync());
+        await RefuseOverlapAsync(fixture.Session.PollAsync(first.DeviceCode, Ct));
+        await RefuseOverlapAsync(fixture.Session.SaveApprovedAsync(obsolete, Ct));
+        barrier.Release();
+        await pending;
+        Assert.Equal("fixture-access", fixture.Store.LoadSession()!.AccessToken);
+        await Assert.ThrowsAsync<ServerBindingException>(() => fixture.Session.SaveApprovedAsync(obsolete, Ct));
+        var current = await fixture.Session.PollAsync(first.DeviceCode, Ct);
+        var saved = await fixture.Session.SaveApprovedAsync(current, Ct);
+        Assert.Equal("fixture-approved-access", saved.AccessToken);
+        Assert.Equal(saved, fixture.Store.LoadSession());
+    }
+
+    [Fact]
+    public async Task Held_approval_save_keeps_its_issuing_record_and_rejects_overlap_before_the_profile_lock()
+    {
+        using var fixture = new Fixture();
+        var first = await fixture.StartAsync();
+        var approved = await fixture.Session.PollAsync(first.DeviceCode, Ct);
+        using var barrier = new RequestBarrier("/gateway/api/server");
+        fixture.Barrier = barrier;
+        var saving = fixture.Session.SaveApprovedAsync(approved, Ct);
+        await barrier.Entered.WaitAsync(Ct);
+        await RefuseOverlapAsync(fixture.StartAsync());
+        await RefuseOverlapAsync(fixture.Session.PollAsync(first.DeviceCode, Ct));
+        await RefuseOverlapAsync(fixture.Session.SaveApprovedAsync(approved, Ct));
+        barrier.Release();
+        var saved = await saving;
+        Assert.Equal(Origin, saved.ServerBinding!.Issuer);
+        Assert.Equal(saved, fixture.Store.LoadSession());
+        await fixture.StartAsync();
+        await Assert.ThrowsAsync<ServerBindingException>(() => fixture.Session.SaveApprovedAsync(approved, Ct));
+        Assert.Equal(saved, fixture.Store.LoadSession());
+    }
+
+    [Fact]
+    public async Task Independent_instances_do_not_share_device_or_approval_provenance()
+    {
+        using var fixture = new Fixture { Discovery = Legacy };
+        var legacy = await fixture.StartAsync();
+        var oldApproval = await fixture.Session.PollAsync(legacy.DeviceCode, Ct);
+        var independent = new CliSession(fixture.Host, fixture.Store, new Uri(Endpoint));
+        fixture.Discovery = Isolated;
+        var isolated = await independent.StartAsync(new CliStartBody("fixture", "fixture", null, null), Ct);
+        var approval = await independent.PollAsync(isolated.DeviceCode, Ct);
+        await Assert.ThrowsAsync<ServerBindingException>(() => independent.SaveApprovedAsync(oldApproval, Ct));
+        var saved = await independent.SaveApprovedAsync(approval, Ct);
+        await Assert.ThrowsAsync<ServerBindingException>(() => fixture.Session.SaveApprovedAsync(oldApproval, Ct));
+        await Assert.ThrowsAsync<ServerBindingException>(() => fixture.Session.PollAsync(legacy.DeviceCode, Ct));
+        Assert.Equal(saved, fixture.Store.LoadSession());
+        Assert.NotNull(saved.ServerBinding);
+        Assert.Equal(2, fixture.CredentialRequests.Count(r => r.Uri.AbsolutePath.EndsWith("/token", StringComparison.Ordinal)));
+    }
+
+    [Fact]
     public async Task Logout_of_another_selected_server_does_not_claim_remote_revocation()
     {
         using var fixture = new Fixture();
@@ -374,19 +469,69 @@ public sealed class CliSessionGateTests
 
     private static HttpResponseMessage Text(string json) => new(HttpStatusCode.OK) { Content = new StringContent(json) };
 
+    private static async Task RefuseOverlapAsync(Task operation)
+    {
+        Assert.True(operation.IsCompleted, "An overlapping device operation must refuse without waiting for discovery or the profile lock.");
+        await Assert.ThrowsAsync<ServerBindingException>(() => operation);
+    }
+
+    private sealed class RequestBarrier(string path, bool afterResponse = false) : IDisposable
+    {
+        private readonly TaskCompletionSource _entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _held;
+        public Task Entered => _entered.Task;
+        public void Release() => _release.TrySetResult();
+        public async Task HoldAsync(HttpRequestMessage request, bool responseReceived, CancellationToken ct)
+        {
+            if (request.RequestUri!.AbsolutePath != path || responseReceived != afterResponse
+                || Interlocked.CompareExchange(ref _held, 1, 0) != 0) return;
+            _entered.TrySetResult();
+            await _release.Task.WaitAsync(ct);
+        }
+        public void Dispose() => Release();
+    }
+
+    private sealed class BarrierHandler(Fixture fixture) : DelegatingHandler(fixture.Machine.Server)
+    {
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            if (fixture.Barrier is { } before) await before.HoldAsync(request, false, ct);
+            var response = await base.SendAsync(request, ct);
+            try
+            {
+                if (fixture.Barrier is { } after) await after.HoldAsync(request, true, ct);
+                return response;
+            }
+            catch { response.Dispose(); throw; }
+        }
+        protected override void Dispose(bool disposing) { } // The fixture owns the shared fake server.
+    }
+
     private sealed class Fixture : IDisposable
     {
         public TestMachine Machine { get; } = new();
         public ConfigStore Store { get; }
         public CliHost Host { get; }
         public CliSession Session { get; }
+        public RequestBarrier? Barrier { get; set; }
         public string Discovery { get; set; } = Isolated;
         public IEnumerable<RecordedRequest> CredentialRequests => Machine.Server.Requests.Where(r => r.Uri.AbsolutePath != "/gateway/api/server");
         private readonly string _endpoint;
         public Fixture(string endpoint = Endpoint)
         {
             _endpoint = endpoint;
-            Host = Machine.CreateHost();
+            var basis = Machine.CreateHost();
+            Host = new CliHost
+            {
+                Out = basis.Out, Error = basis.Error, In = basis.In,
+                OpenStandardInput = basis.OpenStandardInput, OpenStandardOutput = basis.OpenStandardOutput,
+                GetEnvironmentVariable = basis.GetEnvironmentVariable, HomeDirectory = basis.HomeDirectory,
+                MachineName = basis.MachineName, MbusCommand = basis.MbusCommand, Browser = basis.Browser,
+                Skills = basis.Skills, McpServer = basis.McpServer, Time = basis.Time,
+                CreateHttpHandler = () => new BarrierHandler(this),
+                CreateDiscoveryHttpHandler = () => new BarrierHandler(this),
+            };
             Store = new ConfigStore(Machine.MbusFolder, "file");
             Session = new CliSession(Host, Store, new Uri(endpoint));
             Machine.Server

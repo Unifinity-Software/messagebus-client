@@ -70,85 +70,103 @@ public sealed class CliSession(CliHost host, ConfigStore store, Uri server)
 
     private readonly string _serverText = server.AbsoluteUri.TrimEnd('/');
     private readonly ServerEndpoint _endpoint = ServerEndpoint.Parse(server.AbsoluteUri);
-    private string? _deviceCode;
-    private ServerBindingSnapshot? _deviceBinding;
-    private CliPollResponse? _approved;
-    private ServerBindingSnapshot? _approvedBinding;
+    // Each new record is a distinct flow generation, even if a server repeats a code or binding.
+    private sealed record DeviceFlow(string Code, ServerBindingSnapshot? Binding);
+    private sealed record CollectedApproval(CliPollResponse Response, DeviceFlow Flow);
+    private DeviceFlow? _deviceFlow;
+    private CollectedApproval? _approved;
+    private int _deviceOperation;
 
     /// <summary>The saved sign-in for this server, if any.</summary>
     public CliSessionFile? Saved => store.LoadSession() is { } saved && saved.Server == _serverText ? saved : null;
 
     internal Task<CliStartResponse> StartAsync(CliStartBody body, CancellationToken ct) => StartAsync(body, null, ct);
 
-    internal async Task<CliStartResponse> StartAsync(CliStartBody body, Uri? approval, CancellationToken ct)
-    {
-        _deviceCode = null;
-        _approved = null;
-        var sent = await SendGatedAsync(Post("start", body, CliJsonContext.Default.CliStartBody), ct,
-            validate: prepared =>
-            {
-                var current = BrowserSignIn.ParseApproval(prepared.Discovery.Info.SignIn?.CliApprovalUrl);
-                if (approval is not null && current != approval)
-                    throw new ServerBindingException("The approval address changed. Run login again.");
-                BrowserSignIn.DemandApproval(current, prepared);
-            });
-        using var response = sent.Response;
-        await EnsureSuccessAsync(response, "start signing in", ct);
-        var started = await ReadAsync(response, CliJsonContext.Default.CliStartResponse, ct);
-        _deviceBinding = sent.Binding;
-        _deviceCode = started.DeviceCode;
-        return started;
-    }
+    internal Task<CliStartResponse> StartAsync(CliStartBody body, Uri? approval, CancellationToken ct) =>
+        WithDeviceOperationAsync(async () =>
+        {
+            _deviceFlow = null;
+            _approved = null;
+            var sent = await SendGatedAsync(Post("start", body, CliJsonContext.Default.CliStartBody), ct,
+                validate: prepared =>
+                {
+                    var current = BrowserSignIn.ParseApproval(prepared.Discovery.Info.SignIn?.CliApprovalUrl);
+                    if (approval is not null && current != approval)
+                        throw new ServerBindingException("The approval address changed. Run login again.");
+                    BrowserSignIn.DemandApproval(current, prepared);
+                });
+            using var response = sent.Response;
+            await EnsureSuccessAsync(response, "start signing in", ct);
+            var started = await ReadAsync(response, CliJsonContext.Default.CliStartResponse, ct);
+            _deviceFlow = new DeviceFlow(started.DeviceCode, sent.Binding);
+            return started;
+        });
 
     /// <summary>One poll. A rate-limited answer comes back as <c>pending</c> with the wait the server asked for.</summary>
-    internal async Task<CliPollResponse> PollAsync(string deviceCode, CancellationToken ct)
-    {
-        if (_deviceCode is null || deviceCode != _deviceCode)
-            throw new ServerBindingException("The device code was not issued by this sign-in at the selected server.");
-        var sent = await SendGatedAsync(Post("token", new CliTokenBody(deviceCode), CliJsonContext.Default.CliTokenBody), ct,
-            validate: prepared => DemandSameBinding(_deviceBinding, prepared.Binding));
-        using var response = sent.Response;
-        if (response.StatusCode == HttpStatusCode.TooManyRequests)
+    internal Task<CliPollResponse> PollAsync(string deviceCode, CancellationToken ct) =>
+        WithDeviceOperationAsync(async () =>
         {
-            var wait = response.Headers.RetryAfter?.Delta ?? TimeSpan.FromSeconds(10);
-            return new CliPollResponse { State = "pending", Interval = (int)Math.Ceiling(wait.TotalSeconds) };
-        }
-        await EnsureSuccessAsync(response, "check the sign-in", ct);
-        var poll = await ReadAsync(response, CliJsonContext.Default.CliPollResponse, ct);
-        if (poll.State == "approved") { _approved = poll; _approvedBinding = sent.Binding; }
-        if (poll.State is "denied" or "expired") _deviceCode = null;
-        return poll;
-    }
+            var flow = _deviceFlow;
+            if (flow is null || deviceCode != flow.Code)
+                throw new ServerBindingException("The device code was not issued by this sign-in at the selected server.");
+            var sent = await SendGatedAsync(Post("token", new CliTokenBody(deviceCode), CliJsonContext.Default.CliTokenBody), ct,
+                validate: prepared => DemandSameBinding(flow.Binding, prepared.Binding));
+            using var response = sent.Response;
+            if (response.StatusCode == HttpStatusCode.TooManyRequests)
+            {
+                var wait = response.Headers.RetryAfter?.Delta ?? TimeSpan.FromSeconds(10);
+                return new CliPollResponse { State = "pending", Interval = (int)Math.Ceiling(wait.TotalSeconds) };
+            }
+            await EnsureSuccessAsync(response, "check the sign-in", ct);
+            var poll = await ReadAsync(response, CliJsonContext.Default.CliPollResponse, ct);
+            if (poll.State == "approved") _approved = new CollectedApproval(poll, flow);
+            if (poll.State is "denied" or "expired") { _deviceFlow = null; _approved = null; }
+            return poll;
+        });
 
     /// <summary>Saves an approved poll's tokens, replacing any earlier sign-in.</summary>
     internal Task<CliSessionFile> SaveApprovedAsync(CliPollResponse approved, CancellationToken ct) =>
-        store.WithSessionLockAsync(async transaction =>
+        WithDeviceOperationAsync(async () =>
         {
-            if (!ReferenceEquals(approved, _approved))
+            var collected = _approved;
+            if (collected is null || !ReferenceEquals(approved, collected.Response)
+                || !ReferenceEquals(collected.Flow, _deviceFlow))
                 throw new ServerBindingException("The approval was not collected by this sign-in.");
-            using var gate = new ServerSendGate(host, store, server);
-            var destination = new Uri(_endpoint.Value + Prefix + "token");
-            var prepared = await gate.PrepareSendAsync(destination, ct, transaction);
-            DemandSameBinding(_approvedBinding, prepared.Binding);
-            await prepared.ConsumeAsync(destination, _ => Task.FromResult(true), ct, transaction);
-            var now = host.Time.GetUtcNow();
-            var saved = new CliSessionFile
+            return await store.WithSessionLockAsync(async transaction =>
             {
-                Server = _serverText,
-                AccessToken = approved.AccessToken ?? throw Unreadable(),
-                AccessExpiresAt = now + TimeSpan.FromSeconds(approved.ExpiresIn ?? 0),
-                RefreshToken = approved.RefreshToken ?? throw Unreadable(),
-                SessionId = approved.SessionId,
-                AccountName = approved.Account?.Name,
-                AccountEmail = approved.Account?.Email,
-                SignedInAt = now,
-                ServerBinding = _approvedBinding,
-            };
-            transaction.SaveSession(saved);
-            _approved = null;
-            _deviceCode = null;
-            return saved;
-        }, ct);
+                using var gate = new ServerSendGate(host, store, server);
+                var destination = new Uri(_endpoint.Value + Prefix + "token");
+                var prepared = await gate.PrepareSendAsync(destination, ct, transaction);
+                DemandSameBinding(collected.Flow.Binding, prepared.Binding);
+                await prepared.ConsumeAsync(destination, _ => Task.FromResult(true), ct, transaction);
+                var now = host.Time.GetUtcNow();
+                var saved = new CliSessionFile
+                {
+                    Server = _serverText,
+                    AccessToken = approved.AccessToken ?? throw Unreadable(),
+                    AccessExpiresAt = now + TimeSpan.FromSeconds(approved.ExpiresIn ?? 0),
+                    RefreshToken = approved.RefreshToken ?? throw Unreadable(),
+                    SessionId = approved.SessionId,
+                    AccountName = approved.Account?.Name,
+                    AccountEmail = approved.Account?.Email,
+                    SignedInAt = now,
+                    ServerBinding = collected.Flow.Binding,
+                };
+                transaction.SaveSession(saved);
+                _approved = null;
+                _deviceFlow = null;
+                return saved;
+            }, ct);
+        });
+
+    private async Task<T> WithDeviceOperationAsync<T>(Func<Task<T>> operation)
+    {
+        // Refuse overlap before taking any profile lock. Never wait for this guard while holding that lock.
+        if (Interlocked.CompareExchange(ref _deviceOperation, 1, 0) != 0)
+            throw new ServerBindingException("Another device sign-in operation is in progress. Await it or use a separate sign-in instance.");
+        try { return await operation(); }
+        finally { Volatile.Write(ref _deviceOperation, 0); }
+    }
 
     /// <summary>
     /// An access token that is good for a while yet, refreshing it if needed; null when the sign-in

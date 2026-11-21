@@ -269,6 +269,9 @@ must still report the same approval address at start. In isolated mode its origi
 or the exact selected alias already accepted by local provisioning/persisted binding and server configuration;
 another advertised alias grants no permission. Never-pinned legacy servers retain explicit split-port and tunnel
 approval addresses after the basic URI checks. The start's exact binding is retained for every device poll.
+Each device flow and collected approval retains one immutable issuing record. A `CliSession` refuses overlapping
+start, poll or approval-save operations before acquiring the profile lock; await each operation in sequence or
+use independent instances for independent flows. Starting another flow invalidates the prior collected approval.
 Approved tokens may be saved only by the collecting sign-in with that same prepared endpoint/authority, after
 fresh validation and a current ledger check inside the session transaction; changed or stripped discovery cannot
 relabel already-issued tokens. These are source integrations, not runtime verification or release readiness.
