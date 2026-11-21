@@ -180,7 +180,7 @@ send { "to": "role:tester", "type": "task.test", "expect": "reply", "projectId":
        "title": "Verify the integrated due-dates commit", "dedupeKey": "file:samples/work-items/add-due-dates.md/T7/1",
        "labels": { "task": "T7", "round": "1", "role": "tester" },
        "body": { "summary": "Run the required build and full test suites on the final commit.",
-                 "details": "Confirm HEAD is <FINAL> and the runner matches the planned Linux, .NET SDK, Node.js, npm and access requirements. From the repository root run dotnet build TodoApp.slnx and dotnet test --solution TodoApp.slnx. In client/ run npm ci, npm test and npm run build. Every command must exit 0 and both full suites must pass. Return the tested SHA, OS and toolchain versions, commands, exit statuses and test counts or logs. Report any concrete blockers. No code changes." },
+                 "details": "Confirm HEAD is <FINAL> and the runner matches the planned Linux, .NET SDK, Node.js, npm and access requirements. From the repository root run dotnet build TodoApp.slnx and dotnet test --solution TodoApp.slnx. In client/ run npm ci, npm test and npm run build. Every command must exit 0 and both full suites must pass. Return the tested SHA, OS and toolchain versions, commands, exit statuses and test counts or logs. Report any blockers, verified cleanup, and paths and reasons for artifacts that remain. No code changes." },
        "attach": [ { "format": "git-bundle", "path": "<REPO>", "branch": "add-due-dates", "expectedHead": "<FINAL>" } ] }
 → thr_T7
 
@@ -191,6 +191,7 @@ wait { "threadIds": ["thr_T7"], "mode": "any" }
 The coordinator matches the tester's SHA to `FINAL`, confirms the runner meets the environment
 requirements, and checks the reply against all five commands. Every exit status is `0`. The full
 .NET suite reports 24 passed and the full client suite reports 9 passed, with no failures or skips.
+The tester verifies removal of the task's build outputs, dependency directory and package cache.
 If the evidence is missing or the runner cannot execute a check, keep that check unverified or
 blocked. If the integrated SHA changes, dispatch a new round for the affected checks on the new SHA.
 
@@ -228,6 +229,6 @@ wait            [T5]
 send            T6 docs                 (bundle add-due-dates-docs)
 wait            [T6]      → fetch_attachment T6 → merge
 send            T7 remote verification  (bundle add-due-dates, expectedHead FINAL)
-wait            [T7]  → check SHA, runner and command results
+wait            [T7]  → check SHA, runner, command results and cleanup
 complete_project
 ```

@@ -139,7 +139,8 @@ For verification-only tasks, use the return instructions below and omit `returns
   Ask the tester to verify the checkout before running commands and return evidence without
   editing or committing code. Keep any required approved-environment fields on the send.
 - Ask for the tested SHA, actual OS and toolchain versions, each command and its exit status,
-  pass/fail/skip counts or relevant log output, and cleanup status. Label smoke checks and full suites clearly.
+  and pass/fail/skip counts or relevant log output. Label smoke checks and full suites clearly.
+  Ask what cleanup was verified and for the path and reason for each artifact that must remain.
   Ask for the reason and any failure output for each blocked or failed check. The coordinator
   matches each result to the expected SHA and environment and verifies that the commands and
   results cover the required checks. A smoke check provides evidence only for its own scope.
