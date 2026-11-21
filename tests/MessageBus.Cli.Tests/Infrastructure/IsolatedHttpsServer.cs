@@ -43,21 +43,25 @@ internal sealed class IsolatedHttpsServer : IAsyncDisposable
     internal string Discovery => Stripped ? """{"product":"messagebus.ai","signIn":{"microsoft":true}}"""
         : $$$$"""{"product":"messagebus.ai","stamp":{"stampId":"eu","geography":"eu","azureRegion":"westeurope","url":"{{{{Origin}}}}","aliases":[]},"signIn":{"authority":{"version":1,"stampId":"eu","issuer":"{{{{Origin}}}}","audience":"{{{{Origin}}}}"},"machineSignature":{"version":2,"required":true}}}""";
 
-    internal IsolatedHttpsServer(CancellationToken ct, ITestOutputHelper output)
+    internal IsolatedHttpsServer(CancellationToken ct, ITestOutputHelper output, Action<string>? setupCheckpoint = null)
     {
         _output = output;
         _stop = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        try
+        {
         _stopTrace = _stop.Token.Register(() => Trace("stop requested; active: " +
             string.Join(", ", _phases.OrderBy(p => p.Key).Select(p => $"{p.Key}={p.Value}"))));
         // Wall-clock timeout is a deadlock guard only; tests advance a fake clock for backoff.
         _stop.CancelAfter(TimeSpan.FromSeconds(20));
         Trace("creating root RSA key and certificate");
+        setupCheckpoint?.Invoke("before-root");
         using var caKey = RSA.Create(2048);
         var ca = new CertificateRequest("CN=Fixture private root", caKey, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
         ca.CertificateExtensions.Add(new X509BasicConstraintsExtension(true, false, 0, true));
         ca.CertificateExtensions.Add(new X509KeyUsageExtension(X509KeyUsageFlags.KeyCertSign, true));
         var now = DateTimeOffset.UtcNow;
         _root = ca.CreateSelfSigned(now.AddDays(-1), now.AddDays(1));
+        setupCheckpoint?.Invoke("after-root");
         Trace("creating leaf RSA key and certificate");
         using var leafKey = RSA.Create(2048);
         var leaf = new CertificateRequest("CN=localhost", leafKey, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
@@ -69,8 +73,6 @@ internal sealed class IsolatedHttpsServer : IAsyncDisposable
         leaf.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(new OidCollection { new("1.3.6.1.5.5.7.3.1") }, true));
         using var issued = leaf.Create(_root, now.AddHours(-1), now.AddHours(1), RandomNumberGenerator.GetBytes(16));
         using var withKey = issued.CopyWithPrivateKey(leafKey);
-        try
-        {
             Trace("importing server certificate");
             _leaf = ServerCertificate(withKey);
             _listener.Start();
@@ -82,7 +84,7 @@ internal sealed class IsolatedHttpsServer : IAsyncDisposable
         {
             _listener.Stop();
             _leaf?.Dispose();
-            _root.Dispose();
+            _root?.Dispose();
             _stopTrace.Dispose();
             _stop.Dispose();
             throw;
@@ -90,8 +92,14 @@ internal sealed class IsolatedHttpsServer : IAsyncDisposable
     }
 
     // Only fixture phases and credential-free method/path metadata: never headers, bodies or signed queries.
-    internal void Trace(string phase) => _output.WriteLine(
-        $"HTTPS fixture +{_elapsed.Elapsed.TotalMilliseconds:F0}ms: {phase}; HTTP requests={Requests.Count}");
+    internal void Trace(string phase)
+    {
+        try
+        {
+            _output.WriteLine($"HTTPS fixture +{_elapsed.Elapsed.TotalMilliseconds:F0}ms: {phase}; HTTP requests={Requests.Count}");
+        }
+        catch (InvalidOperationException) { /* Output can end before timed-out connection cleanup. */ }
+    }
 
     private void Phase(int connection, string phase)
     {

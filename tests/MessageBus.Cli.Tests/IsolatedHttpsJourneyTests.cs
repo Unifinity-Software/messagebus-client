@@ -26,6 +26,35 @@ namespace MessageBus.Cli.Tests;
 public sealed class IsolatedHttpsJourneyTests(ITestOutputHelper testOutput)
 {
     private const string MachineId = "mch_00000000000000000000000000";
+
+    [Theory]
+    [InlineData("before-root")]
+    [InlineData("after-root")]
+    public void Failed_certificate_setup_disposes_timer_registration_and_preserves_primary_failure(string failAt)
+    {
+        using var stop = new CancellationTokenSource();
+        var endedOutput = new EndedOutput();
+        var primary = new IOException("Owned fixture setup failure");
+        var error = Assert.Throws<IOException>(() => new IsolatedHttpsServer(stop.Token, endedOutput,
+            phase => { if (phase == failAt) throw primary; }));
+        Assert.Same(primary, error);
+        var attempts = endedOutput.Attempts;
+        Assert.True(attempts > 0);
+        stop.Cancel();
+        Assert.Equal(attempts, endedOutput.Attempts);
+    }
+
+    private sealed class EndedOutput : ITestOutputHelper
+    {
+        internal int Attempts { get; private set; }
+        public string Output => "";
+        public void Write(string message) => Fail();
+        public void Write(string format, params object?[] args) => Fail();
+        public void WriteLine(string message) => Fail();
+        public void WriteLine(string format, params object?[] args) => Fail();
+        private void Fail() { Attempts++; throw new InvalidOperationException("Test output is no longer active."); }
+    }
+
     [Theory(Timeout = 30_000)]
     [InlineData(false)]
     [InlineData(true)]
