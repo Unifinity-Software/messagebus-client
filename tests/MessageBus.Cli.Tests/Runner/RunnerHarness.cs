@@ -28,7 +28,8 @@ internal sealed class RunnerHarness : IAsyncDisposable
     public RunnerHarness(int slots = 2, RunnerPolicy? policy = null, IBundleSource? bundles = null, Func<string, IRunSandbox>? sandbox = null,
         IReadOnlyDictionary<string, string>? environment = null, IToolSetupRequests? toolSetup = null,
         IReadOnlyDictionary<string, string>? agentEnvironment = null, Func<RunnerExtensions, RunnerExtensions>? extensions = null,
-        bool agentsInstalled = false, IReadOnlyDictionary<string, bool>? roleKeysReadable = null, TextWriter? log = null, TimeSpan? heartbeat = null, bool keepRunFolders = true)
+        bool agentsInstalled = false, IReadOnlyDictionary<string, bool>? roleKeysReadable = null, TextWriter? log = null, TimeSpan? heartbeat = null, bool keepRunFolders = true,
+        string? openCodeCommand = null)
     {
         Directory.CreateDirectory(_root);
         _http = new HttpClient(Service) { BaseAddress = new Uri("http://127.0.0.1:9/") };
@@ -45,6 +46,7 @@ internal sealed class RunnerHarness : IAsyncDisposable
                 [AgentKind.Codex] = FakeAgentPath,
             },
         };
+        if (openCodeCommand is not null) ((Dictionary<AgentKind, string>)options.AgentCommands)[AgentKind.OpenCode] = openCodeCommand;
         Engine = new RunnerEngine(options, new TestHost(policy ?? RunnerPolicy.Workspace, Home, environment, agentEnvironment, agentsInstalled, roleKeysReadable), new HttpRunnerServiceClient(_http), Time, log ?? TextWriter.Null,
             (extensions ?? (e => e)).Invoke(new RunnerExtensions
             {

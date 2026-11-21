@@ -159,7 +159,7 @@ internal static class DoctorCommand
             }
             else
             {
-                Good(name, $"{agent.Version ?? "version unknown"}, signed in");
+                Good(name, $"{agent.Version ?? "version unknown"}, {(agent.Kind == AgentKind.OpenCode ? "provider available" : "signed in")}");
             }
             if (warning is not null)
             {

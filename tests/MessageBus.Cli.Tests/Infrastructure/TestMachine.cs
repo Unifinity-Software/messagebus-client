@@ -38,6 +38,7 @@ public sealed class TestMachine : IDisposable
     public Dictionary<string, string> Env { get; } = new(StringComparer.Ordinal);
 
     public FakeServer Server { get; } = new();
+    internal Func<HttpMessageHandler> LocalModelHandler { get; set; } = MessageBus.Cli.Agents.OpenCodeReadiness.Handler;
 
     public FakeTimeProvider Time { get; } = new(new DateTimeOffset(2026, 11, 13, 9, 0, 0, TimeSpan.Zero));
 
@@ -147,6 +148,7 @@ public sealed class TestMachine : IDisposable
             MbusCommand = MbusCommand,
             ExtraAgentDirectories = [],
             CreateHttpHandler = () => new NonDisposingHandler(Server),
+            CreateLocalModelHttpHandler = LocalModelHandler,
             Time = Time,
             Browser = Browser,
             Skills = Skills ?? new DictionarySkillSource(SkillFiles),

@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using MessageBus.Cli.Agents;
 using MessageBus.Contracts.Machines;
 using MessageBus.Contracts.Messaging;
 using MessageBus.Contracts.Roles;
@@ -28,6 +29,31 @@ namespace MessageBus.Cli.Runner.Agents;
 /// <param name="mbus">How OpenCode starts the local mbus MCP server for a run; this mbus by default.</param>
 public sealed class OpenCodeAdapter(string? version = null, string? configuredModel = null, Mcp.McpLaunchCommand? mbus = null) : IAgentAdapter
 {
+    private Func<OpenCodeSettings>? _readSettings;
+    private OpenCodeSelection? _selection;
+    private Func<HttpMessageHandler>? _readinessHandler;
+    internal Uri? LocalEndpoint => _selection?.Endpoint;
+
+    internal static OpenCodeAdapter ForRunner(string? version, Func<string, string?> env, string home,
+        Func<HttpMessageHandler>? handler = null, Func<IReadOnlyDictionary<string, string>>? storedEnvironment = null) => new(version)
+        {
+            _readSettings = () => OpenCodeSettings.Read(new SignInEnvironment(env, storedEnvironment?.Invoke() ?? new Dictionary<string, string>()).Get, home, version),
+            _readinessHandler = handler,
+        };
+
+    internal async Task<(OpenCodeAdapter Adapter, string? Error)> SelectAsync(string? requested, CancellationToken ct)
+    {
+        if (_readSettings is null) return (this, null);
+        var settings = _readSettings(); // Fresh after approval, outside the engine lock.
+        if (settings.Problem is { } problem) return (this, problem);
+        if (settings.SelectionProblem(requested) is { } invalid) return (this, invalid);
+        var selection = settings.Select(requested);
+        var error = await OpenCodeReadiness.CheckAsync(selection, ct, _readinessHandler).ConfigureAwait(false);
+        return (new OpenCodeAdapter(version, selection.Id, mbus)
+        {
+            _selection = selection with { KnownLocal = selection.Endpoint is not null && error is null },
+        }, error);
+    }
     /// <summary>The variable OpenCode reads extra settings from (JSON), over its settings files.</summary>
     public const string ConfigContentVariable = "OPENCODE_CONFIG_CONTENT";
 
@@ -53,7 +79,7 @@ public sealed class OpenCodeAdapter(string? version = null, string? configuredMo
         {
             args.Add("--standalone");
         }
-        if (context.Model is { Length: > 0 } model)
+        if ((_selection?.Id ?? context.Model ?? configuredModel) is { Length: > 0 } model)
         {
             args.AddRange(["--model", model]); // the role's cheaper model (the original issue), as OpenCode names it: provider/model
         }
@@ -97,7 +123,9 @@ public sealed class OpenCodeAdapter(string? version = null, string? configuredMo
             }
             shell = rules;
         }
-        var config = new JsonObject
+        var config = _selection is { } selected ? JsonNode.Parse(selected.ConfigJson)!.AsObject() : new JsonObject();
+        // The resolved provider/model snapshot overrides repository defaults. Run permissions and MCP still win.
+        OpenCodeSettings.Merge(config, new JsonObject
         {
             ["permission"] = new JsonObject
             {
@@ -105,7 +133,7 @@ public sealed class OpenCodeAdapter(string? version = null, string? configuredMo
                 ["bash"] = shell,
                 ["webfetch"] = profile.Network == NetworkAccess.None ? "deny" : "allow",
             },
-        };
+        });
         if (context.McpEnvironment is { } mcpEnvironment)
         {
             var command = mbus ?? Mcp.McpLaunchCommand.ForCurrentProcess();
@@ -114,7 +142,7 @@ public sealed class OpenCodeAdapter(string? version = null, string? configuredMo
             {
                 environment[name] = value;
             }
-            config["mcp"] = new JsonObject
+            var mcpConfig = new JsonObject
             {
                 [Connect.McpServerName.Value] = new JsonObject
                 {
@@ -124,15 +152,18 @@ public sealed class OpenCodeAdapter(string? version = null, string? configuredMo
                     ["enabled"] = true,
                 },
             };
+            if (_selection is not null && UsesSharedServer(version))
+                mcpConfig = new JsonObject { ["servers"] = mcpConfig };
+            OpenCodeSettings.Merge(config, new JsonObject { ["mcp"] = mcpConfig });
         }
         return config;
     }
 
     /// <inheritdoc />
-    public IAgentOutputParser CreateParser() => new OpenCodeOutputParser(configuredModel);
+    public IAgentOutputParser CreateParser() => new OpenCodeOutputParser(_selection?.Id ?? configuredModel, _selection?.KnownLocal == true);
 
     /// <inheritdoc />
-    public IAgentOutputParser CreateParser(string? model) => new OpenCodeOutputParser(model is { Length: > 0 } ? model : configuredModel);
+    public IAgentOutputParser CreateParser(string? model) => new OpenCodeOutputParser(_selection?.Id ?? (model is { Length: > 0 } ? model : configuredModel), _selection?.KnownLocal == true);
 
     /// <summary>OpenCode's settings folder: <c>OPENCODE_CONFIG_DIR</c>, else <c>$XDG_CONFIG_HOME/opencode</c>, else <c>~/.config/opencode</c> (on every OS).</summary>
     public static string ConfigDirectory(Func<string, string?> env, string home) =>
@@ -159,7 +190,8 @@ public sealed class OpenCodeAdapter(string? version = null, string? configuredMo
 /// (<c>provider/model</c>), unknown when they name none.
 /// </summary>
 /// <param name="configuredModel">The <c>model</c> in OpenCode's settings, if any.</param>
-public sealed class OpenCodeOutputParser(string? configuredModel) : IAgentOutputParser
+/// <param name="knownLocal">The selected endpoint was verified as a loaded local LM Studio model by the runner.</param>
+public sealed class OpenCodeOutputParser(string? configuredModel, bool knownLocal = false) : IAgentOutputParser
 {
     private long _in;
     private long _cacheRead;
@@ -269,7 +301,7 @@ public sealed class OpenCodeOutputParser(string? configuredModel) : IAgentOutput
                 CacheWriteTokensIn = _cacheWrite,
                 TokensOut = _out,
                 // A provider paid by subscription reports nothing (0): the price list then estimates it.
-                EstimatedCostUsd = _cost > 0 ? _cost : null,
+                EstimatedCostUsd = _cost > 0 ? _cost : knownLocal && _in + _cacheRead + _cacheWrite + _out > 0 ? 0 : null,
             },
         };
     }

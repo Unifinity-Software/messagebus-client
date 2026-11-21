@@ -50,7 +50,7 @@ internal sealed record RunServices(
 internal sealed class AgentRun
 {
     private readonly RunServices _s;
-    private readonly IAgentAdapter _adapter;
+    private IAgentAdapter _adapter;
     private readonly string _executable;
     private readonly PermissionProfile _profile;
     private readonly bool _restricted;
@@ -190,7 +190,17 @@ internal sealed class AgentRun
             }
             else
             {
-                await PrepareAndRunAsync().ConfigureAwait(false);
+                if (_adapter is OpenCodeAdapter openCode)
+                {
+                    var selected = await openCode.SelectAsync(Delivery.Model, _stop.Token).ConfigureAwait(false);
+                    _adapter = selected.Adapter;
+                    if (selected.Error is { } error)
+                    {
+                        _declined = DeclineReason.MachineNotReady;
+                        failure = (SettleStatus.Abandoned, error);
+                    }
+                }
+                if (failure is null) await PrepareAndRunAsync().ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException) when (_stop.IsCancellationRequested)
@@ -210,6 +220,7 @@ internal sealed class AgentRun
         {
             // the original issue: a resumed session works in its own folder; the run's directory holds only the run's files.
             workspace = RunWorkspace.Create(_s.Options.WorkRoot, DeliveryId, Delivery.Attempt, Resume?.Folder);
+            workspace.LocalModelEndpoint = (_adapter as OpenCodeAdapter)?.LocalEndpoint;
             await File.WriteAllTextAsync(workspace.DeliveryFile, MessageBusJson.Serialize(Delivery)).ConfigureAwait(false);
             var prompt = Resume is null ? TaskPrompt.Build(Delivery, _s.Host.MachineName, _restricted) : TaskPrompt.BuildResume(Delivery, _s.Host.MachineName);
             await File.WriteAllTextAsync(workspace.PromptFile, prompt).ConfigureAwait(false);

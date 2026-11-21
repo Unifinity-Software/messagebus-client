@@ -152,8 +152,8 @@ internal static class DoctorSmoke
             {
                 AgentKind.Codex => new CodexAdapter(CodexAdapter.ReadConfiguredModel(codexHome), Connect.CodexTomlConfig.HasMbus(Path.Combine(codexHome, "config.toml")), codexHome: codexHome, getEnvironmentVariable: host.GetEnvironmentVariable),
                 AgentKind.Copilot => new CopilotAdapter(copilotHome: host.GetEnvironmentVariable("COPILOT_HOME") is { Length: > 0 } h ? h : Path.Combine(host.HomeDirectory, ".copilot")),
-                AgentKind.OpenCode => new OpenCodeAdapter(found.Version,
-                    OpenCodeAdapter.ReadConfiguredModel(OpenCodeAdapter.ConfigDirectory(host.GetEnvironmentVariable, host.HomeDirectory))),
+                AgentKind.OpenCode => OpenCodeAdapter.ForRunner(found.Version, host.GetEnvironmentVariable, host.HomeDirectory, host.CreateLocalModelHttpHandler,
+                    () => Runner.Service.AgentEnvironmentStore.ReadFrom(host.ConfigDirectory)),
                 _ => new ClaudeCodeAdapter(),
             };
             list.Add(new SmokeAgent(kind, adapter, executable));

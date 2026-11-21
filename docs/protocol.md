@@ -7,6 +7,17 @@ that keep old and new versions working together.
 
 ## Compatibility rules
 
+OpenCode local-provider support uses existing fields only. `models`/`defaultModel` may contain configured OpenCode
+IDs (including additional slashes); `modelsPartial` remains true because configuration is not the complete catalog.
+`signedIn: true` means the runner can use a provider, including a verified authless local LM Studio provider; it does
+not assert a vendor login. `notReady` suppresses an unusable local-only agent. A local failure in a mixed setup with
+saved cloud authentication is a doctor warning, leaving explicit cloud selections available. A selected local
+failure is handed back with existing `declined: "machine-not-ready"`, without globally poisoning the agent kind.
+Rescans restore whole-agent availability, and every local task also checks fresh model state before checkout/setup.
+Existing `usage.estimatedCostUsd: 0` means known zero inference API spend for verified local runs with reported tokens;
+null remains unknown, and positive costs remain positive. No field, route, capability gate or new service behavior
+is required; omission behavior for older clients and services is unchanged.
+
 ACI inventories optionally include `deployment: { target: "azure-container-instances", azureResourceId: "..." }`.
 The original `target` stays `docker`, so existing services can still enroll and run the machine. Services that
 understand `deployment` preserve it and use its detailed target in Fleet. `MBUS_DEPLOYMENT_TARGET=aci` enables

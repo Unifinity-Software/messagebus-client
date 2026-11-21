@@ -55,6 +55,7 @@ public sealed partial class RunWorkspace : IDisposable
     private FileStream? _lock;
 
     internal Action<string>? GitLog { get; set; }
+    internal Uri? LocalModelEndpoint { get; set; }
 
     private RunWorkspace(string root, string? sessionFolder = null)
     {

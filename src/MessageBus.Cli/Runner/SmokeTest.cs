@@ -87,9 +87,16 @@ internal sealed class SmokeTest(SmokeTestOptions options)
             return new SmokeResult(agent.Kind, agent.NotReady ?? "it isn't installed.", [], null, null);
         }
 
+        if (agent.Adapter is OpenCodeAdapter openCode)
+        {
+            var selected = await openCode.SelectAsync(null, cancellationToken).ConfigureAwait(false);
+            if (selected.Error is { } error) return new(agent.Kind, error, [], null, null);
+            agent = agent with { Adapter = selected.Adapter };
+        }
         var now = options.Time.GetUtcNow();
         var id = $"smoke-{AgentKinds.Name(agent.Kind)}-{now.ToString("yyyyMMddHHmmss", CultureInfo.InvariantCulture)}";
         var workspace = RunWorkspace.Create(options.WorkRoot, id, 1);
+        workspace.LocalModelEndpoint = (agent.Adapter as OpenCodeAdapter)?.LocalEndpoint;
         var profile = PermissionProfiles.Defaults(PermissionProfiles.Worker);
         var project = options.Dotnet is { } dotnet ? ScratchProject.Dotnet(dotnet) : ScratchProject.Shell();
         var steps = new List<SmokeStep>();
