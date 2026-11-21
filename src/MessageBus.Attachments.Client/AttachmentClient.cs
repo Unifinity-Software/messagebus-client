@@ -161,7 +161,7 @@ public sealed class AttachmentClient(HttpClient api, HttpClient links, string wo
     {
         var path = Route(ApiRoutes.AttachmentDownloadLinks).Replace("{deliveryId}", Uri.EscapeDataString(deliveryId), StringComparison.Ordinal)
                    + "?threadId=" + Uri.EscapeDataString(threadId);
-        using var response = await api.PostAsync(path, null, ct);
+        using var response = await api.PostAsync(Resolve(path), null, ct);
         return await ReadAsync<IReadOnlyList<DownloadLink>>(response, ct);
     }
 
@@ -171,7 +171,7 @@ public sealed class AttachmentClient(HttpClient api, HttpClient links, string wo
     public async Task<DownloadLink> DownloadLinkAsync(string attachmentId, CancellationToken ct = default)
     {
         var path = Route(ApiRoutes.AttachmentDownloadLink).Replace("{attachmentId}", Uri.EscapeDataString(attachmentId), StringComparison.Ordinal);
-        using var response = await api.PostAsync(path, null, ct);
+        using var response = await api.PostAsync(Resolve(path), null, ct);
         return await ReadAsync<DownloadLink>(response, ct);
     }
 
@@ -289,7 +289,7 @@ public sealed class AttachmentClient(HttpClient api, HttpClient links, string wo
     {
         var json = JsonSerializer.Serialize(body, MessageBusJson.Options.GetTypeInfo(typeof(TBody)));
         using var content = new StringContent(json, Encoding.UTF8, "application/json");
-        using var response = await api.PostAsync(path, content, ct);
+        using var response = await api.PostAsync(Resolve(path), content, ct);
         return await ReadAsync<TResult>(response, ct);
     }
 

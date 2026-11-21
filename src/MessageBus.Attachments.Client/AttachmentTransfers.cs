@@ -64,7 +64,10 @@ public static class AttachmentTransfers
             || uri.Scheme is not ("http" or "https") || uri.UserInfo.Length != 0 || uri.Fragment.Length != 0
             || uri.Scheme == "http" && (server?.Scheme == "https" || !uri.IsLoopback && server?.Scheme != "http"))
             throw new AttachmentTransferException("Unsafe attachment transfer destination; transfer refused.");
-        return uri;
+        // Base/relative Uri composition may put a decoded space from the base path in
+        // OriginalString. Pass the escaped absolute form to the scope gate and transport;
+        // the caller's link was checked above, and path/query escapes stay intact.
+        return new Uri(uri.AbsoluteUri);
     }
 
     internal static async Task<HttpResponseMessage> SendAsync(HttpClient api, HttpClient links,

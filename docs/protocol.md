@@ -132,6 +132,8 @@ fixture policy. `ServerEndpoint` separately retains escaped API base scope with 
 canonical authority does not make different selected origins or base paths interchangeable for saved credentials.
 Its destination-scope check refuses encoded path separators, encoded traversal and nested escapes rather than
 granting a scope that server-side path decoding could change. Query escapes remain untouched.
+Attachment API routes and relative transfer links resolve under the selected escaped base path and are
+passed to the destination gate as escaped absolute URIs, preserving their path and signed query escapes.
 
 `ServerBindingPolicy.Evaluate` is a pure decision over one current anonymous observation, selected endpoint,
 an explicit complete `ServerBindingFloor` and optional trusted local expectation. It never authorizes a send.

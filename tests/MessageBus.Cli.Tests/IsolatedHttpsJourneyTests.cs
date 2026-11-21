@@ -45,6 +45,7 @@ public sealed class IsolatedHttpsJourneyTests
             ? new EnvironmentRunnerHostContext(n => machine.Env.GetValueOrDefault(n), machine.Home, server.Handler).CreateServiceClient()
             : ServerConnection.CreateAuthenticatedClient(host, new CliSettings
             { Stored = store.Load(), Server = new Uri(server.Selected), MachineName = "fixture" }, store, "cli");
+        Assert.Equal(server.Selected + "/", api.BaseAddress!.AbsoluteUri);
         // This calls the production factory's real SocketsHttpHandler path, with only its private root replaced.
         using var links = AttachmentTransfers.CreateHttpClient(() => new WebProxy(), server.ChainPolicy());
         using var recipientKey = KeyPair.GenerateP256();
@@ -66,6 +67,7 @@ public sealed class IsolatedHttpsJourneyTests
         {
             if (request.RawTarget.EndsWith("/attachments/upload-link", StringComparison.Ordinal))
             {
+                Assert.Equal("/gateway%20scope/api/w/ws_fixture/attachments/upload-link", request.RawTarget);
                 Assert.Equal("POST", request.Method);
                 if (environment)
                 {

@@ -57,10 +57,33 @@ internal sealed class IsolatedHttpsServer : IAsyncDisposable
         leaf.CertificateExtensions.Add(new X509KeyUsageExtension(X509KeyUsageFlags.DigitalSignature | X509KeyUsageFlags.KeyEncipherment, true));
         leaf.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(new OidCollection { new("1.3.6.1.5.5.7.3.1") }, true));
         using var issued = leaf.Create(_root, now.AddHours(-1), now.AddHours(1), RandomNumberGenerator.GetBytes(16));
-        _leaf = issued.CopyWithPrivateKey(leafKey);
-        _listener.Start();
-        Origin = $"https://localhost:{((IPEndPoint)_listener.LocalEndpoint).Port}";
-        _serving = AcceptAsync();
+        using var withKey = issued.CopyWithPrivateKey(leafKey);
+        try
+        {
+            _leaf = ServerCertificate(withKey);
+            _listener.Start();
+            Origin = $"https://localhost:{((IPEndPoint)_listener.LocalEndpoint).Port}";
+            _serving = AcceptAsync();
+        }
+        catch
+        {
+            _listener.Stop();
+            _leaf?.Dispose();
+            _root.Dispose();
+            _stop.Dispose();
+            throw;
+        }
+    }
+
+    private static X509Certificate2 ServerCertificate(X509Certificate2 certificate)
+    {
+        if (!OperatingSystem.IsWindows()) return new X509Certificate2(certificate);
+        // Schannel cannot acquire an ephemeral CopyWithPrivateKey key. Import a temporary
+        // user key container instead: no certificate-store installation or PersistKeySet.
+        // .NET owns deleting that container when _leaf is disposed after all TLS sockets.
+        var pfx = certificate.Export(X509ContentType.Pkcs12);
+        try { return X509CertificateLoader.LoadPkcs12(pfx, null, X509KeyStorageFlags.UserKeySet); }
+        finally { CryptographicOperations.ZeroMemory(pfx); }
     }
 
     internal X509ChainPolicy ChainPolicy(bool trustRoot = true)
