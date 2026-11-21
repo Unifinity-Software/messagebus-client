@@ -56,6 +56,7 @@ public sealed partial class RunWorkspace : IDisposable
 
     internal Action<string>? GitLog { get; set; }
     internal Uri? LocalModelEndpoint { get; set; }
+    internal string? PrivateSocketDirectory { get; set; }
 
     private RunWorkspace(string root, string? sessionFolder = null)
     {

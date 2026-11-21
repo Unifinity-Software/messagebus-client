@@ -207,7 +207,7 @@ public sealed class RunNetworkTests
         var log = new StringWriter();
         var calls = 0;
         using var proxy = RunNetworkProxy.StartWithAccept(log, (listener, ct) =>
-            Interlocked.Increment(ref calls) == 1 ? throw new SocketException((int)SocketError.ConnectionReset) : listener.AcceptTcpClientAsync(ct));
+            Interlocked.Increment(ref calls) == 1 ? throw new SocketException((int)SocketError.ConnectionReset) : listener.AcceptSocketAsync(ct));
 
         Assert.StartsWith("HTTP/1.1 407", await ConnectThroughAsync(proxy.Port, "github.com:443", authorization: null));
         Assert.Contains("couldn't take a connection (ConnectionReset", log.ToString());

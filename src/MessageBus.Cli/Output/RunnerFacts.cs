@@ -35,6 +35,7 @@ public static class RunnerFacts
     /// <summary>What run isolation the runner got (<paramref name="sandbox"/>) and why it isn't stronger.</summary>
     public static SummaryRow Isolation(IRunSandbox sandbox, RunIsolationOptions options) => sandbox switch
     {
+        RunIsolation { AciProblem: { } why } => new("Run isolation", why, SummaryTone.Bad, "ACI tasks blocked:"),
         RunIsolation { Level: IsolationLevel.OsSandbox } os => new("Run isolation", os.SandboxName ?? "the OS sandbox", SummaryTone.Good, "OS sandbox:"),
         RunIsolation { SandboxProblem: { } why } basic => new("Run isolation", $"the {basic.SandboxName} isn't used: {why}", SummaryTone.Note, "basic:"),
         RunIsolation => new("Run isolation", WhyBasic(options.Requested), SummaryTone.Note, "basic:"),
@@ -42,7 +43,9 @@ public static class RunnerFacts
     };
 
     /// <summary>The run isolation the owner asked for, before the runner's start-up check (<c>mbus doctor</c>).</summary>
-    public static SummaryRow PlannedIsolation(RunIsolationOptions options) => options.Requested switch
+    public static SummaryRow PlannedIsolation(RunIsolationOptions options) => options.RequireAciSandbox
+        ? new("Run isolation", "required; tasks are refused if the protected launch check fails", SummaryTone.Plain, "ACI sandbox:")
+        : options.Requested switch
     {
         IsolationLevel.Off => new("Run isolation", $"runs use this machine's environment and git settings ({SandboxEnvVars.Isolation}=off)", SummaryTone.Bad, "off:"),
         IsolationLevel.OsSandbox when !OperatingSystem.IsWindows() =>
@@ -58,6 +61,15 @@ public static class RunnerFacts
     /// <summary>How far each run's network is limited.</summary>
     public static SummaryRow Network(IRunSandbox? sandbox, RunIsolationOptions options)
     {
+        if (options.RequireAciSandbox)
+        {
+            return sandbox switch
+            {
+                null => new("Network", "private task namespace and an approved public IPv4 proxy, if the launch check passes", SummaryTone.Plain),
+                RunIsolation { AciProblem: not null } => new("Network", "protected ACI launch unavailable", SummaryTone.Bad, "tasks blocked:"),
+                _ => new("Network", "private task namespace; proxy only to approved public IPv4 destinations", SummaryTone.Good, "limited:"),
+            };
+        }
         if (options.Requested == IsolationLevel.Off || sandbox is NoSandbox)
         {
             return new("Network", "run isolation is off", SummaryTone.Bad, "not limited:");

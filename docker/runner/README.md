@@ -7,9 +7,10 @@ It opens no port.
 
 ## Build
 
-Build your image from released source or from a development checkout. The project
-does not supply a ready-made runner image. To build from a release, start at
-the repository root and use the release version in both the checkout and image tag.
+Copy the public Linux amd64 image reference from the
+[client release notes](https://github.com/Unifinity-Software/messagebus-client/releases).
+The digest identifies the exact image. To build your own from a release, start
+at the repository root and use the release version in both the checkout and image tag.
 
 ```sh
 version='<version>'
@@ -28,7 +29,7 @@ podman build --ignorefile docker/runner/Dockerfile.dockerignore -f docker/runner
 docker build -f docker/runner/Dockerfile -t "messagebus-runner:$version" .
 ```
 
-The agent CLIs are installed at their newest version unless you pin them:
+The Dockerfile pins the agent CLI versions. Override a pin with its build argument:
 `--build-arg CLAUDE_CODE_VERSION=… --build-arg CODEX_VERSION=… --build-arg OPENCODE_VERSION=… --build-arg COPILOT_VERSION=…`.
 A release image records its CLI version and full source commit in OCI labels. Use
 `mbus --version` for the CLI version and `mbus doctor` for the full source revision
@@ -146,11 +147,12 @@ by UID 10001 that preserves the runner settings and machine key. Use one writer 
 verify storage permissions and restart behavior before relying on it. The supplied template uses
 ephemeral storage.
 
-The stock image runs as UID 10001 and lacks bubblewrap, so Linux runs fall back to basic isolation.
-Basic isolation gives each task its own worktree, temporary files, Git settings and filtered
-environment. The container is the OS boundary. Use a dedicated runner for workloads that can
-share that boundary. The run's network allow-list uses a local proxy and is advisory on Linux.
-If egress must be enforced, apply network controls outside the task process.
+The image runs as UID 10001. On Container Apps, check the runner's reported isolation
+before adding work. If the host cannot start the standard Linux sandbox, basic isolation
+gives each task its own worktree, temporary files, Git settings and filtered environment.
+The container is then the OS boundary. Use a dedicated runner for workloads that can
+share that boundary. Apply network controls outside the task process if you need to
+enforce egress.
 
 When configuring an upstream proxy for the runner, use `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`
 and `NO_PROXY` as applicable. The run proxy supports an `http://` upstream, including for CONNECT
@@ -197,6 +199,39 @@ digest, runner machine ID, task IDs and returned commit SHAs. Keep evidence free
   pass or fail. Never dump the environment, enable Git credential tracing or print helper output.
 
 ## Azure Container Instances
+
+The Linux ACI runner requires a protected launch under UID 10001. It enrolls or
+restores its identity before announcing readiness. A startup check uses dummy
+files and a local test endpoint to verify the same task launcher used for real
+work. If the container denies the required namespace operations, the runner
+stays connected and reports its harnesses as unavailable. It won't run tasks
+with basic isolation. Confirm that the target deployment passes the check
+before assigning roles. When the kernel denies a fresh procfs mount, the runner
+repeats the checks with a private, empty, read-only `/proc` and the same mount,
+PID and network namespaces. A standalone Node.js fixture in a disposable,
+unprivileged ACI container verified this layout under UID 10001. It wrote its
+own file and could not see dummy files or the loopback listener outside the
+sandbox.
+
+- **Files and processes.** A task gets its own home, worktree, temporary
+  directories and PID namespace. The runner's settings, machine key and other
+  worktrees aren't mounted. The image's toolchain is read-only.
+- **Network.** A task has a separate network namespace. Its proxy allows
+  approved public IPv4 connections on HTTPS or SSH ports. The proxy denies
+  private, loopback, link-local and Azure platform addresses, and the runner's
+  identity storage host. Open-network roles still use this allow-list. Upstream
+  proxies and host-local models aren't supported in this mode.
+- **Harnesses.** Claude Code and Codex start with a fresh home. Use credentials
+  supplied by the deployment, no saved sign-ins or tools from the runner's
+  home. A harness that fails its protected launch check is unavailable. Codex
+  also has to start its nested command sandbox. In local offline checks with
+  an empty `/proc`, Claude Code 2.1.330 and GitHub Copilot CLI 1.0.114 passed
+  startup. Codex 0.171.0 failed its nested sandbox probe and OpenCode 1.19.6
+  failed to start. Codex also failed to load its configuration before making
+  any model request in a noninteractive test using the outer sandbox alone.
+  The same test completed against a dummy Responses API through the relay
+  with a fresh, namespace-local procfs. Codex stays unavailable on the
+  empty-proc profile. Resumed harness sessions aren't supported in this mode.
 
 `infra/runner-aci.bicep` provisions a Linux ACI runner that enrolls itself in Azure. You do not
 run an enrollment container on your computer or copy a machine private key into a deployment.

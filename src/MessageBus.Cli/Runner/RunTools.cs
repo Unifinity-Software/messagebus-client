@@ -109,7 +109,9 @@ public sealed class PipeRunTools(Func<RunToolsRequest, Stream, CancellationToken
         var token = Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(32));
         var id = Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(8));
         // A Unix socket's path must stay under ~104 bytes, so it goes in /tmp (which runs may reach) rather than the run folder.
-        var pipe = OperatingSystem.IsWindows() ? "mbus-run-" + id : "/tmp/mbus-run-" + id + ".sock";
+        var pipe = OperatingSystem.IsWindows() ? "mbus-run-" + id
+            : request.Workspace.PrivateSocketDirectory is { } socketDirectory ? Path.Combine(socketDirectory, "tools.sock")
+            : "/tmp/mbus-run-" + id + ".sock";
         var file = Path.Combine(request.Workspace.Root, RunToolsVariables.FileName);
         System.IO.File.WriteAllText(file, new JsonObject { ["pipe"] = pipe, ["token"] = token }.ToJsonString());
         if (!OperatingSystem.IsWindows())

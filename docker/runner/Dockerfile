@@ -54,7 +54,7 @@ ARG NPM_VERSION=12.2.3
 # git and ssh for the code the agents work on, ICU for .NET, tini to pass signals to mbus.
 RUN apt-get update \
  && apt-get upgrade -y \
- && apt-get install -y --no-install-recommends ca-certificates git openssh-client libicu76 tini \
+ && apt-get install -y --no-install-recommends ca-certificates git openssh-client libicu76 tini bubblewrap netcat-openbsd \
  && rm -rf /var/lib/apt/lists/*
 
 # Allow the two install scripts that fetch each CLI's native binary.
