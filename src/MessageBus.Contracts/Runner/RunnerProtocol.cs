@@ -659,6 +659,9 @@ public sealed record RunnerProgress
 /// <summary>How a delivery ended (<see cref="ServiceRoutes.Settle"/>).</summary>
 public sealed record RunnerSettle
 {
+    /// <summary>The trusted <see cref="TaskDelivery.Attempt"/>, sent only when the target advertises <c>settleAttemptV1</c>. A stale attempt must never settle a newer lease.</summary>
+    public int? Attempt { get; init; }
+
     /// <summary>The role whose key this machine refused while opening the task (the original issue).</summary>
     public string? UnreadableRole { get; init; }
 

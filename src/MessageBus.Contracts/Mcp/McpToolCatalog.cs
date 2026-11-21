@@ -122,7 +122,7 @@ public static class McpToolCatalog
             "Retry keeps an existing local branch and warns if it is behind the fetched copy; only a missing local branch falls back to refs/remotes/mbus/<branch>, with a notice. A bundle with an empty base sends the whole history. Retrying a thread twice returns the first retry (deduplicated: true). Returns a new thread like send."),
         new(McpToolNames.RequestApproval, typeof(RequestApprovalInput), typeof(ApprovalResult), "Ask a person to approve a step",
             "Before a risky step (deleting data, a migration, anything hard to undo) or when a person must sign off (a design), ask for approval: " +
-            "`title` says exactly what will happen, `detail` why and what happens if rejected. `approver`: member:<id or email> or role:<name> " +
+            "`title` says exactly what will happen, `detail` why and what happens if rejected. Optional `affected` describes impact as plain text (1000 Unicode scalars after line-ending normalization and trimming); it is author-supplied, not verified targets or authority, and requires approvalAffectedV1 support. `approver`: member:<id or email> or role:<name> " +
             "(default: who started the project). Only a person can answer, in the dashboard; you can never approve. " +
             "Returns {approvalId, status: pending, approvers, expiresAt}: then wait_approval. Do the step only once it is approved."),
         new(McpToolNames.WaitApproval, typeof(WaitApprovalInput), typeof(ApprovalResult), "Wait for an approval",
@@ -203,8 +203,14 @@ public static class McpToolCatalog
         if (input == typeof(SendManyInput) && node["properties"]?["messages"] is JsonObject messages)
             messages["items"] = new JsonObject { ["type"] = "object", ["description"] = "One message: send's arguments." };
         if (local) Strip(node);
+        if (input == typeof(RequestApprovalInput) && node["properties"]?["affected"] is JsonObject affected)
+        {
+            affected["maxLength"] = 1000;
+            affected["description"] = "Author-supplied impact, not verified targets or authority. Normalize CRLF/CR to LF, trim, empty becomes null. At most 1000 Unicode scalars; reject invalid surrogates and controls except LF/TAB. Requires approvalAffectedV1 and an exact normalized response echo.";
+        }
         if (input == typeof(SettleInput) && node["properties"] is JsonObject settle)
         {
+            if (local) settle.Remove("attempt");
             settle.Remove("frictionOnly");
             if (!local) settle.Remove("friction");
         }
