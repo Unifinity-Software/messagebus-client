@@ -17,8 +17,11 @@ public sealed record ServerInfoResponse
     /// <summary>How people sign in.</summary>
     public ServerSignIn? SignIn { get; init; }
 
-    /// <summary>Optional feature protocols; absence keeps existing operations compatible.</summary>
-    public ServerCapabilities? Capabilities { get; init; }
+    /// <summary>Optional feature protocol tokens; absence keeps existing operations compatible.</summary>
+    public IReadOnlyList<string>? Capabilities { get; init; }
+
+    /// <summary>Optional role proposal protocol descriptor, advertised alongside its capability token.</summary>
+    public RoleProposalsCapability? RoleProposals { get; init; }
 
     /// <summary>The product name every messagebus.ai server reports.</summary>
     public const string ProductName = "messagebus.ai";

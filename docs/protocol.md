@@ -96,7 +96,9 @@ must keep working against a newer service, and the reverse.
 array of string tokens. Role proposals require both `"roleProposalsV1"` in that array and the optional
 top-level `roleProposals: {version: 1, baselineVersion: "role-proposal-readonly-v1",
 normalizerVersion: "role-definition-v1"}` descriptor. Existing `approvalAffectedV1` and `settleAttemptV1`
-tokens retain their meaning. Missing or wrong product, absent token or descriptor, malformed data, or
+tokens retain their meaning. CLI login uses this same discovery shape and also accepts servers that omit
+both optional discovery fields; sign-in settings remain under `signIn`.
+Missing or wrong product, absent token or descriptor, malformed data, or
 unknown protocol, baseline or normalizer versions mean
 `unsupported`, independently of the product version. Existing tools keep working. Proposal tools are hidden
 when unsupported; forced calls return a nonretryable `unsupported`. Endpoint absence triggers one capability
