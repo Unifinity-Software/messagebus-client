@@ -14,10 +14,14 @@ the repository root and use the release version in both the checkout and image t
 ```sh
 version='<version>'
 git checkout "mbus-v$version"
+revision=$(git rev-parse HEAD)
+docker build -f docker/runner/Dockerfile -t "messagebus-runner:$version" \
+  --build-arg MBUS_RELEASE_VERSION="$version" --build-arg MBUS_SOURCE_REVISION="$revision" .
 ```
 
 For a development build, use your development checkout and set `version` to
-a development image tag.
+a development image tag. Omit `MBUS_RELEASE_VERSION` to keep the `+dev` version.
+You can pass `MBUS_SOURCE_REVISION` on its own for a development image.
 
 ```sh
 podman build --ignorefile docker/runner/Dockerfile.dockerignore -f docker/runner/Dockerfile -t "messagebus-runner:$version" .
@@ -26,7 +30,13 @@ docker build -f docker/runner/Dockerfile -t "messagebus-runner:$version" .
 
 The agent CLIs are installed at their newest version unless you pin them:
 `--build-arg CLAUDE_CODE_VERSION=… --build-arg CODEX_VERSION=… --build-arg OPENCODE_VERSION=… --build-arg COPILOT_VERSION=…`.
-Rebuild the image to update them; they don't update themselves inside it.
+A release image records its CLI version and full source commit in OCI labels. Use
+`mbus --version` for the CLI version and `mbus doctor` for the full source revision
+and update policy. The agent CLIs have their own versions.
+
+To update mbus or the agent CLIs, rebuild or obtain a replacement image and
+redeploy the runner with it. Image-managed mbus refuses `mbus update`,
+`mbus update --check`, and remote in-place updates.
 
 ## Configure
 
@@ -190,20 +200,30 @@ digest, runner machine ID, task IDs and returned commit SHAs. Keep evidence free
 `infra/runner-aci.bicep` provisions a Linux ACI runner that enrolls itself in Azure. You do not
 run an enrollment container on your computer or copy a machine private key into a deployment.
 Use a runner image that includes `docker/runner/aci-bootstrap.mjs` and the pending-enrollment
-checkpoint support. The image supplied for deployment must include this change; an older image
-built from `mbus-v1.1.0` does not contain this bootstrap. Official GHCR distribution is tracked
-separately in issue #17.
+checkpoint support. Images built from `mbus-v1.1.0` predate this bootstrap.
+
+For a release whose notes list a verified public Linux amd64 runner image, copy the
+**Digest pin** from the notes into `runnerImage`. It has the form
+`ghcr.io/unifinity-software/messagebus-runner@sha256:<digest>`. Leave
+`containerRegistryName` empty. This path uses the published image directly. To
+upgrade, select the digest from the newer release and redeploy with the same
+runner name, resource group and identity storage. For a custom image, supply
+its own tag or digest and set `containerRegistryName` for a private ACR.
+
+The template defaults to the official `1.3.0` image. Use that default once the
+release notes list a successful public image, or choose a verified digest pin.
+You can supply a custom image before the first public release.
 
 ### Deploy in Azure
 
 Choose a distinct container group name for each runner. Deploy the template through Azure Cloud
-Shell or your deployment pipeline, using an image already in your registry. The default is one
+Shell or your deployment pipeline. The default is one
 mbus task slot, two CPU cores, four GiB of memory and no public ingress. Agents run as UID 10001.
 
 | Parameter | Value |
 |---|---|
 | `runnerName` | Your ACI container group name. |
-| `runnerImage` | The supplied image tag or, preferably, its pinned digest. |
+| `runnerImage` | Defaults to the official `1.3.0` tag. Set a verified digest to pin the exact image, or supply a custom image. |
 | `containerRegistryName` | Existing private ACR name in the resource group; empty for a public image. |
 | `serverUrl` | Your reachable mbus server address. |
 | `machineName` | How the runner appears in Fleet; defaults to the container group name. |

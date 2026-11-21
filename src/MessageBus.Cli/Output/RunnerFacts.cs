@@ -16,6 +16,8 @@ public static class RunnerFacts
     public static IEnumerable<SummaryRow> Identity(string version, Uri? server, string machineName, string? location, string? workspace)
     {
         yield return new("Version", version);
+        if (Hosting.CliHost.SourceRevision is { } revision)
+            yield return new("Source revision", revision);
         yield return server is null
             ? new("Server", "not signed in", SummaryTone.Bad)
             : new("Server", server.AbsoluteUri.TrimEnd('/'));

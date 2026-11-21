@@ -33,7 +33,7 @@ jobs:
             -f version="$version" -f tagged_commit="$GITHUB_SHA"
 
   prepare:
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && vars.MBUS_RELEASE_ENABLED == 'true' && !github.event.repository.private
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.ref_protected && github.repository == 'Unifinity-Software/messagebus-client' && vars.MBUS_RELEASE_ENABLED == 'true' && !github.event.repository.private
     runs-on: ubuntu-latest
     concurrency:
       group: mbus-prepare-${{ inputs.version }}
@@ -48,6 +48,9 @@ jobs:
       version: ${{ steps.eligible.outputs.version }}
       attempt: ${{ steps.eligible.outputs.attempt }}
       artifact_id: ${{ steps.artifact.outputs.artifact-id }}
+      image_artifact_id: ${{ steps.image-artifact.outputs.artifact-id }}
+      image_digest: ${{ steps.image.outputs.digest }}
+      image_versions: ${{ steps.image.outputs.versions }}
     steps:
       - name: Verify merged main commit, Build and disclosure status
         id: eligible
@@ -60,7 +63,7 @@ jobs:
             const repo = context.repo;
             const version = process.env.VERSION;
             const sha = process.env.SHA || context.sha;
-            if (!/^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[a-z0-9-]+(\.[a-z0-9-]+)*)?$/.test(version)) {
+            if (version.length > 128 || !/^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[a-z0-9-]+(\.[a-z0-9-]+)*)?$/.test(version)) {
               throw new Error('Use a normalized SemVer version.');
             }
             if (!/^[a-f0-9]{40}$/.test(sha)) {
@@ -140,10 +143,64 @@ jobs:
           set -euo pipefail
           python3 eng/check-release-version.py "$VERSION"
           dotnet pack MessageBus.Client.slnx -c Release -p:Version="$VERSION" \
-            -p:RepositoryCommit="$(git rev-parse HEAD)" -o artifacts/packages
+            -p:MbusReleaseBuild=true -p:RepositoryCommit="$(git rev-parse HEAD)" -o artifacts/packages
           bash eng/verify-packages.sh artifacts/packages "$VERSION"
-      - name: Check the complete runner image
-        run: docker build -f docker/runner/Dockerfile .
+          python3 eng/check-packages.py artifacts/packages "$VERSION" "$(git rev-parse HEAD)"
+      - uses: docker/setup-buildx-action@v3
+      - name: Install OCI transport
+        run: sudo apt-get update && sudo apt-get install -y skopeo
+      - name: Build the Linux amd64 OCI candidate with provenance
+        env:
+          SHA: ${{ steps.eligible.outputs.sha }}
+          VERSION: ${{ steps.eligible.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/runner
+          docker buildx build --platform linux/amd64 --provenance=mode=max \
+            --tag "ghcr.io/unifinity-software/messagebus-runner:$VERSION" \
+            --build-arg MBUS_RELEASE_VERSION="$VERSION" --build-arg MBUS_SOURCE_REVISION="$SHA" \
+            --output type=oci,dest=artifacts/runner/image.tar \
+            -f docker/runner/Dockerfile "https://github.com/$GITHUB_REPOSITORY.git#$SHA"
+      - name: Verify the staged image, provenance and harness versions
+        id: image
+        env:
+          SHA: ${{ steps.eligible.outputs.sha }}
+          VERSION: ${{ steps.eligible.outputs.version }}
+        run: |
+          set -euo pipefail
+          bash eng/verify-runner-image.sh artifacts/runner/image.tar "$VERSION" "$SHA" > "$RUNNER_TEMP/runner-versions"
+          manifest=$(skopeo inspect --raw oci-archive:artifacts/runner/image.tar | sha256sum)
+          printf 'digest=sha256:%s\n' "${manifest%% *}" >> "$GITHUB_OUTPUT"
+          printf 'versions=%s\n' "$(paste -sd ';' "$RUNNER_TEMP/runner-versions")" >> "$GITHUB_OUTPUT"
+      - name: Report high and critical vulnerabilities in the staged runner
+        uses: aquasecurity/trivy-action@v0.36.0
+        env:
+          TRIVY_IMAGE_SRC: docker
+        with:
+          image-ref: mbus-runner:candidate
+          scan-type: image
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          cache: 'false'
+      - name: Reject fixable high and critical vulnerabilities and secret findings
+        uses: aquasecurity/trivy-action@v0.36.0
+        env:
+          TRIVY_IMAGE_SRC: docker
+        with:
+          image-ref: mbus-runner:candidate
+          scan-type: image
+          scanners: vuln,secret
+          severity: HIGH,CRITICAL
+          ignore-unfixed: 'true'
+          exit-code: '1'
+          cache: 'false'
+      - uses: actions/upload-artifact@v4
+        id: image-artifact
+        with:
+          name: release-runner-${{ github.run_attempt }}
+          path: artifacts/runner/image.tar
+          compression-level: 0
+          if-no-files-found: error
       - uses: actions/upload-artifact@v4
         id: artifact
         with:
@@ -153,8 +210,49 @@ jobs:
             artifacts/packages/*.snupkg
           if-no-files-found: error
 
-  publish:
+  promote-image:
     needs: prepare
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.ref_protected && github.repository == 'Unifinity-Software/messagebus-client' && vars.MBUS_RELEASE_ENABLED == 'true' && !github.event.repository.private
+    runs-on: ubuntu-latest
+    environment: ghcr
+    concurrency:
+      group: mbus-ghcr-${{ needs.prepare.outputs.version }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      actions: read
+      statuses: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - name: Require the immutable OCI candidate artifact ID
+        env:
+          ARTIFACT_ID: ${{ needs.prepare.outputs.image_artifact_id }}
+        run: '[[ "$ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]'
+      - uses: actions/download-artifact@v4
+        with:
+          artifact-ids: ${{ needs.prepare.outputs.image_artifact_id }}
+          merge-multiple: true
+          path: artifacts/runner
+      - name: Install OCI transport
+        run: sudo apt-get update && sudo apt-get install -y skopeo
+      - name: Recheck Build and disclosure before image promotion
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ needs.prepare.outputs.sha }}
+        run: bash eng/check-release-status.sh "$SHA"
+      - name: Promote the verified digest and pull it anonymously
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DIGEST: ${{ needs.prepare.outputs.image_digest }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: bash eng/promote-runner-image.sh artifacts/runner/image.tar "$DIGEST" "$VERSION"
+
+  publish:
+    needs: [prepare, promote-image]
     runs-on: ubuntu-latest
     environment: nuget
     concurrency:
@@ -191,13 +289,7 @@ jobs:
         run: |
           set -euo pipefail
           [[ -n "$NUGET_USER" ]] || { echo 'Configure NUGET_USER in the nuget environment.' >&2; exit 1; }
-          passed=$(gh api --method GET "repos/$GITHUB_REPOSITORY/actions/workflows/build.yml/runs" \
-            -f branch=main -f event=push -f head_sha="$SHA" -F per_page=1 \
-            --jq '.workflow_runs[0] | .status == "completed" and .conclusion == "success"')
-          [[ "$passed" == true ]] || { echo 'The latest post-merge Build is no longer green.' >&2; exit 1; }
-          disclosure=$(gh api --paginate "repos/$GITHUB_REPOSITORY/commits/$SHA/statuses?per_page=100" \
-            --jq '.[] | select(.context == "org-strings") | .state')
-          [[ "${disclosure%%$'\n'*}" == success ]] || { echo 'The org-strings status is no longer green.' >&2; exit 1; }
+          bash eng/check-release-status.sh "$SHA"
           python3 eng/check-packages.py artifacts/packages "$VERSION" "$SHA"
       - uses: NuGet/login@v1
         id: login
@@ -238,6 +330,8 @@ jobs:
         env:
           SHA: ${{ needs.prepare.outputs.sha }}
           VERSION: ${{ needs.prepare.outputs.version }}
+          IMAGE_DIGEST: ${{ needs.prepare.outputs.image_digest }}
+          IMAGE_VERSIONS: ${{ needs.prepare.outputs.image_versions }}
         with:
           script: |
             const { createHash } = require('node:crypto');
@@ -247,6 +341,21 @@ jobs:
             const { SHA: sha, VERSION: version } = process.env;
             const tag = `mbus-v${version}`;
             const prerelease = version.includes('-');
+            const { IMAGE_DIGEST: digest, IMAGE_VERSIONS: versions } = process.env;
+            if (!/^sha256:[a-f0-9]{64}$/.test(digest) ||
+                !versions?.startsWith(`mbus ${version};claude `) ||
+                !/;claude [0-9.]+;codex [0-9.]+;opencode [0-9.]+;copilot [0-9.]+$/.test(versions)) {
+              throw new Error('Missing verified runner image metadata.');
+            }
+            const image = 'ghcr.io/unifinity-software/messagebus-runner';
+            const imageNotes = [
+              '## Official runner image (Linux amd64)',
+              '',
+              `- Tag: \`${image}:${version}\``,
+              `- Digest pin: \`${image}@${digest}\``,
+              `- Source: \`${sha}\``,
+              ...versions.split(';').map(cli => `- \`${cli}\``)
+            ].join('\n');
             const directory = 'artifacts/packages';
             const filenames = readdirSync(directory).sort();
             if (filenames.filter(name => name.endsWith('.nupkg')).length !== 8 ||
@@ -291,10 +400,11 @@ jobs:
             await verifyTag(!release);
             if (!release) {
               ({ data: release } = await github.rest.repos.createRelease({
-                ...repo, tag_name: tag, target_commitish: sha, draft: true, prerelease, generate_release_notes: true
+                ...repo, tag_name: tag, target_commitish: sha, draft: true, prerelease, body: imageNotes, generate_release_notes: true
               }));
             }
-            if (release.prerelease !== prerelease || (release.draft && release.target_commitish !== sha)) {
+            if (release.prerelease !== prerelease || (release.draft && release.target_commitish !== sha) ||
+                !release.body?.includes(imageNotes)) {
               throw new Error('The existing release has different candidate metadata.');
             }
 

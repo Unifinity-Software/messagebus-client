@@ -51,7 +51,7 @@ a bootstrap ownership check and never authorizes mbus lifecycle management.
   service sends it only to a client whose version (`X-Mbus-Client-Version`) or reported capabilities say it can
   handle it.
 - **Minimum version.** The service reports the oldest `mbus` it accepts in the response header
-  `X-Mbus-Min-Client-Version`. A runner older than that is closed with code 4426 and updates itself (see
+  `X-Mbus-Min-Client-Version`. A runner older than that is closed with code 4426 (see
   [Updates](#updates)).
 - **Errors** carry a short machine-readable code in `X-Mbus-Error` (MCP errors: `McpErrorCodes`).
 
@@ -655,7 +655,7 @@ Timing and close codes come from the public `Groundhog.Protocol` package: the se
 | 1001 | The service is restarting | Reconnects with backoff |
 | `CredentialRevoked`, `MachineRemoved`, `SessionReplaced` | Revoked, removed from the workspace, or a newer session took over | Stops; never reconnects |
 | `TooManyConnections` | Too many connections for this machine | Reconnects with backoff |
-| 4426 | This `mbus` is older than the service accepts | Updates, then reconnects |
+| 4426 | This `mbus` is older than the service accepts | Self-updating runners update and reconnect. Image-managed runners require redeployment. |
 | 4403 | The machine waits for an admin's approval | Reconnects later with a long backoff |
 
 ## End-to-end encryption
@@ -732,6 +732,11 @@ work, lets running tasks finish, reports each stage on `/api/runner/update-progr
 For a .NET tool, the runner compares the requested release against the normalized NuGet package version from the
 store entry containing its running assembly. It uses package versions for update attempts, recovery and outcome
 reports. The assembly's informational version remains available in the runner's inventory and `mbus --version`.
+
+Image-managed runners report `updates.canUpdate: false` and an `updates.reason` in inventory
+with the replacement image and redeploy instructions. They answer `POST /update` with an
+`ended` progress report and a `not-installed` outcome using that reason. Close code 4426
+requires the operator to redeploy with a supported image.
 
 ## Making a change to the protocol
 

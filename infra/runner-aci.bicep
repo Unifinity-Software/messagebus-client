@@ -6,8 +6,9 @@ param location string = resourceGroup().location
 @description('Container group name. Use a distinct enrolled identity for each group.')
 param runnerName string = 'mbus-runner'
 
-@description('Linux amd64 runner image built from a release, pinned by tag or digest.')
-param runnerImage string
+@description('Linux amd64 runner image pinned by tag or digest. Defaults to the first official public release.')
+@minLength(1)
+param runnerImage string = 'ghcr.io/unifinity-software/messagebus-runner:1.3.0'
 
 @description('Existing registry in this resource group. Empty for a public image.')
 param containerRegistryName string = ''

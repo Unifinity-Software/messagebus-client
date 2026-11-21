@@ -141,6 +141,8 @@ public sealed class TestMachine : IDisposable
         return path;
     }
 
+    internal bool ImageManaged { get; set; } = CliHost.IsRunnerImage;
+
     public async Task<CliRun> RunAsync(params string[] args)
     {
         var output = new StringWriter();
@@ -154,6 +156,7 @@ public sealed class TestMachine : IDisposable
     public CliHost CreateHost(TextWriter? output = null, TextWriter? error = null, bool terminal = false) =>
         new()
         {
+            ImageManaged = ImageManaged,
             Out = output ?? TextWriter.Null,
             OutIsTerminal = terminal,
             Error = error ?? TextWriter.Null,
