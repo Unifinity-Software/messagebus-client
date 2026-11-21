@@ -139,11 +139,15 @@ public sealed class OpenCodeRuntimeProofTests
             var modelBaseline = cloud.Models.Count;
             await Save("counter-baseline.json", new { requests = baseline, inference = modelBaseline });
 
-            var selectionConfig = JsonNode.Parse(OpenCodeSettings.Parse(OpenCodeLocalTests.Config(v2: false)).Select(null).ConfigJson)!;
+            // Set the owned endpoint before Select pins provider options into the model snapshot.
+            var selectionConfig = JsonNode.Parse(OpenCodeLocalTests.Config(v2: false),
+                documentOptions: new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true })!;
             selectionConfig["provider"]!["local"]!["options"]!["baseURL"] = local.Url + "/v1";
             selectionConfig["provider"]!["local"]!["models"]!["publisher/coder"]!["id"] = OpenCodeProofEndpoint.ApiId;
             selectionConfig["small_model"] = "proof-cloud/paid";
             env[OpenCodeAdapter.ConfigContentVariable] = selectionConfig.ToJsonString();
+            Assert.Equal(new Uri(local.Url + "/v1"),
+                OpenCodeSettings.Read(n => env.GetValueOrDefault(n), home, OpenCodeLocalRuntime.Version).Select(null).Endpoint);
             var selected = await OpenCodeAdapter.ForRunner(OpenCodeLocalRuntime.Version, n => env.GetValueOrDefault(n), home)
                 .SelectAsync(null, TestContext.Current.CancellationToken);
             Assert.Null(selected.Error);
