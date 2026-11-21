@@ -92,7 +92,13 @@ public sealed class RunCodeReturnTests
         server.On(HttpMethod.Get, "/api/w/ws_test/keys/rotation", _ => FakeServer.Json<IReadOnlyList<KeyRotationState>>([new() { Scope = key.Scope, Owner = key.Owner, Key = key, RotationNeeded = rotationNeeded }]));
         using var keys = new MachineKeys(http, "ws_test", null, run.Root, TextWriter.Null, h.Time);
         byte[]? uploaded = null;
-        server.On(HttpMethod.Put, "/upload", r => { uploaded = r.Body; return new HttpResponseMessage(HttpStatusCode.Created); });
+        server.On(HttpMethod.Put, "/upload", r =>
+        {
+            Assert.Null(r.Header("Authorization"));
+            Assert.DoesNotContain(r.Headers.Keys, name => name.StartsWith("X-Mbus-", StringComparison.OrdinalIgnoreCase));
+            uploaded = r.Body;
+            return new HttpResponseMessage(HttpStatusCode.Created);
+        });
         SettleInput? sent = null;
         var settleCalls = 0;
         var acceptedCalls = 0;
@@ -135,7 +141,7 @@ public sealed class RunCodeReturnTests
 
         if (rotationNeeded)
         {
-            await Assert.ThrowsAsync<McpToolException>(() => RunCodeReturn.ReturnAsync(http, http, "ws_test", run, task, branch, baseCommit, TestContext.Current.CancellationToken, keys.RecipientAsync));
+            await Assert.ThrowsAsync<McpToolException>(() => RunCodeReturn.ReturnAsync(http, server.Links, "ws_test", run, task, branch, baseCommit, TestContext.Current.CancellationToken, keys.RecipientAsync));
             Assert.DoesNotContain(server.Requests, r => r.Method == HttpMethod.Put);
             Assert.True(Directory.Exists(run.WorkTree));
             return;
@@ -148,7 +154,7 @@ public sealed class RunCodeReturnTests
         if (staleAttempt)
         {
             var verified = run.VerifiedReturnRevision;
-            var error = await Assert.ThrowsAsync<McpToolException>(() => RunCodeReturn.ReturnAsync(http, http, "ws_test", run, task, branch, baseCommit,
+            var error = await Assert.ThrowsAsync<McpToolException>(() => RunCodeReturn.ReturnAsync(http, server.Links, "ws_test", run, task, branch, baseCommit,
                 TestContext.Current.CancellationToken, keys.RecipientAsync));
             Assert.Equal(McpErrorCodes.Conflict, error.Error.Code);
             Assert.NotNull(uploaded);
@@ -159,7 +165,7 @@ public sealed class RunCodeReturnTests
             return;
         }
 
-        Assert.True(await RunCodeReturn.ReturnAsync(http, http, "ws_test", run, task, branch, baseCommit, TestContext.Current.CancellationToken, keys.RecipientAsync));
+        Assert.True(await RunCodeReturn.ReturnAsync(http, server.Links, "ws_test", run, task, branch, baseCommit, TestContext.Current.CancellationToken, keys.RecipientAsync));
         Assert.Equal(2, server.Requests.Count(r => r.Uri.AbsolutePath == "/api/server"));
         Assert.NotNull(uploaded);
         Assert.NotNull(sent);
@@ -183,7 +189,7 @@ public sealed class RunCodeReturnTests
             Assert.Equal(expected + " refs/heads/" + branch, heads.Trim());
             // A moved branch must fail before a second upload or reply.
             await Git.RunAsync(run.WorkTree, ["update-ref", "refs/heads/" + branch, baseCommit!]);
-            Assert.False(await RunCodeReturn.ReturnAsync(http, http, "ws_test", run, task, branch, baseCommit,
+            Assert.False(await RunCodeReturn.ReturnAsync(http, server.Links, "ws_test", run, task, branch, baseCommit,
                 TestContext.Current.CancellationToken, keys.RecipientAsync));
             Assert.Single(server.Requests, r => r.Method == HttpMethod.Put);
             return;
@@ -197,7 +203,7 @@ public sealed class RunCodeReturnTests
             Refs = [], Attachments = sent.Attachments,
         };
         server.On(HttpMethod.Get, "/api/w/ws_test/threads/thr_dlv_code/messages", _ => Json("[" + MessageBusJson.Serialize(accepted) + "]"));
-        Assert.True(await RunCodeReturn.ReturnAsync(http, http, "ws_test", run, task, branch, baseCommit, TestContext.Current.CancellationToken, keys.RecipientAsync));
+        Assert.True(await RunCodeReturn.ReturnAsync(http, server.Links, "ws_test", run, task, branch, baseCommit, TestContext.Current.CancellationToken, keys.RecipientAsync));
         Assert.Single(server.Requests, r => r.Method == HttpMethod.Put);
     }
 }

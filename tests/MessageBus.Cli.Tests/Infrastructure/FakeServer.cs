@@ -21,6 +21,16 @@ public sealed record RecordedRequest(HttpMethod Method, Uri Uri, IReadOnlyDictio
 /// </summary>
 public sealed class FakeServer : HttpMessageHandler
 {
+    private HttpClient? _links;
+    // A distinct client prevents fixture defaults or authentication handlers being reused for signed links.
+    public HttpClient Links => _links ??= new HttpClient(this, disposeHandler: false);
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing) _links?.Dispose();
+        base.Dispose(disposing);
+    }
+
     public const string Url = "http://127.0.0.1:5200";
 
     private readonly Dictionary<string, Func<RecordedRequest, HttpResponseMessage>> _routes = new(StringComparer.Ordinal);
