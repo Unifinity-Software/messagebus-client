@@ -21,6 +21,53 @@ namespace MessageBus.Cli.Tests;
 public sealed class LoginTests
 {
     [Theory]
+    [InlineData(false, """{"error":"no-workspace","message":"Open the dashboard, join or create a workspace, and retry."}""", null,
+        "Open the dashboard, join or create a workspace, and retry.")]
+    [InlineData(true, """{"code":"no-workspace","message":"Open the dashboard, join or create a workspace, and retry."}""", null,
+        "Open the dashboard, join or create a workspace, and retry.")]
+    [InlineData(false, "", "no-workspace",
+        "Your account doesn't belong to a workspace yet. Open the dashboard, join or create a workspace, then run mbus login again.")]
+    [InlineData(true, """{"error":"no-workspace","title":"Forbidden","message":" "}""", null,
+        "Your account doesn't belong to a workspace yet. Open the dashboard, join or create a workspace, then run mbus login again.")]
+    [InlineData(false, """{"message":"Contact an administrator."}""", "forbidden",
+        "Couldn't enroll this machine: you don't have permission in this workspace. Contact an administrator. (forbidden)")]
+    [InlineData(true, """{"message":"Contact an administrator."}""", "forbidden",
+        "Couldn't list your workspaces: you don't have permission in this workspace. Contact an administrator. (forbidden)")]
+    public async Task Login_shows_the_appropriate_guidance_for_a_forbidden_response(
+        bool duringWorkspaceLookup, string body, string? code, string expected)
+    {
+        using var machine = new TestMachine();
+        HttpResponseMessage Forbidden()
+        {
+            var response = new HttpResponseMessage(HttpStatusCode.Forbidden)
+            {
+                Content = new StringContent(body, Encoding.UTF8, "application/json"),
+            };
+            if (code is not null) response.Headers.Add(MbusHeaders.Error, code);
+            return response;
+        }
+
+        machine.Server
+            .On(HttpMethod.Post, "/api/cli/auth/start", _ => Text(
+                """{"deviceCode":"mbcd_fixture","userCode":"BCDF-GHJK","expiresIn":600,"interval":5}"""))
+            .On(HttpMethod.Post, "/api/cli/auth/token", _ => Text(
+                """{"state":"approved","accessToken":"mbca_fixture","refreshToken":"mbcr_fixture","expiresIn":3600,"account":{"name":"Ada"}}"""))
+            .On(HttpMethod.Post, ApiRoutes.MachineEnroll, _ => duringWorkspaceLookup
+                ? new HttpResponseMessage(HttpStatusCode.BadRequest)
+                {
+                    Content = new StringContent("""{"error":"workspace-required"}""", Encoding.UTF8, "application/json"),
+                }
+                : Forbidden())
+            .On(HttpMethod.Get, ApiRoutes.MachineWorkspaces, _ => Forbidden());
+
+        var run = await machine.RunAsync("login", "--server", FakeServer.Url);
+
+        Assert.Equal(1, run.ExitCode);
+        Assert.Equal(expected, run.Error.Trim());
+        Assert.Equal(duringWorkspaceLookup, machine.Server.Requests.Any(r => r.Uri.AbsolutePath == ApiRoutes.MachineWorkspaces));
+    }
+
+    [Theory]
     [InlineData("")]
     [InlineData(""", "capabilities":["approvalAffectedV1","settleAttemptV1"]""")]
     [InlineData(""", "capabilities":["approvalAffectedV1","settleAttemptV1","roleProposalsV1"], "roleProposals":{"version":1,"baselineVersion":"role-proposal-readonly-v1","normalizerVersion":"role-definition-v1"}""")]
