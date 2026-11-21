@@ -225,7 +225,11 @@ sandbox.
   also has to start its nested command sandbox. In local offline checks with
   an empty `/proc`, Claude Code 2.1.330 and GitHub Copilot CLI 1.0.114 passed
   startup. Codex 0.171.0 failed its nested sandbox probe and OpenCode 1.19.6
-  failed to start. Resumed harness sessions aren't supported in this mode.
+  failed to start. Codex also failed to load its configuration before making
+  any model request in a noninteractive test using the outer sandbox alone.
+  The same test completed against a dummy Responses API through the relay
+  with a fresh, namespace-local procfs. Codex stays unavailable on the
+  empty-proc profile. Resumed harness sessions aren't supported in this mode.
 
 `infra/runner-aci.bicep` provisions a Linux ACI runner that enrolls itself in Azure. You do not
 run an enrollment container on your computer or copy a machine private key into a deployment.
