@@ -25,6 +25,7 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=fixture.test \
 cp "$proof_root/server.crt" /usr/local/share/ca-certificates/mbus-proof.crt
 update-ca-certificates >"$proof_root/ca.log" 2>&1
 echo '127.0.0.1 fixture.test' >> /etc/hosts
+printf 'nameserver 127.0.0.1\noptions timeout:1 attempts:1\n' > /etc/resolv.conf
 id mbusproof >/dev/null 2>&1 || useradd --no-create-home mbusproof
 chown -R mbusproof:mbusproof "$proof_root"
 python3 "$source_root/scripts/proof/https-git.py" "$proof_root/served" \
@@ -40,7 +41,8 @@ runuser -u mbusproof -- env -i PATH="$PATH" HOME="$proof_root/home" \
     timeout 600 bash -euc '
         cd "$MBUS_LINUX_PROOF_ROOT/source"
         dotnet restore tests/MessageBus.Cli.Tests -p:RestoreFallbackFolders="$NUGET_FALLBACK_PACKAGES" --source "$MBUS_LINUX_PROOF_ROOT/feed"
-        dotnet test --project tests/MessageBus.Cli.Tests --no-restore \
+        dotnet build tests/MessageBus.Cli.Tests --no-restore -m:2
+        dotnet test --project tests/MessageBus.Cli.Tests --no-build --no-restore \
             -- --filter-class "*LinuxNodeImportProofTests"
     ' 2>&1 | tee "$proof_root/proof.log"
 test "$(cat "$proof_root/return.passed")" = passed
