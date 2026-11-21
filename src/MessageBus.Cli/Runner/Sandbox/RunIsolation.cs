@@ -222,6 +222,9 @@ public sealed class RunIsolation : IRunSandbox
     /// </remarks>
     public bool ConfinesAgents => _mac is not null;
 
+    // With nesting enabled Wrap does not take the unsandboxed path for agents with their own sandbox.
+    internal bool SupportsVerificationAgent => _linux is { NestingAllowed: true };
+
     /// <summary>Whether the OS stops a run from going around its network allow-list (the macOS sandbox, when its start-up check saw it work).</summary>
     public bool NetworkEnforced { get; }
 
@@ -379,12 +382,13 @@ public sealed class RunIsolation : IRunSandbox
     /// <inheritdoc />
     public async Task PrepareAsync(RunWorkspace workspace, TaskDelivery delivery, PermissionProfile profile, CancellationToken cancellationToken)
     {
-        var repository = delivery.Envelope.Refs
+        var snapshot = delivery.Verification;
+        var repository = snapshot is not null ? new Uri(snapshot.Remote) : delivery.Envelope.Refs
             .Select(RunWorkspace.RepositoryUrl)
             .Select(url => Uri.TryCreate(url, UriKind.Absolute, out var uri) && uri.Scheme == Uri.UriSchemeHttps ? uri : null)
             .FirstOrDefault(uri => uri is not null);
-        var ownerGit = _options.UseOwnerGit?.Invoke(delivery) == true;
-        var credential = repository is null || ownerGit ? null : await _options.Credentials.IssueAsync(new RepoCredentialRequest
+        var ownerGit = snapshot is null && _options.UseOwnerGit?.Invoke(delivery) == true;
+        var credential = repository is null || ownerGit || snapshot is not null ? null : await _options.Credentials.IssueAsync(new RepoCredentialRequest
         {
             DeliveryId = delivery.DeliveryId,
             WorkspaceId = delivery.Envelope.WorkspaceId,

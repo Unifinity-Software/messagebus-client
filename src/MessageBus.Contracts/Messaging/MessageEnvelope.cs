@@ -92,6 +92,9 @@ public sealed record MessageEnvelope
 
     /// <summary>The model the sender asked the task to run on (the original issue); null for the role's or agent's default.</summary>
     public string? Model { get; init; }
+
+    /// <summary>The verification request persisted by the service for this message, if any.</summary>
+    public VerificationRequest? Verification { get; init; }
 }
 
 /// <summary>
