@@ -7,6 +7,24 @@ that keep old and new versions working together.
 
 ## Compatibility rules
 
+OpenCode configured-model inventory uses existing fields only. `models`/`defaultModel` may contain configured
+OpenCode IDs (including additional slashes); `modelsPartial` remains true because configuration is not the complete
+catalog. `signedIn: true` can indicate saved cloud authentication or a loaded authless local candidate; it does not
+assert a vendor login or guarantee that every model can execute. Scans check candidates under one shared five-second
+budget. An unloaded local default does not suppress a healthy alternative. If the deadline leaves candidates
+unverified, admission is retained with a warning and selected deliveries require preflight. If every candidate fails,
+`notReady` suppresses the authless local-only agent until rescan. Saved cloud authentication remains available.
+
+Local execution is supported for pinned OpenCode 1.19.5 using an isolated run-owned single-provider/model config,
+with primary and auxiliary inference pinned to the checked LM Studio model. Repository OpenCode settings, inherited
+plugins, account/credential databases and fallback providers are excluded. Managed/system settings cause refusal,
+as do unverified versions and unsupported local runtimes, using existing `declined: "machine-not-ready"` before
+checkout/setup. Explicit cloud task selections remain available. Only the confined path with reported token use
+sets `usage.estimatedCostUsd: 0`; primary readiness alone is insufficient. Null remains unknown and positive costs
+remain positive. Coordination, reports and permitted tools may network. See [runtime evidence and native acceptance](opencode-local-runtime.md).
+No field, route, capability gate or new service behavior is required; omission behavior for older clients and services
+is unchanged.
+
 ACI inventories optionally include `deployment: { target: "azure-container-instances", azureResourceId: "..." }`.
 The original `target` stays `docker`, so existing services can still enroll and run the machine. Services that
 understand `deployment` preserve it and use its detailed target in Fleet. `MBUS_DEPLOYMENT_TARGET=aci` enables

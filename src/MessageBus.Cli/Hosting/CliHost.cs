@@ -56,6 +56,8 @@ public sealed class CliHost
     /// <summary>Handler every server call goes through; the real one is <see cref="SocketsHttpHandler"/>.</summary>
     public required Func<HttpMessageHandler> CreateHttpHandler { get; init; }
 
+    internal Func<HttpMessageHandler> CreateLocalModelHttpHandler { get; init; } = Agents.OpenCodeReadiness.Handler;
+
     /// <summary>Clock for request signatures and scan times.</summary>
     public TimeProvider Time { get; init; } = TimeProvider.System;
 
