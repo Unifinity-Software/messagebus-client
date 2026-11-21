@@ -33,7 +33,7 @@ public sealed class ServerSendGate : IDisposable
         var profile = Path.TrimEndingDirectorySeparator(Path.GetFullPath(store.Directory));
         if (OperatingSystem.IsWindows()) profile = profile.ToUpperInvariant();
         _generation = Generations.GetOrAdd((profile, Endpoint.Origin), _ => new SendGeneration());
-        _discovery = new HttpClient(ServerHttpTransport.Restrict(createDiscoveryHttpHandler()), disposeHandler: true)
+        _discovery = new HttpClient(ServerHttpTransport.Restrict(createDiscoveryHttpHandler(), anonymous: true), disposeHandler: true)
         { BaseAddress = new Uri(Endpoint.Value) };
     }
 
@@ -196,10 +196,11 @@ public sealed class ServerSendAuthorization : IDisposable
     public void Dispose() => Interlocked.Exchange(ref _disposed, 1);
 }
 
-/// <summary>Shared no-redirect, cookie-free, ambient-credential-free API transport policy.</summary>
+/// <summary>Shared no-redirect and cookie-free policy; anonymous discovery also strips proxy credentials.</summary>
 internal static class ServerHttpTransport
 {
-    internal static HttpMessageHandler Restrict(HttpMessageHandler handler)
+    internal static HttpMessageHandler Restrict(HttpMessageHandler handler, bool anonymous = false,
+        Func<System.Net.IWebProxy>? defaultProxy = null)
     {
         switch (handler)
         {
@@ -209,6 +210,8 @@ internal static class ServerHttpTransport
                 sockets.Credentials = null;
                 sockets.PreAuthenticate = false;
                 sockets.DefaultProxyCredentials = null;
+                if (anonymous && sockets.UseProxy)
+                    sockets.Proxy = MessageBus.Http.CredentialFreeProxy.Wrap(sockets.Proxy, defaultProxy);
                 break;
             case HttpClientHandler client:
                 client.AllowAutoRedirect = false;
@@ -217,9 +220,11 @@ internal static class ServerHttpTransport
                 client.Credentials = null;
                 client.PreAuthenticate = false;
                 client.DefaultProxyCredentials = null;
+                if (anonymous && client.UseProxy)
+                    client.Proxy = MessageBus.Http.CredentialFreeProxy.Wrap(client.Proxy, defaultProxy);
                 break;
             case DelegatingHandler { InnerHandler: { } inner }:
-                Restrict(inner);
+                Restrict(inner, anonymous, defaultProxy);
                 break;
         }
         return handler;

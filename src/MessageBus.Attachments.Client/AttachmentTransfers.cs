@@ -29,10 +29,14 @@ public static class AttachmentTransfers
     }
 
     /// <summary>Creates a separate long-timeout transport with no redirects, cookies or ambient credentials.</summary>
-    public static HttpClient CreateHttpClient() => Register(new HttpClient(new SocketsHttpHandler
+    public static HttpClient CreateHttpClient() => CreateHttpClient(() => HttpClient.DefaultProxy);
+
+    // Per-instance default-proxy seam keeps real transport fixtures independent of process globals.
+    internal static HttpClient CreateHttpClient(Func<System.Net.IWebProxy> defaultProxy) => Register(new HttpClient(new SocketsHttpHandler
     {
         AllowAutoRedirect = false, UseCookies = false, Credentials = null,
         PreAuthenticate = false, DefaultProxyCredentials = null,
+        Proxy = MessageBus.Http.CredentialFreeProxy.Wrap(null, defaultProxy),
     }) { Timeout = TimeSpan.FromHours(1) });
 
     private static HttpClient Register(HttpClient client)

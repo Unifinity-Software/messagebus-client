@@ -58,10 +58,14 @@ public sealed class HttpReleaseSource(HttpClient http, Uri channelUrl) : IReleas
     private static readonly ConditionalWeakTable<HttpClient, object> PublicClients = new();
 
     /// <summary>Creates a public artifact transport without redirects, cookies, default headers or ambient credentials.</summary>
-    public static HttpClient CreateHttpClient() => Register(new HttpClient(new SocketsHttpHandler
+    public static HttpClient CreateHttpClient() => CreateHttpClient(() => HttpClient.DefaultProxy);
+
+    // Per-instance default-proxy seam keeps real transport fixtures independent of process globals.
+    internal static HttpClient CreateHttpClient(Func<IWebProxy> defaultProxy) => Register(new HttpClient(new SocketsHttpHandler
     {
         AllowAutoRedirect = false, UseCookies = false, Credentials = null,
         PreAuthenticate = false, DefaultProxyCredentials = null,
+        Proxy = MessageBus.Http.CredentialFreeProxy.Wrap(null, defaultProxy),
     }));
 
     private static HttpClient Register(HttpClient client)
