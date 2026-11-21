@@ -1,3 +1,4 @@
+using MessageBus.Cli.Agents;
 using MessageBus.Cli.Runner.Agents;
 using MessageBus.Contracts.Json;
 using MessageBus.Contracts.Mcp;
@@ -338,7 +339,7 @@ internal sealed class AgentRun
                 var process = AgentProcessLaunch(_adapter, _s.Sandbox, _executable, workspace, _profile,
                     new AgentLaunchContext(prompt, workspace.PromptFile, profile, workspace.WorkTree, McpEnvironment(environment), Resume?.SessionId, Delivery.Model,
                         CodexOnWindows: Delivery.RunEnvironment.CodexOnWindows, KeepAgentTools: Delivery.RunEnvironment.KeepAgentTools ?? []),
-                    WithStoredSignIns(environment), launch =>
+                    AgentEnvironment(environment, _adapter, new SignInEnvironment(_s.Host.GetEnvironmentVariable, _s.Host.AgentEnvironment())), launch =>
                     {
                         cannotStart = launch.CannotStart;
                         sandboxSettleNote = launch.SettleNote;
@@ -371,7 +372,9 @@ internal sealed class AgentRun
                 // A long step (a build, a test run, a slow model turn) prints nothing for minutes: say it is still going (the original issue).
                 var agentStarted = _s.Time.GetUtcNow();
                 using var stillRunning = _s.Time.CreateTimer(_ => StillRunning(agentStarted), null, _s.Options.StillRunningInterval, _s.Options.StillRunningInterval);
-                using var agent = AgentProcess.Start(process, line => OnOutput(parser, line), _s.Options.LogTailLines);
+                var filterOutput = _adapter.Kind == AgentKind.Codex
+                    ? CodexAuthentication.RedactOutput(process.Environment.GetValueOrDefault(CodexAuthentication.CodexKey)) : null;
+                using var agent = AgentProcess.Start(process, line => OnOutput(parser, line), _s.Options.LogTailLines, filterOutput);
                 _s.Sandbox.Started(workspace, agent.Id);
                 using (_stop.Token.Register(agent.Kill))
                 {
@@ -389,6 +392,11 @@ internal sealed class AgentRun
                 QueueCapacity(parser.Capacity);
                 await _capacityChain.ConfigureAwait(false);
                 tail = agent.Tail();
+                if (_adapter.Kind == AgentKind.Codex && (exitCode != 0 || outcome.ReportedError)
+                    && CodexAuthentication.Refusal(outcome, tail) is { } refusal)
+                {
+                    outcome = outcome with { ReportedError = true, ErrorText = refusal };
+                }
                 if (verifier is null)
                 {
                     await SendKeptAnswerAsync(workspace).ConfigureAwait(false);
@@ -842,15 +850,21 @@ internal sealed class AgentRun
     /// setup command and checkout never get them). One the runner's own environment sets is left to it: what the person
     /// started this runner with wins over what an earlier install stored.
     /// </summary>
-    private Dictionary<string, string?> WithStoredSignIns(Dictionary<string, string?> environment)
+    internal static Dictionary<string, string?> AgentEnvironment(Dictionary<string, string?> environment, IAgentAdapter adapter, SignInEnvironment signIns)
     {
         var merged = new Dictionary<string, string?>(environment, environment.Comparer);
-        foreach (var (name, value) in _s.Host.AgentEnvironment())
+        foreach (var (name, value) in signIns.Added)
         {
-            if (string.IsNullOrWhiteSpace(_s.Host.GetEnvironmentVariable(name)) && !merged.ContainsKey(name))
-            {
-                merged[name] = value;
-            }
+            if (!CodexAuthentication.IsKeyVariable(name)) merged.TryAdd(name, value);
+        }
+        if (adapter.Kind == AgentKind.Codex && CodexAuthentication.ReadKey(signIns.Get) is { } key)
+        {
+            merged[CodexAuthentication.CodexKey] = key;
+        }
+        else if (adapter is OpenCodeAdapter { LocalEndpoint: null } && signIns.Get(CodexAuthentication.OpenAiKey) is { } providerKey)
+        {
+            // OpenCode's cloud provider already accepts OPENAI_API_KEY. Local inference receives neither variable.
+            merged[CodexAuthentication.OpenAiKey] = providerKey;
         }
         return merged;
     }
@@ -865,6 +879,7 @@ internal sealed class AgentRun
         var launch = adapter.BuildLaunch(context with
         {
             RunnerSandboxed = sandbox.ConfinesAgents, RunnerIsolationEnabled = sandbox.IsolationEnabled, RunDirectory = workspace.Root,
+            UsesCodexEnvironmentKey = environment.ContainsKey(CodexAuthentication.CodexKey),
         });
         onLaunch?.Invoke(launch);
         return sandbox.Wrap(new ProcessLaunch

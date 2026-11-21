@@ -49,7 +49,7 @@ internal static partial class AgentScanner
             SignInChecks.ClaudeAsync),
         new(AgentKind.Codex, "codex", "openai",
             (loc, _) => CodexTomlConfig.HasMbus(loc.CodexConfig),
-            (loc, env) => HasAny(env, "OPENAI_API_KEY", "CODEX_API_KEY") || File.Exists(loc.CodexAuth),
+            (loc, _) => File.Exists(loc.CodexAuth),
             SignInChecks.CodexAsync),
         new(AgentKind.Copilot, "copilot", "github",
             (loc, _) => JsonConfigFile.HasEntry(loc.CopilotMcpConfig, "mcpServers"),

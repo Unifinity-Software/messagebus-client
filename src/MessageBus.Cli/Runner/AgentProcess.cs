@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Text;
+using MessageBus.Cli.Agents;
 
 namespace MessageBus.Cli.Runner;
 
@@ -39,12 +40,12 @@ public sealed class AgentProcess : IDisposable
     private readonly Queue<string> _tail = new();
     private readonly int _tailLines;
 
-    private AgentProcess(Process process, Action<string>? onOutputLine, int tailLines, string? input)
+    private AgentProcess(Process process, Action<string>? onOutputLine, int tailLines, string? input, Func<string, string>? filterOutput)
     {
         _process = process;
         _tailLines = tailLines;
-        var stdout = Task.Run(() => PumpAsync(process.StandardOutput, onOutputLine));
-        var stderr = Task.Run(() => PumpAsync(process.StandardError, null));
+        var stdout = Task.Run(() => PumpAsync(process.StandardOutput, onOutputLine, filterOutput));
+        var stderr = Task.Run(() => PumpAsync(process.StandardError, null, filterOutput));
         _readers = Task.WhenAll(stdout, stderr);
         _ = WriteInputAsync(process.StandardInput, input);
     }
@@ -57,7 +58,10 @@ public sealed class AgentProcess : IDisposable
     /// <param name="onOutputLine">Called for each stdout line, on a background thread.</param>
     /// <param name="tailLines">How many of the last output lines (stdout and stderr) to keep.</param>
     /// <exception cref="Win32Exception">The executable couldn't be started.</exception>
-    public static AgentProcess Start(ProcessLaunch launch, Action<string>? onOutputLine = null, int tailLines = 200)
+    public static AgentProcess Start(ProcessLaunch launch, Action<string>? onOutputLine = null, int tailLines = 200) =>
+        Start(launch, onOutputLine, tailLines, filterOutput: null);
+
+    internal static AgentProcess Start(ProcessLaunch launch, Action<string>? onOutputLine, int tailLines, Func<string, string>? filterOutput)
     {
         var info = new ProcessStartInfo
         {
@@ -102,6 +106,7 @@ public sealed class AgentProcess : IDisposable
                 info.ArgumentList.Add(arg);
             }
         }
+        CodexAuthentication.RemoveKeys(info.Environment);
         foreach (var (name, value) in launch.Environment)
         {
             if (value is null)
@@ -115,7 +120,7 @@ public sealed class AgentProcess : IDisposable
         }
 
         var process = Process.Start(info) ?? throw new Win32Exception($"Couldn't start {launch.FileName}.");
-        return new AgentProcess(process, onOutputLine, tailLines, launch.StandardInput);
+        return new AgentProcess(process, onOutputLine, tailLines, launch.StandardInput, filterOutput);
     }
 
     /// <summary>
@@ -180,12 +185,13 @@ public sealed class AgentProcess : IDisposable
                 Environment = environment ?? new Dictionary<string, string?>(),
             };
 
-    private async Task PumpAsync(StreamReader reader, Action<string>? onLine)
+    private async Task PumpAsync(StreamReader reader, Action<string>? onLine, Func<string, string>? filterOutput)
     {
         try
         {
             while (await reader.ReadLineAsync().ConfigureAwait(false) is { } line)
             {
+                line = filterOutput?.Invoke(line) ?? line;
                 lock (_tail)
                 {
                     _tail.Enqueue(line);

@@ -292,6 +292,22 @@ public sealed class DoctorTests
     }
 
     [Fact]
+    public async Task A_Codex_environment_key_is_configuration_and_the_doctor_names_the_model_check()
+    {
+        using var machine = new TestMachine();
+        machine.Env["OPENAI_API_KEY"] = "fixture-configured";
+        machine.InstallFake("git", new("git version 2.50.1"));
+        machine.InstallFake("codex", new("codex-cli 0.169.0"), new Dictionary<string, FakeAnswer> { ["login"] = new("Not logged in", 1) });
+
+        var inventory = await RescanAsync(machine);
+        Assert.Contains("agent:codex", inventory.Capabilities);
+        var doctor = await machine.RunAsync("doctor");
+        Assert.Contains("credentials configured. Model access is unverified.", doctor.Output);
+        Assert.Contains("doctor --smoke --agent codex", doctor.Output);
+        Assert.DoesNotContain("fixture-configured", doctor.Output);
+    }
+
+    [Fact]
     public async Task Doctor_says_when_another_mbus_is_first_on_PATH_and_names_this_one_in_its_advice()
     {
         // the original issue: an old dotnet tool install on PATH, and the installer's mbus (not on PATH) running.

@@ -107,7 +107,9 @@ public static class RunnerFacts
             var roles = Roles(agent.Kind, registry) is { } held ? "· " + held : "";
             yield return agent.NotReady is { } problem
                 ? new(name, roles.Length > 0 ? $"{roles}\n{problem}" : problem, SummaryTone.Bad, roles.Length > 0 ? "not ready" : "not ready:")
-                : new(name, roles, SummaryTone.Good, "ready");
+                : agent.Kind == AgentKind.Codex
+                    ? new(name, roles, SummaryTone.Note, agent.SignedIn ? "model access unverified" : "credentials missing")
+                    : new(name, roles, SummaryTone.Good, "ready");
         }
         if (!any)
         {

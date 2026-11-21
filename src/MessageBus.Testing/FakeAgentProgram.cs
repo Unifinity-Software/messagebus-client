@@ -131,6 +131,17 @@ public static class FakeAgentProgram
             stdout.Flush();
             return 1;
         }
+        if (codex && mode is "codex-missing-auth" or "codex-ineligible")
+        {
+            var error = mode == "codex-missing-auth"
+                ? "unexpected status 401 Unauthorized: Missing bearer or basic authentication"
+                : "Codex cannot be used by an organization enrolled in the monthly API Credits benefit with ChatGPT subscriptions.";
+            // Exercise both the JSON event and stderr paths with a deliberately echoed test value.
+            var diagnostic = error + " Diagnostic: " + Environment.GetEnvironmentVariable("CODEX_API_KEY");
+            if (mode == "codex-missing-auth") Console.Error.WriteLine(diagnostic);
+            else Line(new { type = "turn.failed", error = new { message = diagnostic } });
+            return 1;
+        }
         if (mode == "orphan")
         {
             // Started the way a daemon escapes its parent (on Windows through the shell, so it doesn't hold

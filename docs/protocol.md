@@ -7,6 +7,10 @@ that keep old and new versions working together.
 
 ## Compatibility rules
 
+For Codex, `signedIn` describes local credential configuration. The existing `agent:codex` capability permits
+dispatch before a model request has verified access. A provider refusal before model use can clear that capability
+and populate `notReady` using the existing machine-not-ready handling.
+
 OpenCode configured-model inventory uses existing fields only. `models`/`defaultModel` may contain configured
 OpenCode IDs (including additional slashes); `modelsPartial` remains true because configuration is not the complete
 catalog. `signedIn: true` can indicate saved cloud authentication or a loaded authless local candidate; it does not

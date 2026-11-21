@@ -91,10 +91,14 @@ internal static class SignInChecks
             : $"Claude Code isn't signed in. Fix: run claude and sign in with /login, or run claude setup-token and set {ClaudeTokenVariable} to that token where mbus runner starts; then mbus connect --rescan.";
     }
 
-    /// <summary><c>codex login status</c>: "Logged in using …" and exit 0 when signed in; "Not logged in" and exit 1 when not.</summary>
+    /// <summary>Detect a key for <c>codex exec</c> or a saved session reported by <c>codex login status</c>. Both are local configuration checks.</summary>
     public static async Task<SignInCheck?> CodexAsync(string executable, SignInEnvironment env, CancellationToken cancellationToken)
     {
-        if (await CommandRunner.RunAsync(executable, ["login", "status"], cancellationToken, environment: env.Added).ConfigureAwait(false) is not { } run)
+        if (CodexAuthentication.ReadKey(env.Get) is not null)
+        {
+            return new SignInCheck(true);
+        }
+        if (await CommandRunner.RunAsync(executable, ["login", "status"], cancellationToken).ConfigureAwait(false) is not { } run)
         {
             return null;
         }
@@ -103,11 +107,6 @@ internal static class SignInChecks
         {
             // "Logged in using ChatGPT" / "… using an API key"; anything else is an older Codex without the subcommand.
             return run.ExitCode == 0 && said.Contains("Logged in", StringComparison.OrdinalIgnoreCase) ? new SignInCheck(true) : null;
-        }
-        // codex exec also takes an API key from the environment, which the status doesn't count.
-        if (env.Get("CODEX_API_KEY") is not null || env.Get("OPENAI_API_KEY") is not null)
-        {
-            return new SignInCheck(true);
         }
         return new SignInCheck(false, "Codex isn't signed in. Fix: run codex login on this machine (or set CODEX_API_KEY where mbus runner starts), then mbus connect --rescan.");
     }

@@ -339,6 +339,24 @@ public sealed class AgentLaunchTests : IDisposable
     }
 
     [Fact]
+    public void A_retained_Codex_tool_cannot_request_the_runners_model_key()
+    {
+        var home = Directory.CreateDirectory(Path.Combine(_run, ".codex")).FullName;
+        File.WriteAllText(Path.Combine(home, "config.toml"), """
+            [mcp_servers.tool]
+            command = "tool"
+            env_vars = ["CODEX_API_KEY"]
+            """);
+        var context = Context(new PermissionProfile { Name = PermissionProfiles.Worker }) with { KeepAgentTools = ["tool"] };
+        var adapter = new CodexAdapter(null, codexHome: home);
+
+        Assert.Null(adapter.BuildLaunch(context).CannotStart);
+        var refused = adapter.BuildLaunch(context with { UsesCodexEnvironmentKey = true });
+        Assert.Contains("may forward CODEX_API_KEY", refused.CannotStart);
+        Assert.Empty(refused.Arguments);
+    }
+
+    [Fact]
     public async Task On_windows_an_npm_installed_codex_starts_without_cmd_so_its_quoted_mbus_settings_reach_it_intact()
     {
         Assert.SkipUnless(OperatingSystem.IsWindows(), ".cmd shims are Windows only.");
