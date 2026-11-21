@@ -45,6 +45,8 @@ public static class MbusHeaders
 /// </summary>
 public static class ApiRoutes
 {
+    /// <summary>Machine proposer POST; own GET /{id} and GET /{id}/wait use original coordinator provenance.</summary>
+    public const string RoleProposals = "/api/w/{workspaceId}/role-proposals";
     /// <summary>Remote MCP endpoint (streamable HTTP) for agents that can't run <c>mbus mcp</c> (the original issue).</summary>
     public const string Mcp = "/mcp";
     /// <summary>POST <see cref="Security.MachineEnrollRequest"/>: enroll a machine (the original issue, called by <c>mbus login</c>).</summary>

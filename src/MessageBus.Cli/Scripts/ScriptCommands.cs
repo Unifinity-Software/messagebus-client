@@ -456,6 +456,7 @@ internal static class ScriptCommands
                 }
             }), ct));
         command.Subcommands.Add(describe);
+        RoleProposalCommands.AddTo(command, host, options);
         return command;
     }
 

@@ -27,6 +27,9 @@ public sealed class ScriptSession : IAsyncDisposable
     /// <summary>The client name the calls are made under (no agent kind: the machine sends as its owner, as a person's session does).</summary>
     public const string ClientName = "mbus-cli";
 
+    /// <summary>The original inbox opened or resumed by this local tool session, if any.</summary>
+    public string? CoordinatorInboxId => _tools.CoordinatorInboxId;
+
     private readonly LocalTools _tools;
     private readonly HttpClient? _ownLinks;
 
