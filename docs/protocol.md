@@ -7,16 +7,21 @@ that keep old and new versions working together.
 
 ## Compatibility rules
 
-OpenCode local-provider support uses existing fields only. `models`/`defaultModel` may contain configured OpenCode
-IDs (including additional slashes); `modelsPartial` remains true because configuration is not the complete catalog.
-`signedIn: true` means the runner can use a provider, including a verified authless local LM Studio provider; it does
-not assert a vendor login. `notReady` suppresses an unusable local-only agent. A local failure in a mixed setup with
-saved cloud authentication is a doctor warning, leaving explicit cloud selections available. A selected local
-failure is handed back with existing `declined: "machine-not-ready"`, without globally poisoning the agent kind.
-Rescans restore whole-agent availability, and every local task also checks fresh model state before checkout/setup.
-Existing `usage.estimatedCostUsd: 0` means known zero inference API spend for verified local runs with reported tokens;
-null remains unknown, and positive costs remain positive. No field, route, capability gate or new service behavior
-is required; omission behavior for older clients and services is unchanged.
+OpenCode configured-model inventory uses existing fields only. `models`/`defaultModel` may contain configured
+OpenCode IDs (including additional slashes); `modelsPartial` remains true because configuration is not the complete
+catalog. `signedIn: true` can indicate saved cloud authentication or a loaded authless local candidate; it does not
+assert a vendor login or guarantee that every model can execute. Scans check candidates under one shared five-second
+budget. An unloaded local default does not suppress a healthy alternative. If the deadline leaves candidates
+unverified, admission is retained with a warning and selected deliveries require preflight. If every candidate fails,
+`notReady` suppresses the authless local-only agent until rescan. Saved cloud authentication remains available.
+
+Local task selections are currently refused with existing `declined: "machine-not-ready"` before checkout/setup:
+primary LM Studio readiness does not establish effective confinement of auxiliary, compaction, agent/subagent and
+fallback inference across repository and managed/system configuration. This applies to OpenCode 1.19.5, 2.3.0 and
+unverified versions, even with a loaded local model. Explicit cloud task selections remain available. The runner does
+not set `usage.estimatedCostUsd: 0` from local primary readiness. Null remains unknown and positive costs remain
+positive; the existing wire meaning of an independently established zero cost is unchanged. No field, route,
+capability gate or new service behavior is required; omission behavior for older clients and services is unchanged.
 
 ACI inventories optionally include `deployment: { target: "azure-container-instances", azureResourceId: "..." }`.
 The original `target` stays `docker`, so existing services can still enroll and run the machine. Services that

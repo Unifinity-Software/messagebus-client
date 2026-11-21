@@ -47,11 +47,13 @@ public sealed class OpenCodeAdapter(string? version = null, string? configuredMo
         var settings = _readSettings(); // Fresh after approval, outside the engine lock.
         if (settings.Problem is { } problem) return (this, problem);
         if (settings.SelectionProblem(requested) is { } invalid) return (this, invalid);
+        if (settings.LocalRunProblem(requested, version) is { } unsafeLocal) return (this, unsafeLocal);
         var selection = settings.Select(requested);
         var error = await OpenCodeReadiness.CheckAsync(selection, ct, _readinessHandler).ConfigureAwait(false);
         return (new OpenCodeAdapter(version, selection.Id, mbus)
         {
-            _selection = selection with { KnownLocal = selection.Endpoint is not null && error is null },
+            // Primary readiness alone cannot establish that auxiliary inference is local.
+            _selection = selection,
         }, error);
     }
     /// <summary>The variable OpenCode reads extra settings from (JSON), over its settings files.</summary>
@@ -124,7 +126,8 @@ public sealed class OpenCodeAdapter(string? version = null, string? configuredMo
             shell = rules;
         }
         var config = _selection is { } selected ? JsonNode.Parse(selected.ConfigJson)!.AsObject() : new JsonObject();
-        // The resolved provider/model snapshot overrides repository defaults. Run permissions and MCP still win.
+        // Supply the selected primary snapshot. This is not proof of effective inference confinement:
+        // managed settings and auxiliary/agent models have their own precedence and selection paths.
         OpenCodeSettings.Merge(config, new JsonObject
         {
             ["permission"] = new JsonObject
@@ -160,10 +163,10 @@ public sealed class OpenCodeAdapter(string? version = null, string? configuredMo
     }
 
     /// <inheritdoc />
-    public IAgentOutputParser CreateParser() => new OpenCodeOutputParser(_selection?.Id ?? configuredModel, _selection?.KnownLocal == true);
+    public IAgentOutputParser CreateParser() => new OpenCodeOutputParser(_selection?.Id ?? configuredModel);
 
     /// <inheritdoc />
-    public IAgentOutputParser CreateParser(string? model) => new OpenCodeOutputParser(_selection?.Id ?? (model is { Length: > 0 } ? model : configuredModel), _selection?.KnownLocal == true);
+    public IAgentOutputParser CreateParser(string? model) => new OpenCodeOutputParser(_selection?.Id ?? (model is { Length: > 0 } ? model : configuredModel));
 
     /// <summary>OpenCode's settings folder: <c>OPENCODE_CONFIG_DIR</c>, else <c>$XDG_CONFIG_HOME/opencode</c>, else <c>~/.config/opencode</c> (on every OS).</summary>
     public static string ConfigDirectory(Func<string, string?> env, string home) =>
@@ -190,7 +193,7 @@ public sealed class OpenCodeAdapter(string? version = null, string? configuredMo
 /// (<c>provider/model</c>), unknown when they name none.
 /// </summary>
 /// <param name="configuredModel">The <c>model</c> in OpenCode's settings, if any.</param>
-/// <param name="knownLocal">The selected endpoint was verified as a loaded local LM Studio model by the runner.</param>
+/// <param name="knownLocal">The caller independently guarantees all inference is local; primary endpoint readiness alone is insufficient. The runner does not currently assert this.</param>
 public sealed class OpenCodeOutputParser(string? configuredModel, bool knownLocal = false) : IAgentOutputParser
 {
     private long _in;

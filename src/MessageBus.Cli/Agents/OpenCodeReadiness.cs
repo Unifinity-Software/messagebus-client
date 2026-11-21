@@ -81,14 +81,31 @@ internal static class OpenCodeReadiness
         Func<HttpMessageHandler>? handler = null, TimeProvider? time = null)
     {
         if (settings.Problem is { } problem) return new(cloudSignedIn, cloudSignedIn ? null : problem, cloudSignedIn ? problem : null);
-        var local = settings.Select(null);
-        if (local.Endpoint is null)
-            local = settings.Inventory.Models.Select(settings.Select).FirstOrDefault(m => m.Endpoint is not null) ?? local;
-        if (local.Endpoint is null) return new(cloudSignedIn);
-        var error = await CheckAsync(local, ct, handler, time).ConfigureAwait(false);
-        // Never suppress authenticated cloud overrides because a local default is down.
-        return error is null ? new(true, Warning: "LM Studio local provider ready (no vendor sign-in required); selected models are checked again before each run.")
-            : new(cloudSignedIn, cloudSignedIn ? null : error, cloudSignedIn ? error : null);
+        var locals = settings.LocalCandidates.ToArray();
+        if (locals.Length == 0) return new(cloudSignedIn);
+        using var timeout = new CancellationTokenSource(Budget, time ?? TimeProvider.System);
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeout.Token);
+        string? error = null;
+        for (var i = 0; i < locals.Length; i++)
+        {
+            try
+            {
+                linked.Token.ThrowIfCancellationRequested();
+                var next = await CheckAsync(locals[i], linked.Token, handler, time).ConfigureAwait(false);
+                if (next is null)
+                    return new(true, Warning: "LM Studio has a loaded local candidate (no vendor sign-in required). Local execution is refused until effective inference confinement is verified; explicit cloud selections remain available.");
+                error ??= next;
+            }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested && timeout.IsCancellationRequested)
+            {
+                // One bounded scan cannot prove untested candidates are down. Keep admission
+                // open with a warning; each selected delivery still must pass preflight.
+                return new(true, Warning: "LM Studio scan reached its shared five-second budget; candidate availability is unknown. Selected deliveries require preflight, and local execution requires verified inference confinement.");
+            }
+        }
+        // All configured local candidates failed under one shared deadline. A saved cloud
+        // login remains available regardless of local health.
+        return new(cloudSignedIn, cloudSignedIn ? null : error, cloudSignedIn ? error : null);
     }
 
     private static string Problem(string reason, string remedy) => $"LM Studio local provider: {reason}. Fix: {remedy}.";

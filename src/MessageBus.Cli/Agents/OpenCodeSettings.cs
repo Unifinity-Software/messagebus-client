@@ -16,6 +16,9 @@ internal sealed class OpenCodeSettings
     private readonly Dictionary<string, (string Shape, string Settings, JsonObject Options, string? Package)> _overlays = new(StringComparer.Ordinal);
     internal string? Problem { get; }
     internal AgentModels Inventory { get; }
+    // Readiness needs only immutable endpoint metadata, not a cloned launch overlay for every model.
+    internal IEnumerable<OpenCodeSelection> LocalCandidates => Inventory.Models
+        .Where(_models.ContainsKey).Select(id => _models[id]).Where(m => m.Endpoint is not null);
 
     private OpenCodeSettings(JsonObject root, string? problem = null)
     {
@@ -52,12 +55,12 @@ internal sealed class OpenCodeSettings
                         && uri.Scheme is "http" or "https" && uri.UserInfo.Length == 0 && uri.Query.Length == 0 && uri.Fragment.Length == 0
                         && uri.AbsolutePath.TrimEnd('/').EndsWith("/v1", StringComparison.Ordinal) ? uri : null;
                     // A compatible runtime and a trusted configured endpoint only make this a candidate.
-                    // Native LM Studio loaded-model evidence is required before readiness or known-zero cost.
+                    // Native LM Studio loaded-model evidence establishes primary readiness only.
                     var package = Str(model["package"]) ?? Str(model["npm"]) ?? Str(provider["package"]) ?? Str(provider["npm"]);
                     var compatible = package is "@ai-sdk/openai-compatible" or "@opencode/ai/providers/openai-compatible"
                         or "@opencode/ai/providers/lmstudio";
                     if (_models.TryAdd(id, new(id, Str(model["modelID"]) ?? Str(model["id"]) ?? modelId,
-                        compatible ? endpoint : null, Str(options["apiKey"]), configJson, false)))
+                        compatible ? endpoint : null, Str(options["apiKey"]), configJson)))
                         _overlays[id] = (shape.Item1, shape.Item2, options, package);
                 }
             }
@@ -91,7 +94,7 @@ internal sealed class OpenCodeSettings
             return model with { ConfigJson = snapshot.ToJsonString() };
         }
         return new(id, id is not null && id.Contains('/') ? id[(id.IndexOf('/') + 1)..] : id,
-            null, null, _root.ToJsonString(), false);
+            null, null, _root.ToJsonString());
     }
 
     internal string? SelectionProblem(string? requested)
@@ -119,6 +122,21 @@ internal sealed class OpenCodeSettings
             }
         }
         return null;
+    }
+
+    internal string? LocalRunProblem(string? requested, string? version)
+    {
+        var id = requested ?? Inventory.Default;
+        if (id is null || !_overlays.TryGetValue(id, out var overlay)) return null;
+        var loopback = Uri.TryCreate(Str(overlay.Options["baseURL"]), UriKind.Absolute, out var uri) && IsLoopback(uri.Host);
+        if (!loopback && overlay.Package != "@opencode/ai/providers/lmstudio") return null;
+
+        // Neither pinned generation makes run content authoritative over managed settings.
+        // Repository/file agents and auxiliary/fallback models also outlive a primary-model pin.
+        // Do not launch (even with a healthy primary), or infer zero cost, until every inference
+        // path can be confined in the effective configuration. Unknown runtimes fail closed too.
+        var generation = version is "1.19.5" or "2.3.0" ? $"OpenCode {version}" : "This OpenCode version";
+        return $"{generation}: local-only inference is not verified. Run settings cannot guarantee restriction of auxiliary, compaction, agent/subagent and fallback models, including repository and managed/system overrides. Local selections are refused before checkout/setup; use an explicit cloud selection or wait for verified local confinement support. Personal settings are unchanged.";
     }
 
     internal static OpenCodeSettings Read(Func<string, string?> env, string home, string? version = null)
@@ -213,4 +231,4 @@ internal sealed class OpenCodeSettings
 }
 
 /// <summary>One immutable selection, passed to readiness, launch, proxy and usage.</summary>
-internal sealed record OpenCodeSelection(string? Id, string? ApiId, Uri? Endpoint, string? ApiKey, string ConfigJson, bool KnownLocal);
+internal sealed record OpenCodeSelection(string? Id, string? ApiId, Uri? Endpoint, string? ApiKey, string ConfigJson);

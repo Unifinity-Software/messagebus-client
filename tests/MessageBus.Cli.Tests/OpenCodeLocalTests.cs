@@ -35,7 +35,7 @@ public sealed class OpenCodeLocalTests
     }
 
     [Fact]
-    public async Task Smoke_refuses_an_unavailable_local_model_before_creating_its_scratch_repository()
+    public async Task Smoke_refuses_unverified_local_confinement_before_creating_its_scratch_repository()
     {
         using var machine = new TestMachine();
         machine.Env[OpenCodeAdapter.ConfigContentVariable] = Config();
@@ -43,7 +43,7 @@ public sealed class OpenCodeLocalTests
         var smoke = new SmokeTest(new SmokeTestOptions { WorkRoot = scratch, Git = "unused-git", Sandbox = new NoSandbox() });
         var adapter = OpenCodeAdapter.ForRunner("2.3.0", machine.Env.GetValueOrDefault, machine.Home, DownHandler);
         var result = await smoke.RunAsync(new SmokeAgent(MessageBus.Contracts.Machines.AgentKind.OpenCode, adapter, "unused-opencode"), TestContext.Current.CancellationToken);
-        Assert.Contains("not reachable", result.NotReady);
+        Assert.Contains("local-only inference is not verified", result.NotReady);
         Assert.False(Directory.Exists(scratch));
     }
 
@@ -59,8 +59,8 @@ public sealed class OpenCodeLocalTests
         Assert.NotNull(OpenCodeSettings.Read(machine.Env.GetValueOrDefault, machine.Home).Problem);
     }
 
-    // OpenCode 1.19.5 (provider/options/npm/id), 2.3.0 (providers/settings/package/modelID),
-    // reduced to configured fields; native LM Studio /api/v1/models loaded-instance shape.
+    // Reader fixtures for the two configuration shapes, not proof of runtime confinement.
+    // Native LM Studio /api/v1/models loaded-instance shape.
     internal static string Config(bool v2 = true, bool cloudDefault = false) => $$$$"""
         {
           // A partial configured inventory, with a slashed model and a separate API alias.
@@ -84,7 +84,7 @@ public sealed class OpenCodeLocalTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task Both_generations_preserve_selection_alias_config_overlay_and_local_usage(bool v2)
+    public async Task Both_generations_refuse_local_execution_even_with_a_healthy_primary(bool v2)
     {
         using var machine = new TestMachine();
         machine.WriteHomeFile(".config/opencode/opencode.jsonc", Config(v2));
@@ -93,24 +93,12 @@ public sealed class OpenCodeLocalTests
         var adapter = OpenCodeAdapter.ForRunner(v2 ? "2.3.0" : "1.19.5", machine.Env.GetValueOrDefault, machine.Home,
             () => GoodHandler(requests));
         var selected = await adapter.SelectAsync(null, TestContext.Current.CancellationToken);
-        Assert.Null(selected.Error);
-        Assert.Equal(["/api/v1/models", "/v1/models"], requests);
-        var launch = selected.Adapter.BuildLaunch(Context());
-        Assert.Contains("local/publisher/coder", launch.Arguments);
-        Assert.Equal(v2, launch.Arguments.Contains("--standalone"));
-        var overlay = JsonNode.Parse(launch.Environment[OpenCodeAdapter.ConfigContentVariable]!)!;
-        Assert.Equal("environment overlay", overlay["description"]!.GetValue<string>());
-        Assert.Equal("deny", overlay["permission"]!["edit"]!.GetValue<string>());
-        Assert.NotNull(overlay["mcp"]!["other"]);
-        Assert.NotNull(v2 ? overlay["mcp"]!["servers"]!["mbus"] : overlay["mcp"]!["mbus"]);
-        var shape = v2 ? "providers" : "provider";
-        var options = v2 ? "settings" : "options";
-        Assert.Equal("http://localhost:12345/v1", overlay[shape]!["local"]!["models"]!["publisher/coder"]![options]!["baseURL"]!.GetValue<string>());
+        Assert.Contains("local-only inference is not verified", selected.Error);
+        Assert.Empty(requests);
         var parser = selected.Adapter.CreateParser();
         parser.Observe(Step);
         var usage = parser.Complete().Usage!;
-        Assert.Equal(0m, usage.EstimatedCostUsd);
-        Assert.Equal(0m, RunCosts.Estimate(usage, new TokenPrice { InputUsdPerMillion = 5, OutputUsdPerMillion = 20 }));
+        Assert.Null(usage.EstimatedCostUsd);
         Assert.Equal((11L, 6L, 3L, 1L), (usage.TokensIn, usage.TokensOut, usage.CachedTokensIn, usage.CacheWriteTokensIn));
         var inventory = OpenCodeSettings.Read(machine.Env.GetValueOrDefault, machine.Home).Inventory;
         Assert.True(inventory.Partial);
@@ -128,12 +116,16 @@ public sealed class OpenCodeLocalTests
         var adapter = OpenCodeAdapter.ForRunner("2.3.0", machine.Env.GetValueOrDefault, machine.Home, () => GoodHandler(calls));
         var id = cloudDefault ? "local/publisher/coder" : "cloud/paid";
         var selected = await adapter.SelectAsync(id, TestContext.Current.CancellationToken);
-        Assert.Null(selected.Error);
-        Assert.Contains(id, selected.Adapter.BuildLaunch(Context()).Arguments);
+        if (cloudDefault) Assert.Contains("local-only inference is not verified", selected.Error);
+        else
+        {
+            Assert.Null(selected.Error);
+            Assert.Contains(id, selected.Adapter.BuildLaunch(Context()).Arguments);
+        }
         var parser = selected.Adapter.CreateParser(id);
         parser.Observe(Step);
-        Assert.Equal(cloudDefault ? 0m : (decimal?)null, parser.Complete().Usage!.EstimatedCostUsd);
-        Assert.Equal(cloudDefault ? 2 : 0, calls.Count);
+        Assert.Null(parser.Complete().Usage!.EstimatedCostUsd);
+        Assert.Empty(calls);
         parser.Observe(Step.Replace("\"cost\":0", "\"cost\":0.12", StringComparison.Ordinal));
         Assert.Equal(0.12m, parser.Complete().Usage!.EstimatedCostUsd);
     }
@@ -252,6 +244,152 @@ public sealed class OpenCodeLocalTests
     }
 
     [Fact]
+    public async Task Authless_scan_finds_healthy_second_local_when_default_is_unloaded_and_recovers_after_all_down()
+    {
+        var settings = OpenCodeSettings.Parse(TwoLocalConfig());
+        var requests = new List<string>();
+        Handler OnlySecondLoaded() => new((r, _) =>
+        {
+            requests.Add(r.RequestUri!.AbsolutePath);
+            return Task.FromResult(Json(r.RequestUri.AbsolutePath == "/api/v1/models"
+                ? """{"models":[{"type":"llm","key":"publisher/coder","loaded_instances":[]},{"type":"llm","key":"api-b","loaded_instances":[{"id":"api-b"}]}]}"""
+                : """{"data":[{"id":"api-b"}]}"""));
+        });
+        var ready = await OpenCodeReadiness.ScanAsync(settings, false, TestContext.Current.CancellationToken, OnlySecondLoaded);
+        Assert.True(ready.SignedIn);
+        Assert.Null(ready.NotReady);
+        Assert.Contains("confinement", ready.Warning);
+        Assert.Equal(["/api/v1/models", "/api/v1/models", "/v1/models"], requests);
+        Assert.Null(await OpenCodeReadiness.CheckAsync(settings.Select("local/alternative"), TestContext.Current.CancellationToken, OnlySecondLoaded));
+        Assert.Contains("not loaded", await OpenCodeReadiness.CheckAsync(settings.Select(null), TestContext.Current.CancellationToken, OnlySecondLoaded));
+
+        var downCalls = 0;
+        var down = await OpenCodeReadiness.ScanAsync(settings, false, TestContext.Current.CancellationToken,
+            () => new Handler((_, _) => { downCalls++; throw new HttpRequestException(); }));
+        Assert.False(down.SignedIn);
+        Assert.Contains("not reachable", down.NotReady);
+        Assert.Equal(2, downCalls);
+        var recovered = await OpenCodeReadiness.ScanAsync(settings, false, TestContext.Current.CancellationToken, OnlySecondLoaded);
+        Assert.True(recovered.SignedIn);
+        Assert.Null(recovered.NotReady);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Multiple_local_candidates_share_one_scan_deadline_and_unknown_candidates_do_not_suppress_admission(bool spendFirstFourSeconds)
+    {
+        var time = new FakeTimeProvider();
+        var started = time.GetUtcNow();
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var calls = 0;
+        var scan = OpenCodeReadiness.ScanAsync(OpenCodeSettings.Parse(TwoLocalConfig()), false, CancellationToken.None,
+            () => new Handler(async (_, ct) =>
+            {
+                calls++;
+                if (spendFirstFourSeconds && calls == 1)
+                {
+                    time.Advance(TimeSpan.FromSeconds(4));
+                    throw new HttpRequestException();
+                }
+                entered.TrySetResult();
+                await new TaskCompletionSource().Task.WaitAsync(ct);
+                return Json("{}");
+            }), time);
+        await entered.Task.WaitAsync(TestContext.Current.CancellationToken);
+        time.Advance(TimeSpan.FromSeconds(spendFirstFourSeconds ? 1 : 5));
+        var result = await scan;
+        Assert.Equal(TimeSpan.FromSeconds(5), time.GetUtcNow() - started);
+        Assert.Equal(spendFirstFourSeconds ? 2 : 1, calls);
+        Assert.True(result.SignedIn);
+        Assert.Null(result.NotReady);
+        Assert.Contains("unknown", result.Warning);
+        Assert.Contains("preflight", result.Warning);
+    }
+
+    [Fact]
+    public async Task Cancelling_a_multi_local_scan_propagates_without_probing_more_candidates()
+    {
+        using var caller = new CancellationTokenSource();
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var calls = 0;
+        var scan = OpenCodeReadiness.ScanAsync(OpenCodeSettings.Parse(TwoLocalConfig()), false, caller.Token,
+            () => new Handler(async (_, ct) =>
+            {
+                calls++;
+                entered.TrySetResult();
+                await new TaskCompletionSource().Task.WaitAsync(ct);
+                return Json("{}");
+            }));
+        await entered.Task.WaitAsync(TestContext.Current.CancellationToken);
+        caller.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => scan);
+        Assert.Equal(1, calls);
+    }
+
+    private static string TwoLocalConfig()
+    {
+        var root = JsonNode.Parse(OpenCodeSettings.Parse(Config()).Select(null).ConfigJson)!.AsObject();
+        root["providers"]!.AsObject().Remove("cloud");
+        root["providers"]!["local"]!["models"]!["alternative"] = new JsonObject { ["modelID"] = "api-b" };
+        return root.ToJsonString();
+    }
+
+    [Theory]
+    [InlineData(false, """{"small_model":"cloud/paid"}""")]
+    [InlineData(false, """{"agent":{"build":{"model":"cloud/paid"},"helper":{"mode":"subagent","model":"cloud/paid"}}}""")]
+    [InlineData(false, """{"agent":{"compaction":{"model":"cloud/paid"}}}""")]
+    [InlineData(true, """{"agents":{"build":{"model":"cloud/paid"},"helper":{"mode":"subagent","model":"cloud/paid"}}}""")]
+    [InlineData(true, """{"agents":{"compaction":{"model":"cloud/paid"}}}""")]
+    [InlineData(true, """{"providers":{"backup":{"package":"@opencode/ai/providers/openai-compatible","settings":{"baseURL":"https://cloud.example/v1"},"models":{"fallback":{}}}}}""")]
+    public async Task Inherited_cloud_auxiliary_and_fallback_configuration_cannot_launch_a_local_run_but_explicit_cloud_is_unchanged(bool v2, string inherited)
+    {
+        using var machine = new TestMachine();
+        var path = machine.WriteHomeFile(".config/opencode/opencode.jsonc", Config(v2));
+        machine.Env[OpenCodeAdapter.ConfigContentVariable] = inherited;
+        var adapter = OpenCodeAdapter.ForRunner(v2 ? "2.3.0" : "1.19.5", machine.Env.GetValueOrDefault, machine.Home,
+            () => throw new InvalidOperationException("No model requests before confinement"));
+        var local = await adapter.SelectAsync(null, TestContext.Current.CancellationToken);
+        Assert.Contains("local-only inference is not verified", local.Error);
+        Assert.Contains("managed/system", local.Error);
+        var parser = local.Adapter.CreateParser();
+        parser.Observe(Step);
+        Assert.Null(parser.Complete().Usage!.EstimatedCostUsd);
+        var cloud = await adapter.SelectAsync("cloud/paid", TestContext.Current.CancellationToken);
+        Assert.Null(cloud.Error);
+        var launch = cloud.Adapter.BuildLaunch(Context());
+        Assert.Contains("cloud/paid", launch.Arguments);
+        var effectiveOverlay = JsonNode.Parse(launch.Environment[OpenCodeAdapter.ConfigContentVariable]!)!.AsObject();
+        AssertInherited(JsonNode.Parse(inherited)!, effectiveOverlay);
+        static void AssertInherited(JsonNode expected, JsonNode? actual)
+        {
+            if (expected is JsonObject obj)
+                foreach (var (key, value) in obj) AssertInherited(value!, actual?[key]);
+            else Assert.True(JsonNode.DeepEquals(expected, actual));
+        }
+        Assert.Equal(Config(v2), File.ReadAllText(path));
+        Assert.Equal(inherited, machine.Env[OpenCodeAdapter.ConfigContentVariable]);
+    }
+
+    [Theory]
+    [InlineData("1.19.5", false)]
+    [InlineData("2.3.0", true)]
+    [InlineData("2.3.1", true)]
+    [InlineData(null, true)]
+    public async Task Repository_only_overrides_and_unknown_versions_are_refused_without_assuming_the_runner_snapshot_is_effective(string? version, bool v2)
+    {
+        using var machine = new TestMachine();
+        machine.Env[OpenCodeAdapter.ConfigContentVariable] = Config(v2);
+        var repo = machine.WriteHomeFile("repository/.opencode/opencode.json", """{"small_model":"cloud/paid","agent":{"helper":{"model":"cloud/paid"}},"agents":{"compaction":{"model":"cloud/paid"}}}""");
+        var before = File.ReadAllText(repo);
+        var adapter = OpenCodeAdapter.ForRunner(version, machine.Env.GetValueOrDefault, machine.Home,
+            () => throw new InvalidOperationException("No model requests"));
+        var selected = await adapter.SelectAsync(null, TestContext.Current.CancellationToken);
+        Assert.Contains("repository and managed/system overrides", selected.Error);
+        Assert.Equal(before, File.ReadAllText(repo));
+    }
+
+    [Fact]
     public async Task Delivery_rereads_config_and_concurrent_selections_do_not_share_state()
     {
         using var machine = new TestMachine();
@@ -263,49 +401,55 @@ public sealed class OpenCodeLocalTests
         var cloud = adapter.SelectAsync("cloud/paid", TestContext.Current.CancellationToken);
         await Task.WhenAll(local, cloud);
         Assert.Equal(12345, scanned.Select(null).Endpoint!.Port);
-        Assert.Equal(12346, local.Result.Adapter.LocalEndpoint!.Port);
+        Assert.Contains("local-only inference is not verified", local.Result.Error);
+        Assert.Null(local.Result.Adapter.LocalEndpoint);
+        Assert.Null(cloud.Result.Error);
         Assert.Null(cloud.Result.Adapter.LocalEndpoint);
         var free = local.Result.Adapter.CreateParser();
         var unknown = cloud.Result.Adapter.CreateParser();
         free.Observe(Step);
         unknown.Observe(Step);
-        Assert.Equal(0m, free.Complete().Usage!.EstimatedCostUsd);
+        Assert.Null(free.Complete().Usage!.EstimatedCostUsd);
         Assert.Null(unknown.Complete().Usage!.EstimatedCostUsd);
         Assert.Null(local.Result.Adapter.CreateParser().Complete().Usage!.EstimatedCostUsd);
     }
 
     [Fact]
-    public async Task Readiness_and_launch_resolve_the_same_stored_runner_environment()
+    public async Task Local_refusal_resolves_the_fresh_stored_runner_environment_without_probing()
     {
         using var machine = new TestMachine();
         machine.Env[OpenCodeAdapter.ConfigContentVariable] = Config().Replace("\"baseURL\":\"http://localhost:12345/v1\"",
             "\"baseURL\":\"{env:LOCAL_ENDPOINT}\",\"apiKey\":\"{env:LOCAL_TEST_KEY}\"", StringComparison.Ordinal);
         var stored = new Dictionary<string, string> { ["LOCAL_ENDPOINT"] = "http://localhost:12345/v1", ["LOCAL_TEST_KEY"] = "test-key" };
         var adapter = OpenCodeAdapter.ForRunner("2.3.0", machine.Env.GetValueOrDefault, machine.Home,
-            () => new Handler((r, _) =>
-            {
-                Assert.Equal("Bearer", r.Headers.Authorization!.Scheme);
-                Assert.Equal("test-key", r.Headers.Authorization.Parameter);
-                Assert.Equal(12346, r.RequestUri!.Port);
-                return Task.FromResult(Json(r.RequestUri.AbsolutePath == "/api/v1/models" ? Native : Models));
-            }), () => stored);
+            () => throw new InvalidOperationException("No probe before confinement is verified"), () => stored);
         stored["LOCAL_ENDPOINT"] = "http://localhost:12346/v1";
         var selected = await adapter.SelectAsync(null, TestContext.Current.CancellationToken);
-        Assert.Null(selected.Error);
-        var config = selected.Adapter.BuildLaunch(Context()).Environment[OpenCodeAdapter.ConfigContentVariable]!;
-        Assert.Contains("12346", config);
+        Assert.Contains("local-only inference is not verified", selected.Error);
+        stored["LOCAL_ENDPOINT"] = "https://cloud.example/v1";
+        var cloud = await adapter.SelectAsync(null, TestContext.Current.CancellationToken);
+        Assert.Null(cloud.Error);
+        var config = cloud.Adapter.BuildLaunch(Context()).Environment[OpenCodeAdapter.ConfigContentVariable]!;
+        Assert.Contains("https://cloud.example/v1", config);
         Assert.DoesNotContain("{env:", config);
     }
 
-    [Fact]
-    public async Task Names_and_arbitrary_loopback_alone_cannot_turn_unknown_usage_into_free_inference()
+    [Theory]
+    [InlineData("arbitrary-package", false)]
+    [InlineData("@opencode/ai/providers/lmstudio", true)]
+    public async Task Unknown_loopback_runtimes_and_native_local_defaults_are_refused_without_zero_cost_claims(string package, bool implicitEndpoint)
     {
         using var machine = new TestMachine();
-        machine.Env[OpenCodeAdapter.ConfigContentVariable] = Config().Replace("@opencode/ai/providers/openai-compatible", "arbitrary-package", StringComparison.Ordinal)
-            .Replace("local", "lmstudio", StringComparison.Ordinal);
+        machine.Env[OpenCodeAdapter.ConfigContentVariable] = Config().Replace("@opencode/ai/providers/openai-compatible", package, StringComparison.Ordinal)
+            .Replace("\"local\"", "\"lmstudio\"", StringComparison.Ordinal)
+            .Replace("\"local/", "\"lmstudio/", StringComparison.Ordinal);
+        if (implicitEndpoint)
+            machine.Env[OpenCodeAdapter.ConfigContentVariable] = machine.Env[OpenCodeAdapter.ConfigContentVariable]
+                .Replace("\"baseURL\":\"http://localhost:12345/v1\"", "", StringComparison.Ordinal);
         var adapter = OpenCodeAdapter.ForRunner("2.3.0", machine.Env.GetValueOrDefault, machine.Home,
             () => throw new InvalidOperationException("No probe for an unknown runtime"));
         var selected = await adapter.SelectAsync(null, TestContext.Current.CancellationToken);
+        Assert.Contains("local-only inference is not verified", selected.Error);
         var parser = selected.Adapter.CreateParser();
         parser.Observe(Step);
         Assert.Null(parser.Complete().Usage!.EstimatedCostUsd);
