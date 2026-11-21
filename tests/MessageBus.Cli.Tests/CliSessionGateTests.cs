@@ -357,7 +357,8 @@ public sealed class CliSessionGateTests
                 for (var line = await reader.ReadLineAsync(stop.Token); !string.IsNullOrEmpty(line); line = await reader.ReadLineAsync(stop.Token)) headers.Add(line);
                 var contentLength = headers.FirstOrDefault(h => h.StartsWith("Content-Length:", StringComparison.OrdinalIgnoreCase));
                 var body = new char[contentLength is null ? 0 : int.Parse(contentLength.Split(':')[1].Trim(), System.Globalization.CultureInfo.InvariantCulture)];
-                Assert.Equal(body.Length, await reader.ReadBlockAsync(body.AsMemory(), stop.Token));
+                if (body.Length > 0)
+                    Assert.Equal(body.Length, await reader.ReadBlockAsync(body.AsMemory(), stop.Token));
                 var discovery = first.StartsWith("GET /api/server ", StringComparison.Ordinal);
                 if (discovery) Assert.DoesNotContain(headers, h => h.StartsWith("Authorization:", StringComparison.OrdinalIgnoreCase) || h.StartsWith("X-Mbus-", StringComparison.OrdinalIgnoreCase));
                 var bootstrap = operation == "token" && first.StartsWith("POST /api/cli/auth/start ", StringComparison.Ordinal);
