@@ -351,6 +351,9 @@ public sealed record ThreadProgressed : ThreadEvent
 /// <summary>A message was added to the thread (a reply, or a follow-up).</summary>
 public sealed record ThreadMessageAdded : ThreadEvent
 {
+    /// <summary>Present when this message replaces a queued task through retargeting.</summary>
+    public MessageBus.Contracts.Mcp.RetargetMetadata? Retarget { get; init; }
+
     /// <summary>Discriminator: <c>message</c>.</summary>
     public const string Kind = "message";
 

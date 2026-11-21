@@ -37,6 +37,48 @@ a bootstrap ownership check and never authorizes mbus lifecycle management.
   [Updates](#updates)).
 - **Errors** carry a short machine-readable code in `X-Mbus-Error` (MCP errors: `McpErrorCodes`).
 
+## Queued task retargeting (handler-gated)
+
+`retarget` takes `RetargetInput` and returns `RetargetResult` from `Contracts/Mcp/Retarget.cs`.
+It replaces the current queued task message on the **same thread and project**, preserving attachments,
+expiry/deadline, parent/join relationships, exclusions, priority and requested model. Targets are role,
+agent or capabilities; inbox targets are refused. A task that has ever been picked up cannot be retargeted.
+The deployed service remains responsible for eligibility, routing, ownership and atomic publication.
+This client contract does not imply the service has deployed that implementation.
+
+Inputs are `threadId`, `to`, optional `reason` (at most 500 characters), `dryRun`,
+`expectedTaskMessageId`, `operationId`, and the local client's hidden `sealedBody` and `attachments`.
+A mutation requires both a caller-generated operation id (retained across retries) and the exact task
+message id from the preview. The service refuses stale task pins and conflicting reuse of operation ids.
+Results contain `threadId`, `messageId`, `previousMessageId`, `from`, `to`, `status`, `dryRun`,
+`alreadyApplied`, `needsReseal`, optional public-key `recipient`, `copies`, `agentsOnline`, `agentsFree`,
+optional `queuePosition` and `notice`. An already-applied operation returns its historical result and
+never changes a later task generation.
+
+`McpToolSpec.RequiresHandlerSupport` hides future tools on remote servers by default. The original
+`McpToolCatalog.Tools(bool, IReadOnlySet<string>?)` signature remains intact. A service with a deployed
+retarget handler opts in through the new three-argument overload's `supported` set; the `only` permission
+filter still applies. The local client advertises its own retarget handler. Independently of catalog
+advertising, it calls the actual remote retarget handler with `dryRun: true` before reading message
+content, accessing recipient keys, downloading, resealing or uploading. JSON-RPC unknown-tool errors
+and structured `not-found` failures stop this flow with no uploads. An explicit dry-run returns that
+preview directly, even when `needsReseal` is true: it never reserves, adopts, uploads or deletes inputs.
+
+After a supported preview, a mutation reads the **pinned message**, rather than assuming the thread's
+first historical message is still current. A shared `TaskReseal` helper is used by retarget and dead-letter
+replay. Body and attachment encryption decisions are independent: plaintext body with encrypted files,
+encrypted body with plaintext files, and mixed lists are supported. Plain references, order and metadata
+remain unchanged; inputs already encrypted for the destination key need no download or upload.
+All required old keys are checked before the first content transfer. Missing keys refuse the operation
+with guidance to run on a machine holding the original keys. Large stored bodies are downloaded and
+verified against their size and SHA-256 before resealing. Only encrypted inputs needing a different
+recipient key are replaced. The service validates input ownership and collects abandoned uploads;
+the client never deletes original shared references on failure.
+
+Thread notifications reuse the existing `message` event kind (`ThreadMessageAdded`), adding optional
+`retarget: {previousMessageId, from, to, reason?}` metadata. Old events omit it; no new polymorphic
+event discriminator is introduced. All new wire types use the source-generated `MessageBusJson` context.
+
 ## Identity and request signing
 
 Defined in `src/MessageBus.Contracts/Security/MachineAuth.cs` and `src/MessageBus.Contracts/Http/Http.cs`.

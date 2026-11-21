@@ -289,7 +289,7 @@ internal static class ContractSamples
         Join,
         new ThreadStatusChanged { EventId = "evt_1", ThreadId = Thr, ProjectId = Prj, At = T, Status = ThreadStatus.Working, Reason = "picked up", AgentId = Agt, MachineId = Mch },
         new ThreadProgressed { EventId = "evt_2", ThreadId = Thr, ProjectId = Prj, At = T, Progress = Progress },
-        new ThreadMessageAdded { EventId = "evt_3", ThreadId = Thr, ProjectId = Prj, At = T, MessageId = Msg, Type = "answer", Title = "Re: due dates", Sender = Sender },
+        new ThreadMessageAdded { EventId = "evt_3", ThreadId = Thr, ProjectId = Prj, At = T, MessageId = Msg, Type = "answer", Title = "Re: due dates", Sender = Sender, Retarget = new RetargetMetadata { PreviousMessageId = Msg, From = RoleTo, To = new AgentTarget { AgentId = Agt }, Reason = "Wrong role" } },
         new ThreadSettled { EventId = "evt_4", ThreadId = Thr, ProjectId = Prj, At = T, Result = Result },
         new ThreadMoved
         {
@@ -441,6 +441,13 @@ internal static class ContractSamples
         new StatusInput { ThreadIds = [Thr], ProjectId = Prj, Compact = true, Limit = 20 },
         new StatusResult { Threads = [Thread], Replies = [Received], Partial = true, Project = Project, Tasks = [Brief], More = true },
         Brief,
+        new RetargetInput { ThreadId = Thr, To = RoleTo, Reason = "Wrong recipient", DryRun = true,
+            ExpectedTaskMessageId = Msg, OperationId = "operation-example", SealedBody = new SealedBody { Body = Body, Encryption = Enc }, Attachments = [Attachment] },
+        new RetargetResult { ThreadId = Thr, MessageId = Msg, PreviousMessageId = Msg, From = RoleTo, To = new AgentTarget { AgentId = Agt },
+            Status = ThreadStatus.Queued, DryRun = true, AlreadyApplied = true, NeedsReseal = true,
+            Recipient = new PublicKeyInfo { KeyId = "ek_example", Scope = KeyScope.Workspace, Version = 1, Algorithm = "EC-P256", PublicKey = "example", Fingerprint = "example", CreatedAt = T },
+            Copies = 1, AgentsOnline = 1, AgentsFree = 1, QueuePosition = 1, Notice = "Independent task settings apply." },
+        new RetargetMetadata { PreviousMessageId = Msg, From = RoleTo, To = new AgentTarget { AgentId = Agt }, Reason = "Wrong role" },
         new MoveInput { ThreadId = Thr, ProjectId = Prj, IncludeSubtasks = true, Reason = "Wrong project", DryRun = true },
         new MovedFrom { ProjectId = Prj, Title = "Source", Tasks = 1 },
         new MoveThreadsResult { ThreadIds = [Thr], Tasks = 1, OpenTasks = 1,

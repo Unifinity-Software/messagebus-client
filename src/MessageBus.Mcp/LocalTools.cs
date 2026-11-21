@@ -106,6 +106,7 @@ internal sealed partial class LocalTools : IAsyncDisposable
                 McpToolNames.EnsureProject => Ok(await EnsureProjectAsync(Read<EnsureProjectInput>(arguments), ct)),
                 McpToolNames.FetchAttachment => Ok(await FetchAttachmentAsync(Read<FetchAttachmentInput>(arguments), ct)),
                 McpToolNames.Retry => Ok(await RetryAsync(Read<RetryInput>(arguments), ct)),
+                McpToolNames.Retarget => Ok(await RetargetAsync(Read<RetargetInput>(arguments), ct)),
                 McpToolNames.CompleteProject => Ok(await CompleteProjectAsync(Read<CompleteProjectInput>(arguments), ct)),
                 McpToolNames.RequestApproval => Ok(await RequestApprovalAsync(Read<RequestApprovalInput>(arguments), ct)),
                 McpToolNames.WaitApproval => Ok(await WaitApprovalAsync(Read<WaitApprovalInput>(arguments), ct)),

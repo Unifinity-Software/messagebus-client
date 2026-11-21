@@ -38,6 +38,8 @@ public static class McpToolNames
     public const string Status = "status";
     /// <summary>Move a task to another project, including its sub-tasks by default.</summary>
     public const string Move = "move";
+    /// <summary>Retarget a queued task on its existing thread.</summary>
+    public const string Retarget = "retarget";
     /// <summary>Cancel a thread (and its children) or a whole project.</summary>
     public const string Cancel = "cancel";
     /// <summary>Find or create the project for a work item.</summary>
@@ -69,7 +71,7 @@ public static class McpToolNames
     /// <summary>Every tool name.</summary>
     public static IReadOnlyList<string> All { get; } =
     [
-        Send, SendMany, Wait, Watch, Inbox, Progress, Settle, Status, Cancel, Move,
+        Send, SendMany, Wait, Watch, Inbox, Progress, Settle, Status, Cancel, Retarget, Move,
         EnsureProject, FindProject, CompleteProject, Directory, DescribeRole, Subscribe, FetchAttachment, Retry,
         RequestApproval, WaitApproval, OpenInbox,
     ];

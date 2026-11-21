@@ -23,6 +23,7 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="MessageBus.Cli.Tests" />
+    <InternalsVisibleTo Include="MessageBus.Cli" />
   </ItemGroup>
 
   <ItemGroup>
