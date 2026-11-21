@@ -1,7 +1,7 @@
 // A messagebus.ai runner in Azure: the runner image (docker/runner) as an Azure Container App with
 // no inbound address, its secrets read from an existing Key Vault. The
 // runner connects out to the server, picks up tasks and runs a coding agent for each. Deploy it in
-// the same resource group as the vault. See docker/runner/README.md for runner credentials.
+// the same resource group as the vault. See docker/runner/README.md for ACA setup and restart behavior.
 // Check out mbus-v<version>, build from docker/runner/Dockerfile, and push the resulting
 // <registry>.azurecr.io/messagebus-runner:<version> image to your registry. For a development
 // build, use your development checkout and an explicit development image tag.
@@ -32,7 +32,7 @@ param keyVaultName string
 the Key Vault secret it comes from. Every listed secret must exist in the vault. mbus-api-key (an API key that signs in runners,
 created on the dashboard's Security page) is required; add the keys for the agents this runner uses, for example
 { env: 'ANTHROPIC_API_KEY', secret: 'anthropic-api-key' } for Claude Code, OPENAI_API_KEY for Codex,
-GH_TOKEN for Copilot. docker/runner/README.md lists them.''')
+COPILOT_GITHUB_TOKEN for Copilot. docker/runner/README.md lists them.''')
 param secrets array = [
   {
     env: 'MBUS_API_KEY'
@@ -183,6 +183,7 @@ resource runner 'Microsoft.App/containerApps@2024-03-01' = {
           ]
     }
     template: {
+      // The container home is ephemeral. A replacement replica enrolls with a new machine key.
       containers: [
         {
           name: 'runner'
