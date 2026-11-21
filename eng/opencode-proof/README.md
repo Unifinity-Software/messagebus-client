@@ -78,15 +78,34 @@ counters, with retries disabled and a five-second fetch timeout. Unknown paths r
 This is needed because the pinned config loader starts an `@opencode-ai/plugin` dependency
 install for each config directory, and instance bootstrap initializes plugins before `debug
 config` prints. When a file plugin is present, plugin initialization joins those installs.
+The schema initializer must also configure an external plugin: without one, the join is
+skipped, and the CLI's explicit process exit can leave detached installs holding locks. Native
+diagnostics found dependency locks still owned by the exited initializer while the next
+positive control was waiting. Upstream only considers those locks stale after 60 seconds,
+longer than the fixture's unchanged 45-second command deadline.
+
+Initialization now supplies an import-free file plugin through a separate launch environment.
+Its `INITIALIZE_DEPENDENCIES_JOINED` stdout marker is required before setup proceeds; upstream
+joins every config dependency fiber before invoking the plugin. The plugin is outside discovery
+directories and is absent from subsequent launches. The explicit owned config directory uses
+native path separators to match the XDG global path, avoiding two string identities for the
+same directory on Windows. Hostile global/home/repository/auth/account/plugin controls still
+load afterward.
+
 A public-registry install was therefore an unbounded external dependency in the positive
 control. The upstream loader logs a failed background install and continues; the fixture's
 import-free file plugin must still execute and fake-cloud inference must still occur. No
 installed SDK is fabricated and no config/plugin path is disabled. Registry requests/errors
 are saved separately, and a positive assertion requires the real package lookup to reach it.
 
-Source evidence at the pinned commit: [config install fibers](https://github.com/anomalyco/opencode/blob/810c0eba1a7348036f8bdf61e6632d0c36c6876c/packages/opencode/src/config/config.ts#L452),
-[plugin dependency join](https://github.com/anomalyco/opencode/blob/810c0eba1a7348036f8bdf61e6632d0c36c6876c/packages/opencode/src/plugin/index.ts#L184),
-[instance bootstrap](https://github.com/anomalyco/opencode/blob/810c0eba1a7348036f8bdf61e6632d0c36c6876c/packages/opencode/src/project/bootstrap.ts#L35),
+Source evidence at the pinned commit: [config install fibers](https://github.com/anomalyco/opencode/blob/810c0eba1a7348036f8bdf61e6632d0c36c6876c/packages/opencode/src/config/config.ts#L405),
+[all-fiber join](https://github.com/anomalyco/opencode/blob/810c0eba1a7348036f8bdf61e6632d0c36c6876c/packages/opencode/src/config/config.ts#L584),
+[conditional plugin dependency join](https://github.com/anomalyco/opencode/blob/810c0eba1a7348036f8bdf61e6632d0c36c6876c/packages/opencode/src/plugin/index.ts#L168),
+[file plugin support](https://github.com/anomalyco/opencode/blob/810c0eba1a7348036f8bdf61e6632d0c36c6876c/packages/opencode/src/plugin/shared.ts#L158),
+[instance bootstrap](https://github.com/anomalyco/opencode/blob/810c0eba1a7348036f8bdf61e6632d0c36c6876c/packages/opencode/src/project/bootstrap.ts#L29),
+[explicit CLI exit](https://github.com/anomalyco/opencode/blob/810c0eba1a7348036f8bdf61e6632d0c36c6876c/packages/opencode/src/index.ts#L130),
+[lock staleness](https://github.com/anomalyco/opencode/blob/810c0eba1a7348036f8bdf61e6632d0c36c6876c/packages/core/src/util/effect-flock.ts#L39),
+[config directory identities](https://github.com/anomalyco/opencode/blob/810c0eba1a7348036f8bdf61e6632d0c36c6876c/packages/opencode/src/config/paths.ts#L20),
 and [npm environment configuration](https://github.com/anomalyco/opencode/blob/810c0eba1a7348036f8bdf61e6632d0c36c6876c/packages/core/src/npm-config.ts).
 The wellknown and account response envelopes both correctly contain `config`; they are not
 changed to work around the timeout. This source-backed timeout explanation still needs the

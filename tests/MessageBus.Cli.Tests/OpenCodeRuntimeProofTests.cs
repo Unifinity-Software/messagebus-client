@@ -80,8 +80,23 @@ public sealed class OpenCodeRuntimeProofTests
             var git = CommandLocator.Find("git", Environment.GetEnvironmentVariable, []);
             Assert.NotNull(git);
             Assert.Equal(0, (await Execute("git-init", Raw(["init", "--quiet"], env) with { FileName = git! }, control: true)).Exit);
+            // With no external plugin, pinned Plugin.init skips Config.waitForDependencies and
+            // the CLI can exit with detached install fibers still holding locks. A file plugin
+            // makes it join ALL config dependency fibers before invoking this import-free marker.
+            // Keep it outside discovered plugin directories and in this launch's config only.
+            var initializePlugin = Path.Combine(owned, "initialize-dependencies.mjs");
+            Write(initializePlugin, "export const InitializeDependencies = async () => { console.log('INITIALIZE_DEPENDENCIES_JOINED'); return {} };\n");
+            var initializeEnv = new Dictionary<string, string?>(env)
+            {
+                ["OPENCODE_CONFIG_CONTENT"] = new JsonObject
+                {
+                    ["plugin"] = new JsonArray(new Uri(initializePlugin).AbsoluteUri),
+                }.ToJsonString(),
+            };
             // Initialize the real schema in an empty owned DB before inserting a synthetic active account.
-            Assert.Equal(0, (await Execute("initialize", Raw(["debug", "config"], env), control: true)).Exit);
+            var initialized = await Execute("initialize", Raw(["debug", "config"], initializeEnv), control: true);
+            Assert.Equal(0, initialized.Exit);
+            Assert.Contains("INITIALIZE_DEPENDENCIES_JOINED", initialized.Out);
             var python = Environment.GetEnvironmentVariable("MBUS_TEST_PROOF_PYTHON");
             Assert.False(string.IsNullOrWhiteSpace(python), "Native packet must supply Python for the owned SQLite account fixture.");
             var seed = Path.Combine(owned, "seed-account.py");
@@ -288,7 +303,9 @@ public sealed class OpenCodeRuntimeProofTests
             ["HOME"] = home, ["USERPROFILE"] = home, ["OPENCODE_TEST_HOME"] = home,
             ["XDG_CONFIG_HOME"] = Path.Combine(home, ".config"), ["XDG_DATA_HOME"] = Path.Combine(home, ".local/share"),
             ["XDG_CACHE_HOME"] = Path.Combine(home, ".cache"), ["XDG_STATE_HOME"] = Path.Combine(home, ".state"),
-            ["OPENCODE_CONFIG_DIR"] = Path.Combine(home, ".config/opencode"), ["OPENCODE_CONFIG"] = "",
+            // Match upstream path.join(XDG_CONFIG_HOME, "opencode") exactly on Windows too:
+            // ConfigPaths deduplicates strings, not physical directories or slash aliases.
+            ["OPENCODE_CONFIG_DIR"] = Path.Combine(home, ".config", "opencode"), ["OPENCODE_CONFIG"] = "",
             ["OPENCODE_CONFIG_CONTENT"] = "{}", ["OPENCODE_AUTH_CONTENT"] = "", ["OPENCODE_SERVER_PASSWORD"] = "",
             ["GIT_CONFIG_NOSYSTEM"] = "1", ["GIT_CONFIG_GLOBAL"] = Path.Combine(home, ".gitconfig"),
             ["OPENCODE_DB"] = Path.Combine(home, "accounts.db"),

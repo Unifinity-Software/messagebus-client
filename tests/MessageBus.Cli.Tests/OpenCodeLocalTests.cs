@@ -252,7 +252,7 @@ public sealed class OpenCodeLocalTests
         {
             requests.Add(r.RequestUri!.AbsolutePath);
             return Task.FromResult(Json(r.RequestUri.AbsolutePath == "/api/v1/models"
-                ? """{"models":[{"type":"llm","key":"publisher/coder","loaded_instances":[]},{"type":"llm","key":"api-b","loaded_instances":[{"id":"api-b"}]}]}"""
+                ? """{"models":[{"type":"llm","key":"api-coder","loaded_instances":[]},{"type":"llm","key":"api-b","loaded_instances":[{"id":"api-b"}]}]}"""
                 : """{"data":[{"id":"api-b"}]}"""));
         });
         var ready = await OpenCodeReadiness.ScanAsync(settings, false, TestContext.Current.CancellationToken, OnlySecondLoaded);
