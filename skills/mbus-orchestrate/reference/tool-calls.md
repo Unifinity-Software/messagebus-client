@@ -103,6 +103,7 @@ send {
 
 `data` carries the same facts for machines: `{workItem, task, branch, baseCommit, checks: [...],
 returns: "git-bundle"}`.
+For verification-only tasks, use the return instructions below and omit `returns: "git-bundle"`.
 
 - `type`: `task.plan` (to the architect: reply with the approach, the tasks in order and which can
   run in parallel, and the risks; no code), `task.implement`, `task.test`, `task.docs`,
@@ -122,6 +123,26 @@ returns: "git-bundle"}`.
   them, and this session's mbus sends them by itself; the task's progress reads "Waiting for the
   code from the sender" meanwhile. If this session closes first, the task fails after 30 minutes
   saying so: `retry` it from an open session.
+
+## Remote verification tasks
+
+- Use `directory` and `describe_role` to find a remote tester within the project's execution
+  scope. Confirm the runner has the required OS, toolchain, dependencies and access, and that
+  its role profile and sandbox allow the commands. Check any required host or release gate.
+  Use a role send when the eligible pool meets the check's requirements. If the check needs a
+  specific runner, use the direct machine-check exception with an eligible agent that holds the
+  role, and keep `labels.role` set to `tester` (or the role the workflow requires). A role label
+  alone does not enforce eligibility.
+- For a verification-only `task.test`, record `git rev-parse HEAD` on the integrated branch.
+  Put that full SHA, the environment requirements and the exact commands and working directories
+  in the task body. Attach that branch as a Git bundle with `expectedHead` set to the same SHA.
+  Ask the tester to verify the checkout before running commands and return evidence without
+  editing or committing code. Keep any required approved-environment fields on the send.
+- Ask for the tested SHA, actual OS and toolchain versions, each command and its exit status,
+  and pass/fail/skip counts or relevant log output. Label smoke checks and full suites clearly.
+  Ask for the reason and any failure output for each blocked or failed check. The coordinator
+  matches each result to the expected SHA and environment and verifies that the commands and
+  results cover the required checks. A smoke check provides evidence only for its own scope.
 
 ## Parallel tasks
 

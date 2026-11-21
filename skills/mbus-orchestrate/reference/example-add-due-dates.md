@@ -16,6 +16,9 @@ Setup assumed: the repository was made with `samples/todo-app/init-repo.ps1`, so
 - `git -C $REPO status --porcelain` is empty; `START=$(git -C $REPO rev-parse HEAD)`.
 - Read `$REPO/.messagebus/workflow.md`: design review (reviewer) → build (developer) → code review
   (reviewer, not the author) → docs (developer).
+- In this example the workflow allows remote acceptance checks and has no approved frontend
+  environment requirement. The remote tester runs Linux, with the required .NET SDK, Node.js and
+  npm versions, package feed access, and permission to run builds and tests.
 - `git -C $REPO switch -c add-due-dates`, then `git -C $REPO branch add-due-dates-api` and
   `git -C $REPO branch add-due-dates-client` (all at `START`).
 
@@ -35,12 +38,12 @@ ensure_project { "key": "file:samples/work-items/add-due-dates.md", "title": "Ad
 
 directory {}
 → roles: design-reviewer (broadcast 2, distinct vendors), developer (compete),
-  frontend-developer (compete), backend-developer (compete), code-reviewer (broadcast 2),
+  frontend-developer (compete), backend-developer (compete), code-reviewer (broadcast 2), tester (compete),
   docs-writer (compete), ... each with agents such as claude-code@mac-mini (Mac mini) and codex@pc
   (each agent's ownerSubjectId shows whose it is; only sub_me's personal machines can run prj_01)
 
 describe_role { "role": "developer" }
-  (and frontend-developer, backend-developer, design-reviewer, code-reviewer, docs-writer)
+  (and frontend-developer, backend-developer, design-reviewer, code-reviewer, docs-writer, tester)
 ```
 
 Plan shown to the user as the task checklist (mapping: workflow "reviewer" → design-reviewer for
@@ -49,14 +52,14 @@ workflow puts it). After this the user hears only a one-line note as each group 
 finishes, anything that needs them, and the final report:
 
 ```
-Plan for "Add due dates to to-dos", 6 tasks:
+Plan for "Add due dates to to-dos", 7 tasks:
   [ ] T1 Design review of the plan                    design-reviewer     workflow step 1
   [ ] T2 API and API tests                            backend-developer   work item task 1
   [ ] T3 Front end and front-end tests                frontend-developer  work item task 2, parallel with T2
   [ ] T4 Build and test the merged change             developer           workflow step 2
   [ ] T5 Code review of the merged change             code-reviewer       workflow step 3, not an author
   [ ] T6 README: dueDate, clearDueDate, isOverdue     docs-writer         work item task 3, workflow step 4
-Then I run the acceptance checks here before closing the project.
+  [ ] T7 Verify the final integrated commit          tester              work item acceptance checks
 ```
 
 Each step below is introduced to the user with one sentence first, for example "Sending the plan
@@ -79,7 +82,7 @@ wait { "threadIds": ["thr_T1"], "mode": "any" }   (returns within about 100 s; r
 → finished: [ thr_T1 replied, copies: [ one per reviewer ], result.usage {...} ], replies: [ the verdicts posted ]
 ```
 
-Both reviewers' verdicts (from `copies` and `replies`) are "ready" or "ready with changes": fold the changes into T2–T6. "Not ready": revise
+Both reviewers' verdicts (from `copies` and `replies`) are "ready" or "ready with changes": fold the changes into T2–T7. "Not ready": revise
 the plan and send T1 again (round 2, new dedupe key); a second "not ready" goes to the user.
 
 ## 3. API and front end in parallel
@@ -165,23 +168,38 @@ send { "to": "role:docs-writer", "type": "task.docs", "expect": "reply", "projec
 
 (`git branch add-due-dates-docs add-due-dates` first.)
 
-## 7. Verify here, close, report
+## 7. Verify the final integrated commit remotely, close, report
 
-On `add-due-dates` in `<REPO>`:
+The sample's implementation tasks add API and frontend tests, and code review found no additional
+coverage gap. `FINAL=$(git -C "$REPO" rev-parse add-due-dates)` records the full SHA after the docs
+merge. The required developer build in T4 ran before that merge, so T7 runs the acceptance checks
+on `FINAL`.
 
+```json
+send { "to": "role:tester", "type": "task.test", "expect": "reply", "projectId": "prj_01",
+       "title": "Verify the integrated due-dates commit", "dedupeKey": "file:samples/work-items/add-due-dates.md/T7/1",
+       "labels": { "task": "T7", "round": "1", "role": "tester" },
+       "body": { "summary": "Run the required build and full test suites on the final commit.",
+                 "details": "Confirm HEAD is <FINAL> and the runner matches the planned Linux, .NET SDK, Node.js, npm and access requirements. From the repository root run dotnet build TodoApp.slnx and dotnet test --solution TodoApp.slnx. In client/ run npm ci, npm test and npm run build. Every command must exit 0 and both full suites must pass. Return the tested SHA, OS and toolchain versions, commands, exit statuses and test counts or logs. Report any concrete blockers. No code changes." },
+       "attach": [ { "format": "git-bundle", "path": "<REPO>", "branch": "add-due-dates", "expectedHead": "<FINAL>" } ] }
+→ thr_T7
+
+wait { "threadIds": ["thr_T7"], "mode": "any" }
+→ finished: [ thr_T7, result: { status: "succeeded", ... } ]; reply includes the verification evidence
 ```
-dotnet build TodoApp.slnx
-dotnet test --solution TodoApp.slnx
-cd client && npm ci && npm test && npm run build
-```
 
-All pass:
+The coordinator matches the tester's SHA to `FINAL`, confirms the runner meets the environment
+requirements, and checks the reply against all five commands. Every exit status is `0`. The full
+.NET suite reports 24 passed and the full client suite reports 9 passed, with no failures or skips.
+If the evidence is missing or the runner cannot execute a check, keep that check unverified or
+blocked. If the integrated SHA changes, dispatch a new round for the affected checks on the new SHA.
 
 ```json
 complete_project { "projectId": "prj_01", "status": "completed",
-  "summary": "Due dates added: API with validation and isOverdue, front end with the date field and Overdue display, tests for both, README updated. Workflow steps design review, build, code review and docs passed; build and tests pass on add-due-dates.",
-  "refs": [ { "kind": "git.branch", "repo": "messagebus-todo-app", "id": "add-due-dates" } ] }
-→ { "project": { "totals": { "tasks": 6, "tasksDone": 6, "wallSeconds": …, "agentSeconds": …, "tokensIn": …, "tokensOut": …, "estimatedCostUsd": …, "machines": [...] } } }
+  "summary": "Due dates added to the API and front end, with tests and README updates. The workflow steps passed, and a remote tester verified the required builds and full suites on <FINAL>.",
+  "refs": [ { "kind": "git.branch", "repo": "messagebus-todo-app", "id": "add-due-dates" },
+            { "kind": "git.commit", "repo": "messagebus-todo-app", "sha": "<FINAL>" } ] }
+→ { "project": { "totals": { "tasks": 7, "tasksDone": 7, "wallSeconds": …, "agentSeconds": …, "tokensIn": …, "tokensOut": …, "estimatedCostUsd": …, "machines": [...] } } }
 ```
 
 No `usage` here: under Claude Code the local server adds this session's own tokens from its log,
@@ -189,7 +207,7 @@ and the totals include them as the "Orchestrator session" line.
 
 Then the final summary from [terminal-output.md](terminal-output.md): one row per task with role,
 `kind@machine`, `activeSeconds`, tokens and cost from each thread's `result.usage`, the workflow
-steps, the checks run here, the totals, and the branch for the user to review.
+steps, the remote checks and tested SHA, the totals, and the branch for the user to review.
 
 ## Expected call sequence (no failures)
 
@@ -197,7 +215,7 @@ steps, the checks run here, the totals, and the branch for the user to review.
 find_project
 ensure_project  (executionScope "owner-runners"; verify scope and owner in the result)
 directory
-describe_role ×6
+describe_role ×7
 send            T1 design review        (bundle add-due-dates, no base, excludeAuthors)
 wait            [T1]
 send_many       T2 API, T3 front end    (bundles add-due-dates-api / -client, no base)
@@ -209,6 +227,7 @@ send            T5 code review          (bundle add-due-dates, excludeAuthors)
 wait            [T5]
 send            T6 docs                 (bundle add-due-dates-docs)
 wait            [T6]      → fetch_attachment T6 → merge
-(local build and tests)
+send            T7 remote verification  (bundle add-due-dates, expectedHead FINAL)
+wait            [T7]  → check SHA, runner and command results
 complete_project
 ```

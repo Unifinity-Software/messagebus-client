@@ -31,6 +31,9 @@ Each step is a `### N. <Name>` heading with bullets:
 
 - A work item task and a workflow step that do the same thing (both "update README.md") are one
   task; run it where the workflow puts it, unless the work item's timing is stricter.
+- Required roles, hosts, OS versions, toolchains, permissions and release gates still apply to
+  remote verification. Reuse a workflow step's check for final verification only when its
+  evidence covers the required command and environment on the final integrated SHA.
 - Send blocking review findings to the author as `task.fix` with the original implementation
   thread as its parent. After the author returns the fix, rerun the steps required by the workflow.
   Stop and ask the user after two rounds for the same step.
