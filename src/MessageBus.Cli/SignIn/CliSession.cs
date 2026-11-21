@@ -95,7 +95,7 @@ public sealed class CliSession(CliHost host, ConfigStore store, Uri server)
 
     /// <summary>Saves an approved poll's tokens, replacing any earlier sign-in.</summary>
     internal Task<CliSessionFile> SaveApprovedAsync(CliPollResponse approved, CancellationToken ct) =>
-        store.WithSessionLockAsync(() =>
+        store.WithSessionLockAsync(transaction =>
         {
             var now = host.Time.GetUtcNow();
             var saved = new CliSessionFile
@@ -109,7 +109,7 @@ public sealed class CliSession(CliHost host, ConfigStore store, Uri server)
                 AccountEmail = approved.Account?.Email,
                 SignedInAt = now,
             };
-            store.SaveSession(saved);
+            transaction.SaveSession(saved);
             return Task.FromResult(saved);
         }, ct);
 
@@ -123,12 +123,12 @@ public sealed class CliSession(CliHost host, ConfigStore store, Uri server)
     {
         if (Saved is not { } saved) return null;
         if (rejected is null && Fresh(saved)) return saved.AccessToken;
-        return await store.WithSessionLockAsync<string?>(async () =>
+        return await store.WithSessionLockAsync<string?>(async transaction =>
         {
             // Read again: another process may have refreshed while this one waited for the lock.
-            if (Saved is not { } current) return null;
+            if (transaction.LoadSession() is not { } current || current.Server != _serverText) return null;
             if (current.AccessToken != rejected && Fresh(current)) return current.AccessToken;
-            return await RefreshAsync(current, ct);
+            return await RefreshAsync(current, transaction, ct);
         }, ct);
     }
 
@@ -159,11 +159,11 @@ public sealed class CliSession(CliHost host, ConfigStore store, Uri server)
         {
             return (true, null);
         }
-        return await store.WithSessionLockAsync<(bool Ended, string? Problem)>(async () =>
+        return await store.WithSessionLockAsync<(bool Ended, string? Problem)>(async transaction =>
         {
             try
             {
-                if (Saved is not { } current) return (true, null);
+                if (transaction.LoadSession() is not { } current || current.Server != _serverText) return (true, null);
                 var request = Post("logout", new CliRefreshBody(current.RefreshToken), CliJsonContext.Default.CliRefreshBody);
                 request.Headers.Authorization = new AuthenticationHeaderValue(AuthSchemes.Cli, current.AccessToken);
                 using var response = await SendAnonymousAsync(request, ct);
@@ -178,7 +178,7 @@ public sealed class CliSession(CliHost host, ConfigStore store, Uri server)
             }
             finally
             {
-                store.DeleteSession();
+                transaction.DeleteSession();
             }
         }, ct);
     }
@@ -186,18 +186,18 @@ public sealed class CliSession(CliHost host, ConfigStore store, Uri server)
     private bool Fresh(CliSessionFile session) => session.AccessExpiresAt - host.Time.GetUtcNow() > RefreshMargin;
 
     /// <summary>Rotates the refresh token (inside the lock). Null, and the saved sign-in deleted, when the server says it has ended.</summary>
-    private async Task<string?> RefreshAsync(CliSessionFile current, CancellationToken ct)
+    private async Task<string?> RefreshAsync(CliSessionFile current, ConfigStore.ProfileSecurityTransaction transaction, CancellationToken ct)
     {
         using var response = await SendAnonymousAsync(
             Post("refresh", new CliRefreshBody(current.RefreshToken), CliJsonContext.Default.CliRefreshBody), ct);
         if (response.StatusCode == HttpStatusCode.Unauthorized)
         {
-            store.DeleteSession();
+            transaction.DeleteSession();
             return null;
         }
         await EnsureSuccessAsync(response, "renew your sign-in", ct);
         var tokens = await ReadAsync(response, CliJsonContext.Default.CliRefreshResponse, ct);
-        store.SaveSession(current with
+        transaction.SaveSession(current with
         {
             AccessToken = tokens.AccessToken,
             AccessExpiresAt = host.Time.GetUtcNow() + TimeSpan.FromSeconds(tokens.ExpiresIn),

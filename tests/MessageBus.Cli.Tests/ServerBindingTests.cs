@@ -1,4 +1,7 @@
 using System.Text.Json;
+using System.Diagnostics;
+using System.Security.AccessControl;
+using System.Security.Principal;
 using MessageBus.Cli.Configuration;
 using MessageBus.Cli.Server;
 using MessageBus.Cli.Tests.Infrastructure;
@@ -178,6 +181,173 @@ public sealed class ServerBindingTests
     }
 
     [Fact]
+    public async Task Inherited_children_cannot_overlap_preparations_or_writers_and_public_writers_wait_for_release()
+    {
+        using var machine = new TestMachine();
+        var store = new ConfigStore(machine.MbusFolder, "file");
+        store.Save(new CliConfig { Server = Origin + "/gateway" });
+        var beforeMarker = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var writerStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        Task? ordinaryWriter = null;
+        var other = "https://ca.stamps.example.test";
+        var firstBoundary = 0;
+        store.BindingWriteBoundary = boundary =>
+        {
+            if (boundary == "before-marker" && Interlocked.Increment(ref firstBoundary) == 1)
+            {
+                beforeMarker.SetResult();
+                release.Task.GetAwaiter().GetResult();
+            }
+        };
+        await store.WithProfileSecurityLockAsync(async context =>
+        {
+            var first = Task.Run(() => context.PrepareBinding(ServerEndpoint.Parse(Origin + "/gateway"),
+                ServerDiscoveryParser.Parse(Isolated)), TestContext.Current.CancellationToken);
+            await beforeMarker.Task;
+            try
+            {
+                await Task.Run(() =>
+                {
+                    Assert.Throws<InvalidOperationException>(() => context.PrepareBinding(ServerEndpoint.Parse(other),
+                        ServerDiscoveryParser.Parse(Isolated.Replace(Origin, other, StringComparison.Ordinal))));
+                    Assert.Throws<InvalidOperationException>(() => context.Save(new CliConfig()));
+                    Assert.Throws<InvalidOperationException>(() => context.SaveSession(Session(Origin + "/gateway")));
+                }, TestContext.Current.CancellationToken);
+                ordinaryWriter = Task.Run(() =>
+                {
+                    writerStarted.SetResult();
+                    store.Save(new CliConfig { Server = Origin + "/gateway", WorkspaceName = "Child write" });
+                }, TestContext.Current.CancellationToken);
+                await writerStarted.Task;
+                Assert.False(ordinaryWriter.IsCompleted);
+                Assert.False(File.Exists(Path.Combine(machine.MbusFolder, "server-bindings.pending")));
+            }
+            finally { release.TrySetResult(); }
+            await first;
+            store.BindingWriteBoundary = null;
+            // Sequential awaited child operations retain the same explicit context safely.
+            await Task.Run(() => context.PrepareBinding(ServerEndpoint.Parse(other),
+                ServerDiscoveryParser.Parse(Isolated.Replace(Origin, other, StringComparison.Ordinal))), TestContext.Current.CancellationToken);
+            return true;
+        }, TestContext.Current.CancellationToken);
+        await ordinaryWriter!;
+        Assert.Equal("Child write", store.Load().WorkspaceName);
+        Assert.NotNull(store.Load().ServerBinding);
+        using var ledger = JsonDocument.Parse(File.ReadAllText(store.ServerBindingsPath));
+        Assert.Equal(2, ledger.RootElement.GetProperty("bindings").EnumerateObject().Count());
+        Assert.False(File.Exists(Path.Combine(machine.MbusFolder, "server-bindings.pending")));
+    }
+
+    [Fact]
+    public async Task Existing_shared_directory_permissions_are_unchanged_on_binding_and_provisioning_refusal()
+    {
+        using var machine = new TestMachine();
+        var shared = Path.Combine(machine.Home, "shared-fixture");
+        Directory.CreateDirectory(shared);
+        string? aclBefore = null;
+        UnixFileMode modeBefore = default;
+        if (OperatingSystem.IsWindows())
+        {
+            var directory = new DirectoryInfo(shared);
+            var acl = directory.GetAccessControl();
+            acl.AddAccessRule(new FileSystemAccessRule(new SecurityIdentifier(WellKnownSidType.WorldSid, null),
+                FileSystemRights.ReadAndExecute, AccessControlType.Allow));
+            directory.SetAccessControl(acl);
+            aclBefore = directory.GetAccessControl().GetSecurityDescriptorSddlForm(AccessControlSections.All);
+        }
+        else
+        {
+            modeBefore = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute
+                | UnixFileMode.GroupRead | UnixFileMode.GroupWrite | UnixFileMode.GroupExecute;
+            File.SetUnixFileMode(shared, modeBefore);
+        }
+        File.WriteAllText(Path.Combine(shared, "unrelated.txt"), "fixture data");
+        var store = new ConfigStore(shared, "file");
+        await Assert.ThrowsAsync<IOException>(() => Prepare(store));
+        await Assert.ThrowsAsync<IOException>(() => store.WithProfileSecurityLockAsync(context =>
+            Task.FromResult(context.ValidateProvisioning(ServerEndpoint.Parse(Origin), Expected, shared)), TestContext.Current.CancellationToken));
+        if (OperatingSystem.IsWindows())
+            Assert.Equal(aclBefore, new DirectoryInfo(shared).GetAccessControl().GetSecurityDescriptorSddlForm(AccessControlSections.All));
+        else Assert.Equal(modeBefore, File.GetUnixFileMode(shared));
+        Assert.Equal("fixture data", File.ReadAllText(Path.Combine(shared, "unrelated.txt")));
+        Assert.False(File.Exists(store.ServerBindingsPath));
+        Assert.False(File.Exists(Path.Combine(shared, "server-bindings.pending")));
+    }
+
+    [Fact]
+    public async Task Mac_directory_acl_grant_refuses_without_rewriting_the_existing_acl_or_mode()
+    {
+        if (!OperatingSystem.IsMacOS()) return;
+        using var machine = new TestMachine();
+        var profile = Path.Combine(machine.Home, "acl-fixture");
+        DurableProfileFile.CreatePrivateDirectory(profile);
+        // Independent native tool creates a real ACL grant that POSIX mode bits cannot describe.
+        await RunNative("/bin/chmod", "+a", "everyone allow list,search", profile);
+        var before = await AclEntries();
+        var mode = File.GetUnixFileMode(profile);
+        var store = new ConfigStore(profile, "file");
+        await Assert.ThrowsAsync<IOException>(() => Prepare(store));
+        Assert.Equal(before, await AclEntries());
+        Assert.Equal(mode, File.GetUnixFileMode(profile));
+        Assert.False(File.Exists(store.ServerBindingsPath));
+        Assert.False(File.Exists(Path.Combine(profile, "server-bindings.pending")));
+
+        async Task<string> AclEntries() => string.Join('\n', (await RunNative("/bin/ls", "-lde", profile)).Split('\n').Skip(1));
+
+        static async Task<string> RunNative(string executable, params string[] arguments)
+        {
+            var start = new ProcessStartInfo(executable) { RedirectStandardOutput = true, RedirectStandardError = true };
+            foreach (var argument in arguments) start.ArgumentList.Add(argument);
+            using var process = Process.Start(start)!;
+            var output = process.StandardOutput.ReadToEndAsync(TestContext.Current.CancellationToken);
+            var error = process.StandardError.ReadToEndAsync(TestContext.Current.CancellationToken);
+            await process.WaitForExitAsync(TestContext.Current.CancellationToken);
+            Assert.True(process.ExitCode == 0, await error);
+            return await output;
+        }
+    }
+
+    [Fact]
+    public async Task Existing_private_owned_profile_is_accepted_without_permission_repair()
+    {
+        using var machine = new TestMachine();
+        var profile = Path.Combine(machine.Home, "private-fixture");
+        DurableProfileFile.CreatePrivateDirectory(profile);
+        string? aclBefore = OperatingSystem.IsWindows()
+            ? new DirectoryInfo(profile).GetAccessControl().GetSecurityDescriptorSddlForm(AccessControlSections.All) : null;
+        UnixFileMode modeBefore = OperatingSystem.IsWindows() ? default : File.GetUnixFileMode(profile);
+        // Old-shaped settings and unrelated data already exist before ConfigStore opens the profile.
+        File.WriteAllText(Path.Combine(profile, CliConfig.FileName), "{\"server\":\"" + Origin + "/gateway\"}");
+        File.WriteAllText(Path.Combine(profile, "unrelated.txt"), "fixture data");
+        var store = new ConfigStore(profile, "file");
+        await Prepare(store);
+        await store.WithProfileSecurityLockAsync(context => Task.FromResult(
+            context.ValidateProvisioning(ServerEndpoint.Parse(Origin), Expected, profile)), TestContext.Current.CancellationToken);
+        Assert.NotNull(store.Load().ServerBinding);
+        Assert.Equal("fixture data", File.ReadAllText(Path.Combine(profile, "unrelated.txt")));
+        if (OperatingSystem.IsWindows())
+            Assert.Equal(aclBefore, new DirectoryInfo(profile).GetAccessControl().GetSecurityDescriptorSddlForm(AccessControlSections.All));
+        else Assert.Equal(modeBefore, File.GetUnixFileMode(profile));
+    }
+
+    [Fact]
+    public void Directory_alias_is_refused_before_any_profile_file_or_permission_change()
+    {
+        // Windows symlink creation needs a host privilege; native ACL coverage above needs none.
+        if (OperatingSystem.IsWindows()) return;
+        using var machine = new TestMachine();
+        var target = Path.Combine(machine.Home, "target-fixture");
+        Directory.CreateDirectory(target);
+        var mode = File.GetUnixFileMode(target);
+        var alias = Path.Combine(machine.Home, "alias-fixture");
+        Directory.CreateSymbolicLink(alias, target);
+        Assert.Throws<IOException>(() => new ConfigStore(alias, "file"));
+        Assert.Equal(mode, File.GetUnixFileMode(target));
+        Assert.Empty(Directory.GetFileSystemEntries(target));
+    }
+
+    [Fact]
     public async Task Explicit_context_supports_nested_session_writers_and_refuses_use_after_release()
     {
         using var machine = new TestMachine();
@@ -187,16 +357,19 @@ public sealed class ServerBindingTests
         {
             escaped = context;
             var snapshot = context.PrepareBinding(ServerEndpoint.Parse(Origin + "/gateway"), ServerDiscoveryParser.Parse(Isolated));
-            return await store.WithSessionLockAsync(() =>
-            {
-                store.Save(new CliConfig { Server = Origin + "/gateway", ServerBinding = snapshot });
-                store.SaveSession(Session(Origin + "/gateway") with { ServerBinding = snapshot });
-                return Task.FromResult(true);
-            }, TestContext.Current.CancellationToken);
+            return await SaveNestedAsync(context, snapshot);
         }, TestContext.Current.CancellationToken);
         Assert.NotNull(store.LoadSession()!.ServerBinding);
         Assert.Throws<InvalidOperationException>(() => escaped!.LoadBindingFloor());
         Assert.Throws<ServerBindingException>(() => store.SaveSession(Session(Origin + "/different") with { ServerBinding = store.Load().ServerBinding }));
+
+        static async Task<bool> SaveNestedAsync(ConfigStore.ProfileSecurityTransaction transaction, ServerBindingSnapshot? snapshot)
+        {
+            await Task.Yield();
+            transaction.Save(new CliConfig { Server = Origin + "/gateway", ServerBinding = snapshot });
+            transaction.SaveSession(Session(Origin + "/gateway") with { ServerBinding = snapshot });
+            return true;
+        }
     }
 
     [Fact]

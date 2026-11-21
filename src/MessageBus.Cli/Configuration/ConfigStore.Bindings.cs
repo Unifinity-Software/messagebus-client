@@ -14,30 +14,52 @@ public sealed partial class ConfigStore
     /// <summary>Independent origin-keyed ever-isolated ledger.</summary>
     public string ServerBindingsPath => Path.Combine(Directory, "server-bindings.json");
     private string BindingTransitionPath => Path.Combine(Directory, "server-bindings.pending");
-    private readonly AsyncLocal<ProfileSecurityTransaction?> _securityTransaction = new();
 
     // Test-only fault injection at durable boundaries, never a production bypass.
     internal Action<string>? BindingWriteBoundary { get; set; }
 
-    /// <summary>A lock-held context. Do not retain it or run concurrent work through it.</summary>
+    /// <summary>A lock-held context with explicitly scoped operations; concurrent operations are rejected.</summary>
     public sealed class ProfileSecurityTransaction
     {
         private readonly ConfigStore _store;
-        internal bool Active { get; set; } = true;
+        private readonly object _operation = new();
+        private bool _active = true;
+        private bool _busy;
         internal ProfileSecurityTransaction(ConfigStore store) => _store = store;
 
-        private void RequireActive()
+        private T Execute<T>(Func<T> body)
         {
-            if (!Active || !ReferenceEquals(_store._securityTransaction.Value, this))
-                throw new InvalidOperationException("The profile security transaction is no longer held.");
+            if (!Monitor.TryEnter(_operation))
+                throw new InvalidOperationException("Concurrent profile transaction operations are not supported.");
+            try
+            {
+                if (!_active) throw new InvalidOperationException("The profile security transaction is no longer held.");
+                if (_busy) throw new InvalidOperationException("Nested profile transaction operations are not supported.");
+                _busy = true;
+                try { return body(); }
+                finally { _busy = false; }
+            }
+            finally { Monitor.Exit(_operation); }
         }
+
+        internal void Complete() { lock (_operation) _active = false; }
+        internal void DemandStore(ConfigStore store) => Execute(() => ReferenceEquals(store, _store)
+            ? true : throw new InvalidOperationException("The transaction belongs to a different profile store."));
+
+        /// <summary>Reads settings inside the held transaction.</summary>
+        public CliConfig Load() => Execute(() => _store.ReadBindingState().Config);
+        /// <summary>Saves settings while preserving the durable binding floor.</summary>
+        public void Save(CliConfig config) => Execute(() => { _store.SaveConfigLocked(config); return true; });
+        /// <summary>Reads the saved sign-in inside the held transaction.</summary>
+        public CliSessionFile? LoadSession() => Execute(() => _store.ReadBindingState().Session);
+        /// <summary>Saves the sign-in while preserving the durable binding floor.</summary>
+        public void SaveSession(CliSessionFile session) => Execute(() => { _store.SaveSessionLocked(session); return true; });
+        /// <summary>Forgets the sign-in while retaining the durable binding floor.</summary>
+        public void DeleteSession() => Execute(() => { _store.DeleteSessionLocked(); return true; });
 
         /// <summary>Rereads ledger and every surviving snapshot; corruption or missing-ledger evidence refuses.</summary>
         public ServerBindingFloor LoadBindingFloor()
-        {
-            RequireActive();
-            return _store.ReadBindingState().Floor;
-        }
+            => Execute(() => _store.ReadBindingState().Floor);
 
         /// <summary>
         /// Validates current discovery and durably pins before returning a matching snapshot for new credentials.
@@ -45,18 +67,15 @@ public sealed partial class ConfigStore
         /// </summary>
         public ServerBindingSnapshot? PrepareBinding(ServerEndpoint selected, ServerDiscovery discovery,
             ServerBindingExpectation? expected = null)
-        {
-            RequireActive();
-            return _store.PrepareBindingLocked(selected, discovery, expected);
-        }
+            => Execute(() => _store.PrepareBindingLocked(selected, discovery, expected));
 
         /// <summary>
         /// Validates trusted provisioning and explicitly supplied durable home before any future caller probe.
         /// Writability is verified with a flushed owner-only file; durability of a container mount remains a deployment requirement.
         /// </summary>
         public ServerBindingExpectation ValidateProvisioning(ServerEndpoint selected, string expectedJson, string durableHome)
+            => Execute(() =>
         {
-            RequireActive();
             if (string.IsNullOrWhiteSpace(durableHome) || !Path.IsPathFullyQualified(durableHome)
                 || !string.Equals(Path.TrimEndingDirectorySeparator(Path.GetFullPath(durableHome)),
                     Path.TrimEndingDirectorySeparator(Path.GetFullPath(_store.Directory)),
@@ -67,17 +86,16 @@ public sealed partial class ConfigStore
             if (selected.Origin != expected.TransportOrigin
                 || state.Floor.Bindings.Any(b => b.TransportOrigin == selected.Origin && b.Binding != expected.Binding))
                 throw new ServerBindingException("Provisioned binding conflicts with the selected origin or saved floor.");
-            DurableProfileFile.RestrictDirectory(_store.Directory);
+            DurableProfileFile.ValidatePrivateDirectory(_store.Directory);
             var probe = Path.Combine(_store.Directory, ".binding-write-probe-" + Guid.NewGuid().ToString("N"));
             try { _store.WriteOwnerOnly(probe, "durable-profile-probe"); }
             finally { if (File.Exists(probe)) { File.Delete(probe); DurableProfileFile.FlushDirectory(_store.Directory); } }
             return expected;
-        }
+        });
     }
 
     private T InSecurityTransaction<T>(Func<ProfileSecurityTransaction, T> body)
     {
-        if (_securityTransaction.Value is { Active: true } context) return body(context);
         return WithProfileSecurityLockAsync(context => Task.FromResult(body(context)), CancellationToken.None).GetAwaiter().GetResult();
     }
 
@@ -162,7 +180,7 @@ public sealed partial class ConfigStore
         var entries = new Dictionary<string, ServerBindingSnapshot>(state.Ledger.Bindings, StringComparer.Ordinal)
         { [selected.Origin] = snapshot };
         var ledger = new ServerBindingLedger { SchemaVersion = 1, Bindings = entries };
-        DurableProfileFile.RestrictDirectory(Directory);
+        DurableProfileFile.ValidatePrivateDirectory(Directory);
         BindingWriteBoundary?.Invoke("before-marker");
         WriteOwnerOnly(BindingTransitionPath, "binding-transition-v1");
         BindingWriteBoundary?.Invoke("after-marker");

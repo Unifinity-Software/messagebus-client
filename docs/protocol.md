@@ -130,7 +130,12 @@ ledger and both saved files under that lock. `PrepareBinding(selected, discovery
 policy, durably publishes the origin pin first, attaches matching exact-endpoint snapshots to reused config and
 session credentials, then returns an immutable `ServerBindingSnapshot` for new credentials. A returned snapshot
 is storage evidence, not permission to send; callers still need current discovery for each actual send. Existing
-session-lock callers and synchronous config/session writers reuse the lock-held context without reacquisition.
+session-lock callbacks receive that explicit context and use its `Load`, `Save`, `LoadSession`, `SaveSession`
+and `DeleteSession` operations, including through awaited helpers. Concurrent operations through the same
+context are rejected before reading or writing state. Ordinary store methods always acquire the profile lock;
+inherited async execution state never grants ownership. Pass the context to nested helpers rather than calling
+ordinary store methods or acquiring a second transaction while holding the lock. Context use after release
+refuses, and the HTTP send gate rejects a context belonging to another store.
 
 The ledger root is `{schemaVersion:1,bindings:{"<normalized transport origin>":<snapshot>}}`. Each snapshot has
 exactly `version:1`, `selectedEndpoint`, `stampId`, `authorityVersion:1`, `issuer`, `audience`,
@@ -144,7 +149,12 @@ unreadable file or malformed session refuses; malformed sessions no longer silen
 Every config/session writer rereads and merges the floor. Rotation, clearing pending enrollment, unrelated
 settings and local sign-out retain it; session deletion never removes the ledger. Files use owner-only temporary
 creation, disk flush and same-directory atomic replacement, with directory metadata flush on Unix and
-write-through replacement on Windows. Isolated preparation restricts the profile directory to its owner.
+write-through replacement on Windows. New dedicated profile directories are created with private permissions.
+Isolated preparation validates existing directory ownership and privacy and refuses unsuitable directories
+without changing their mode or ACL. Windows permits the current user, SYSTEM and local administrators;
+Unix requires current-user ownership and no group/other permission bits; macOS also refuses ACL grants to
+other principals without modifying the ACL. Directory symlink/reparse aliases
+are refused, including aliases in parent components. Existing valid private profiles need no permission repair.
 `server-bindings.pending` is durably published before a multi-file transition. Any interruption retaining that
 marker refuses further state use until profile restoration; normal commands never delete it to reset a pin.
 Failure before preparation returns must not permit credentials. Local owner deletion/rollback of all state or an

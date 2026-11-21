@@ -58,6 +58,7 @@ public sealed class ServerSendGate : IDisposable
         {
             ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
             DemandDestination(destination);
+            transaction?.DemandStore(_store);
             var generation = Volatile.Read(ref _generation.Value);
             var expectedJson = _environment(ServerBindingExpectation.EnvironmentVariable);
             ServerBindingExpectation? expected = null;

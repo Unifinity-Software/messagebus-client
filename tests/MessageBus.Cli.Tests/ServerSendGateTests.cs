@@ -61,6 +61,32 @@ public sealed class ServerSendGateTests
         Assert.Empty(anonymous.Body);
     }
 
+    [Fact]
+    public async Task Explicit_transaction_prepares_without_reacquiring_and_foreign_store_context_refuses_before_discovery()
+    {
+        using var fixture = new Fixture();
+        using var other = new Fixture();
+        fixture.Discovery = Isolated;
+        using var gate = new ServerSendGate(fixture.Host(), fixture.Store, new Uri(Origin + "/gateway"));
+        var target = new Uri(Origin + "/gateway/api/items");
+        await other.Store.WithProfileSecurityLockAsync(async transaction =>
+        {
+            await Assert.ThrowsAsync<InvalidOperationException>(() => gate.PrepareSendAsync(target,
+                TestContext.Current.CancellationToken, transaction));
+            return true;
+        }, TestContext.Current.CancellationToken);
+        Assert.Empty(fixture.Anonymous);
+        await fixture.Store.WithSessionLockAsync(async transaction =>
+        {
+            var prepared = await gate.PrepareSendAsync(target, TestContext.Current.CancellationToken, transaction);
+            Assert.NotNull(prepared.Binding);
+            Assert.NotNull(transaction.Load().ServerBinding);
+            prepared.Consume(target);
+            return true;
+        }, TestContext.Current.CancellationToken);
+        Assert.Single(fixture.Anonymous);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

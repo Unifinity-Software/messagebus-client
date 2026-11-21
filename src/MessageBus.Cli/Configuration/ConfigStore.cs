@@ -442,12 +442,14 @@ public sealed partial class ConfigStore
 
     /// <summary>Saves the sign-in (owner-only, replaced in one step).</summary>
     public void SaveSession(CliSessionFile session) => InSecurityTransaction(_ =>
+    { SaveSessionLocked(session); return true; });
+
+    private void SaveSessionLocked(CliSessionFile session)
     {
         var state = ReadBindingState();
         session = session with { ServerBinding = MergeSnapshot(state.Session?.ServerBinding, session.ServerBinding, session.Server, state.Ledger) };
         WriteOwnerOnly(SessionPath, JsonSerializer.Serialize(session, CliJsonContext.Default.CliSessionFile));
-        return true;
-    });
+    }
 
     /// <summary>Forgets the sign-in.</summary>
     public void DeleteSession()
@@ -473,14 +475,12 @@ public sealed partial class ConfigStore
     /// the callers; across processes an exclusive lock file does. Whoever waited must read the
     /// sign-in again once inside: another process may have refreshed it meanwhile.
     /// </summary>
-    public Task<T> WithSessionLockAsync<T>(Func<Task<T>> body, CancellationToken ct) =>
-        WithProfileSecurityLockAsync(_ => body(), ct);
+    public Task<T> WithSessionLockAsync<T>(Func<ProfileSecurityTransaction, Task<T>> body, CancellationToken ct) =>
+        WithProfileSecurityLockAsync(body, ct);
 
-    /// <summary>Runs a serialized profile transaction; nested existing session operations reuse its explicit context.</summary>
+    /// <summary>Runs a serialized profile transaction. Pass its context to nested helpers; ordinary store methods acquire a new lock.</summary>
     public async Task<T> WithProfileSecurityLockAsync<T>(Func<ProfileSecurityTransaction, Task<T>> body, CancellationToken ct)
     {
-        if (_securityTransaction.Value is { Active: true } nested)
-            return await body(nested).ConfigureAwait(false);
         EnsureDirectory();
         var lockPath = Path.GetFullPath(Path.Combine(Directory, CliSessionFile.LockFileName));
         var gate = SessionGates.GetOrAdd(lockPath, _ => new SemaphoreSlim(1, 1));
@@ -489,9 +489,8 @@ public sealed partial class ConfigStore
         {
             using var file = await AcquireLockFileAsync(lockPath, ct).ConfigureAwait(false);
             var context = new ProfileSecurityTransaction(this);
-            _securityTransaction.Value = context;
             try { return await body(context).ConfigureAwait(false); }
-            finally { context.Active = false; _securityTransaction.Value = null; }
+            finally { context.Complete(); }
         }
         finally
         {
@@ -594,9 +593,10 @@ public sealed partial class ConfigStore
 
     private void EnsureDirectory()
     {
+        DurableProfileFile.RejectDirectoryAliases(Directory);
         if (OperatingSystem.IsWindows())
         {
-            System.IO.Directory.CreateDirectory(Directory);
+            DurableProfileFile.CreatePrivateDirectory(Directory);
             return;
         }
         // A new folder is owner-only; an existing one (MBUS_HOME pointed somewhere) is left as it is,
