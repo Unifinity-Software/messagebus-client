@@ -33,6 +33,7 @@ internal static class RunnerKeyEnrollment
         var result = await context.Store.WithProfileSecurityLockAsync(async transaction =>
         {
             var current = transaction.Load();
+            transaction.DemandEnrollmentTrust();
             var sameEndpoint = current.Server is not null && ServerEndpoint.Parse(current.Server) == endpoint;
             using var gate = new ServerSendGate(host, context.Store, server);
             var destination = new Uri(CliSettings.BaseAddress(server), ServerConnection.Relative(ApiRoutes.MachineEnroll));
@@ -51,20 +52,27 @@ internal static class RunnerKeyEnrollment
                 return new EnrollmentResult(true);
             }
 
-            // A new runner checkpoint must not replace an already active identity or another server's profile.
-            if (current.MachineId is not null || current.WorkspaceId is not null || current.Server is not null && !sameEndpoint)
-                throw new ServerBindingException("New runner enrollment requires a separate private MBUS_HOME; the existing server identity was preserved.");
+            // A bootstrap credential already consumed by this runner is not a fresh enrollment
+            // at another endpoint, even when that server could report the same workspace or key.
+            if (!sameEndpoint && current.MachineId is not null && current.EnrolledWithApiKey == fingerprint)
+                throw new ServerBindingException("The runner bootstrap belongs to another endpoint; its existing identity was preserved.");
 
             var pending = current.PendingRunnerEnrollment;
-            if (pending is not null && pending != fingerprint)
+            if (pending is not null && (!sameEndpoint || pending != fingerprint))
                 throw new ServerBindingException("The runner checkpoint belongs to another bootstrap key; restore its original configuration.");
             using var key = pending is null ? MachineKey.Create()
                 : MachineKey.FromPem(transaction.LoadEnrollmentKeyPem()
                     ?? throw new ServerBindingException("The runner checkpoint has no persisted machine key."));
             var initial = await gate.PrepareSendAsync(destination, ct, transaction);
+            transaction.DemandEnrollmentTrust();
             if (pending is not null) DemandProvenance(current, endpoint, initial.Binding, fingerprint, key.Fingerprint, pending: true);
             if (onlyRunnerKeys && !await IsRunnerKeyAsync(context, server, apiKey, initial.Binding, transaction, ct))
                 return new EnrollmentResult(false);
+
+            // Only runner credentials need a new durable machine checkpoint. An ordinary API key
+            // may update the selected account/server using its own credential and no saved identity.
+            if (current.MachineId is not null || current.WorkspaceId is not null || current.Server is not null && !sameEndpoint)
+                throw new ServerBindingException("New runner enrollment requires a separate private MBUS_HOME; the existing server identity was preserved.");
 
             await log.WriteLineAsync($"Signing this runner in with the API key from {EnvVars.ApiKey}...");
             var inventory = await AgentScanner.BuildInventoryAsync(host, null, context.Settings.Location, ct);
@@ -85,7 +93,11 @@ internal static class RunnerKeyEnrollment
                 new AuthenticationHeaderValue(AuthSchemes.ApiKey, apiKey),
                 () => Task.FromResult(new MachineEnrollRequest { PublicKey = key.PublicKeyBase64,
                     Name = context.Settings.MachineName, Location = context.Settings.Location, Inventory = inventory }),
-                ct, transaction, prepared => DemandProvenance(checkpoint, endpoint, prepared.Binding, fingerprint, key.Fingerprint, pending: true));
+                ct, transaction, prepared =>
+                {
+                    transaction.DemandEnrollmentTrust();
+                    DemandProvenance(checkpoint, endpoint, prepared.Binding, fingerprint, key.Fingerprint, pending: true);
+                });
             var final = await gate.PrepareSendAsync(destination, ct, transaction);
             if (final.Binding != binding) throw new ServerBindingException("The runner authority changed before identity publication.");
             await final.ConsumeAsync(destination, _ => Task.FromResult(true), ct, transaction);

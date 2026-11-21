@@ -8,6 +8,27 @@ public sealed partial class ConfigStore
 {
     private string EnrollmentTransitionPath => Path.Combine(Directory, "identity-publication.pending");
 
+    private void ValidateEnrollmentTrust(CliConfig config)
+    {
+        // KeyTrust.Load can import legacy trust and write it. Validate the existing bytes instead;
+        // migration still belongs to the old origin when the account/server is saved successfully.
+        var path = Path.Combine(Directory, MessageBus.Mcp.KeyTrust.FileName);
+        var json = ReadOptionalProfileFile(path);
+        if (json is null) json = ReadOptionalProfileFile(path = Path.Combine(Directory, "trusted-keys.json"));
+        if (json is null) return;
+        try
+        {
+            var trust = JsonSerializer.Deserialize(json, CliJsonContext.Default.TrustFile);
+            if (trust?.Servers is null) throw new JsonException("Missing trusted server records.");
+            // Interpret legacy workspace-only pins only at the saved origin, never the selected target.
+            if (config.Server is { } previous) _ = MessageBus.Mcp.KeyTrust.NormalizeServer(previous);
+        }
+        catch (JsonException ex)
+        {
+            throw new ServerBindingException($"{path} is damaged ({ex.Message}). Repair the trust record before signing in.", ex);
+        }
+    }
+
     // A key generation is a local opaque filename component, never a caller supplied path.
     private static void ValidateKeyGeneration(string? generation)
     {
@@ -39,6 +60,13 @@ public sealed partial class ConfigStore
 
     public sealed partial class ProfileSecurityTransaction
     {
+        /// <summary>Reads the current origin's trust before enrollment, without importing or rewriting it.</summary>
+        public void DemandEnrollmentTrust() => Execute(() =>
+        {
+            _store.ValidateEnrollmentTrust(_store.ReadBindingState().Config);
+            return true;
+        });
+
         /// <summary>Reads the current key without migration, fallback writes or ordinary config operations.</summary>
         public string? LoadEnrollmentKeyPem() => Execute(() =>
         {
@@ -62,6 +90,7 @@ public sealed partial class ConfigStore
         public void DemandStagedEnrollment() => Execute(() =>
         {
             var config = _store.ReadBindingState().Config;
+            _store.ValidateEnrollmentTrust(config);
             if (File.Exists(Path.Combine(_store.Directory, "trusted-keys.json"))
                 && !File.Exists(Path.Combine(_store.Directory, MessageBus.Mcp.KeyTrust.FileName)))
                 throw new ServerBindingException("Bind legacy key trust at its original server before replacing this identity.");
@@ -79,6 +108,7 @@ public sealed partial class ConfigStore
             ct.ThrowIfCancellationRequested();
             var state = _store.ReadBindingState();
             if (state.Config != expected) throw new ServerBindingException("The profile changed during enrollment; its identity was not replaced.");
+            _store.ValidateEnrollmentTrust(state.Config);
             // Trust import is a separate publication. Refuse instead of changing it during a failed identity commit.
             if (File.Exists(Path.Combine(_store.Directory, "trusted-keys.json"))
                 && !File.Exists(Path.Combine(_store.Directory, MessageBus.Mcp.KeyTrust.FileName)))

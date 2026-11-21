@@ -58,7 +58,13 @@ public sealed class LoginTests
     public async Task Login_keeps_the_update_record_only_for_the_same_server(string previousServer, bool keepRecord)
     {
         using var machine = new TestMachine();
-        new ConfigStore(machine.MbusFolder).Save(new CliConfig { Server = previousServer });
+        machine.Env[ConfigStore.KeyStoreVariable] = "file";
+        var store = new ConfigStore(machine.MbusFolder, "file");
+        using var previousKey = MessageBus.Cli.Security.MachineKey.Create();
+        store.Save(new CliConfig { Server = previousServer, MachineId = "mch_previous", WorkspaceId = "w101",
+            KeyFingerprint = previousKey.Fingerprint });
+        store.SaveKeyPem(previousKey.ExportPrivateKeyPem());
+        var keyBytes = File.ReadAllBytes(store.KeyPath);
         RunnerUpdateRecord.In(machine.MbusFolder).Save(new RunnerUpdateReport
         {
             Outcome = RunnerUpdateOutcome.Updated, FromVersion = "0.1.0", ToVersion = "0.2.0", At = machine.Time.GetUtcNow(),
@@ -73,21 +79,63 @@ public sealed class LoginTests
         Assert.True(run.ExitCode == 0, run.Error);
         Assert.Equal(FakeServer.Url, new ConfigStore(machine.MbusFolder).Load().Server);
         Assert.Equal(keepRecord, File.Exists(Path.Combine(machine.MbusFolder, RunnerUpdateRecord.FileName)));
+        var saved = store.Load();
+        Assert.Null(saved.MachineId);
+        Assert.Null(saved.WorkspaceId);
+        Assert.Equal(keyBytes, File.ReadAllBytes(store.KeyPath));
+        Assert.DoesNotContain(machine.Server.Requests, request => request.Uri.AbsolutePath == ApiRoutes.MachineEnroll);
+        Assert.All(machine.Server.Requests, request =>
+        {
+            Assert.Null(request.Header(MbusHeaders.Workspace));
+            Assert.Null(request.Header(MbusHeaders.Signature));
+            Assert.NotEqual("MbusMachine mch_previous", request.Header("Authorization"));
+        });
     }
 
-    [Fact]
-    public async Task Damaged_trust_stops_login_before_enrolling_the_computer()
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task Damaged_trust_stops_login_before_enrolling_the_computer(bool runner, bool duringDiscovery)
     {
         using var machine = new TestMachine();
+        machine.Env[ConfigStore.KeyStoreVariable] = "file";
+        if (runner) machine.Env["MBUS_API_KEY"] = "fixture-runner-key";
+        var store = new ConfigStore(machine.MbusFolder, "file");
+        using var key = MessageBus.Cli.Security.MachineKey.Create();
+        store.Save(new CliConfig { Server = "https://old.example", MachineId = "mch_previous", WorkspaceId = "w101",
+            KeyFingerprint = key.Fingerprint });
+        store.SaveKeyPem(key.ExportPrivateKeyPem());
+        var configBytes = File.ReadAllBytes(store.ConfigPath);
+        var keyBytes = File.ReadAllBytes(store.KeyPath);
         var path = Path.Combine(machine.MbusFolder, KeyTrust.FileName);
-        Directory.CreateDirectory(machine.MbusFolder);
-        File.WriteAllText(path, "not JSON");
+        if (duringDiscovery) KeyTrust.Save(machine.MbusFolder, "w101", new TrustedWorkspace(), "https://old.example");
+        else File.WriteAllText(path, "not JSON");
+        var trustBytes = Encoding.UTF8.GetBytes("not JSON");
+        var discoveries = 0;
+        machine.Server
+            .On(HttpMethod.Get, "/api/server", _ =>
+            {
+                if (duringDiscovery && ++discoveries == 2) File.WriteAllBytes(path, trustBytes);
+                return FakeServer.Json(FakeServer.ConfiguredServerInfo);
+            })
+            .On(HttpMethod.Get, ApiRoutes.Caller, _ => Text("""{"scopes":["runner"]}"""))
+            .On(HttpMethod.Post, ApiRoutes.MachineEnroll, request => FakeServer.Json(EnrollResponse(MessageBusJson.Deserialize<MachineEnrollRequest>(request.BodyText)!)))
+            .On(HttpMethod.Put, ApiRoutes.MachineInventory, _ => new(HttpStatusCode.NoContent));
 
-        var run = await machine.RunAsync("login", "--server", FakeServer.Url, "--token", "enroll-test");
+        var run = runner ? await machine.RunAsync("login", "--server", FakeServer.Url)
+            : await machine.RunAsync("login", "--server", FakeServer.Url, "--token", "enroll-test");
 
         Assert.NotEqual(0, run.ExitCode);
         Assert.Contains(path, run.Error);
         Assert.DoesNotContain(machine.Server.Requests, r => r.Uri.AbsolutePath == ApiRoutes.MachineEnroll);
+        Assert.All(machine.Server.Requests, request => Assert.Null(request.Header("Authorization")));
+        Assert.Equal(configBytes, File.ReadAllBytes(store.ConfigPath));
+        Assert.Equal(keyBytes, File.ReadAllBytes(store.KeyPath));
+        Assert.Equal(trustBytes, File.ReadAllBytes(path));
+        Assert.DoesNotContain(Directory.EnumerateFiles(store.Directory), file => Path.GetFileName(file).StartsWith("machine-key.", StringComparison.Ordinal)
+            && file.EndsWith(".pem", StringComparison.Ordinal) && file != store.KeyPath);
     }
 
     [Theory]

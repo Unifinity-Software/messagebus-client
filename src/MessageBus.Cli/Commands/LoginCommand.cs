@@ -59,6 +59,8 @@ internal static class LoginCommand
         var machineName = string.IsNullOrWhiteSpace(choices.Name) ? settings.MachineName : choices.Name.Trim();
         var console = context.Console;
 
+        await context.Store.WithProfileSecurityLockAsync(tx => { tx.DemandEnrollmentTrust(); return Task.FromResult(true); }, ct);
+
         using var anonymous = ServerConnection.CreateAnonymousClient(host, server);
         var info = await ServerConnection.GetServerInfoAsync(anonymous, server, ct);
         console.MarkupLineInterpolated($"Server: [bold]{serverText}[/] (messagebus.ai {info.Version ?? "unknown version"})");
@@ -95,6 +97,7 @@ internal static class LoginCommand
                 inventory = await AgentScanner.BuildInventoryAsync(host, previousMachineId, location, ct);
                 entraDeviceId = await EntraDevice.IdAsync(ct);
             }
+            await context.Store.WithProfileSecurityLockAsync(tx => { tx.DemandEnrollmentTrust(); return Task.FromResult(true); }, ct);
             return new MachineEnrollRequest
             {
                 WorkspaceId = string.IsNullOrWhiteSpace(choices.Workspace) ? null : choices.Workspace.Trim(),
@@ -246,6 +249,7 @@ internal static class LoginCommand
         }
         await context.Store.WithProfileSecurityLockAsync(async transaction =>
         {
+            transaction.DemandEnrollmentTrust();
             using var gate = new ServerSendGate(context.Host, context.Store, server);
             var destination = new Uri(CliSettings.BaseAddress(server), "api/machines/inventory");
             var prepared = await gate.PrepareSendAsync(destination, ct, transaction);

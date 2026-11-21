@@ -89,6 +89,7 @@ public sealed record RunnerEnrollmentBinding
     DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull)]
 [JsonSerializable(typeof(CliConfig))]
 [JsonSerializable(typeof(RunnerEnrollmentBinding))]
+[JsonSerializable(typeof(MessageBus.Mcp.TrustFile))]
 [JsonSerializable(typeof(Server.ServerInfoResponse))]
 [JsonSerializable(typeof(CliSessionFile))]
 [JsonSerializable(typeof(Server.ServerBindingSnapshot))]

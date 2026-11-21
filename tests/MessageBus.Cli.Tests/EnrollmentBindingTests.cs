@@ -21,6 +21,7 @@ public sealed class EnrollmentBindingTests
 {
     private const string Ca = "https://ca.stamps.example.test";
     private const string Eu = "https://eu.stamps.example.test";
+    private const string NewMachineId = "mch_00000000000000000000000002";
     private const string ApiKey = "fixture-identical-bootstrap-key";
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
@@ -53,7 +54,7 @@ public sealed class EnrollmentBindingTests
         await Assert.ThrowsAnyAsync<Exception>(() => store.WithProfileSecurityLockAsync(tx =>
         {
             var current = tx.Load();
-            tx.CommitEnrollment(current, current with { Server = Eu, MachineId = "mch_new", KeyFingerprint = newKey.Fingerprint },
+            tx.CommitEnrollment(current, current with { Server = Eu, MachineId = NewMachineId, KeyFingerprint = newKey.Fingerprint },
                 newKey.ExportPrivateKeyPem(), cancel.Token);
             return Task.FromResult(true);
         }, Ct));
@@ -119,7 +120,7 @@ public sealed class EnrollmentBindingTests
         });
         machine.Server.On(HttpMethod.Put, prefix + ApiRoutes.MachineInventory, request =>
         {
-            Assert.Equal("MbusMachine mch_new", request.Header("Authorization"));
+            Assert.Equal("MbusMachine " + NewMachineId, request.Header("Authorization"));
             Assert.Equal("2", request.Header(MbusHeaders.SignatureVersion));
             return new(HttpStatusCode.NoContent);
         });
@@ -406,7 +407,7 @@ public sealed class EnrollmentBindingTests
     private static HttpResponseMessage Text(string value) => new(HttpStatusCode.OK) { Content = new StringContent(value, Encoding.UTF8, "application/json") };
     private static MachineEnrollResponse EnrollResponse(MachineEnrollRequest request) => new()
     {
-        Machine = new MachineInfo { MachineId = "mch_new", WorkspaceId = "w_same", OwnerSubjectId = "fixture-owner", Kind = MachineKind.Shared,
+        Machine = new MachineInfo { MachineId = NewMachineId, WorkspaceId = "w_same", OwnerSubjectId = "fixture-owner", Kind = MachineKind.Shared,
             Name = request.Name, Os = request.Inventory.Os, Architecture = request.Inventory.Architecture, EnrolledAt = DateTimeOffset.UnixEpoch,
             AcceptsWorkFrom = new AcceptsWorkFrom { Mode = AcceptsWorkFromMode.Workspace }, KeyFingerprint = "fixture" },
         WorkspaceName = "Fixture workspace", MinCliVersion = "0.0.1",
