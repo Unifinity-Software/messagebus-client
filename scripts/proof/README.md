@@ -37,13 +37,20 @@ From the coordinator checkout, for example (replace the local image/cache names)
 
 ```sh
 podman run --name mbus-571-proof --network none --user 0 \
-  --security-opt seccomp=unconfined --cap-add SYS_ADMIN \
+  --security-opt seccomp=unconfined --security-opt unmask=ALL --cap-add SYS_ADMIN \
   -v "$PWD:/source:ro" -v "$NUGET_PACKAGES:/packages:ro" \
   -e NUGET_PACKAGES=/packages local/mbus-node24-sdk10-bwrap \
   bash /source/scripts/proof/node-import.sh
 ```
 
-The additional container permissions permit nested unprivileged bubblewrap;
+The additional container permissions permit nested unprivileged bubblewrap.
+Default OCI read-only system paths refuse `--disable-userns`; the proof requires
+`unmask=ALL` only on its disposable outer container. These flags must never be
+copied into production child launch or interpreted as default ACI eligibility.
+The inner check must have zero effective capabilities and cannot connect to the
+outer fixture listener. No host sysctl is changed.
+
+For this fixture only,
 use no host home, socket, credentials or other repository mounts. The container
 has no external network, only its loopback HTTPS fixture. The copied source,
 generated TLS key/certificate, dummy Basic authorization, served repositories,
@@ -55,7 +62,10 @@ name for concurrent proofs.
 Success requires both test cases, `return.passed`, `alternates.passed`, and the
 final `MBUS_LINUX_IMPORT_RETURN_PROOF_PASSED cases=2` marker. An unavailable
 boundary, skipped test, failed restore, wrong tool version or missing marker
-fails the launcher. Ordinary test suites skip these two cases without the
+fails the launcher. If the read-only cache lacks an SDK package, supply an
+operator-prepared directory of exact `.nupkg` files through `MBUS_PROOF_FEED`.
+The launcher copies these into its disposable feed and writes restored packages
+only beneath its printed proof root, using the mounted cache as read-only fallback. Ordinary test suites skip these two cases without the
 fixture variable; those skips are not Linux proof.
 
 The positive case fetches from authenticated fixture HTTPS using real Git,
