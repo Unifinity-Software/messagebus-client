@@ -419,7 +419,10 @@ public sealed class LoginTests
                 Assert.False(refreshed);
                 Assert.False(retryBoundaryReached);
                 Assert.Null(request.Header("Authorization"));
-                Assert.Equal("""{"refreshToken":"fixture-saved-refresh"}""", request.BodyText);
+                using var refreshBody = JsonDocument.Parse(request.BodyText);
+                var refreshToken = Assert.Single(refreshBody.RootElement.EnumerateObject());
+                Assert.Equal("refreshToken", refreshToken.Name);
+                Assert.Equal("fixture-saved-refresh", refreshToken.Value.GetString());
                 refreshed = true;
                 return Text("""{"accessToken":"fixture-refreshed-access","refreshToken":"fixture-refreshed-refresh","expiresIn":3600}""");
             })
