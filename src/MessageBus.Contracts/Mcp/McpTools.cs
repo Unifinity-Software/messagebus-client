@@ -469,6 +469,9 @@ public sealed record ProgressResult
 /// <summary>Input of <c>settle</c>.</summary>
 public sealed record SettleInput
 {
+    /// <summary>The delivered attempt, when the target advertises <c>settleAttemptV1</c>. Injected by the runner's local tools; remote callers use the attempt they received.</summary>
+    public int? Attempt { get; init; }
+
     /// <summary>Optional short notes (at most 12). Local tool only: sealed into reply.friction; only kinds reach the service.</summary>
     public IReadOnlyList<FrictionNote> Friction { get; set; } = [];
 
@@ -852,6 +855,9 @@ public sealed record RetryInput
 /// </summary>
 public sealed record RequestApprovalInput
 {
+    /// <summary>Author-supplied plain-text impact, not verified targets or authority. Normalize line endings to LF, trim, and map empty to null; at most 1000 Unicode scalars, no invalid surrogates or controls except LF/TAB. Requires <c>approvalAffectedV1</c>.</summary>
+    public string? Affected { get; init; }
+
     /// <summary>What to approve, one short sentence (the approver sees it as the title).</summary>
     public required string Title { get; init; }
 
@@ -909,6 +915,9 @@ public enum ApprovalState
 /// <summary>Result of <c>request_approval</c> and <c>wait_approval</c> (the original issue).</summary>
 public sealed record ApprovalResult
 {
+    /// <summary>The normalized author-supplied impact shown to the approver, when supplied; not verified targets or authority.</summary>
+    public string? Affected { get; init; }
+
     /// <summary>The approval id (<c>apr_…</c>), for <c>wait_approval</c>.</summary>
     public required string ApprovalId { get; init; }
 

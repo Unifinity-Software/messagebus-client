@@ -36,6 +36,7 @@ internal sealed partial class LocalTools : IAsyncDisposable
     private readonly AttachmentClient _attachments;
     private readonly SemaphoreSlim _connect = new(1, 1);
     private readonly ConcurrentDictionary<string, MessageEnvelope> _tasks = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, (string Affected, string Digest)> _approvalRequests = new(StringComparer.Ordinal);
     private McpClient? _service;
     private string? _agent;
     private string? _clientKind;
@@ -117,7 +118,7 @@ internal sealed partial class LocalTools : IAsyncDisposable
                 McpToolNames.FetchAttachment => Ok(await FetchAttachmentAsync(Read<FetchAttachmentInput>(arguments), ct)),
                 McpToolNames.Retry => Ok(await RetryAsync(Read<RetryInput>(arguments), ct)),
                 McpToolNames.CompleteProject => Ok(await CompleteProjectAsync(Read<CompleteProjectInput>(arguments), ct)),
-                McpToolNames.RequestApproval => Ok(await RequestApprovalAsync(Read<RequestApprovalInput>(arguments), ct)),
+                McpToolNames.RequestApproval => Ok(await RequestApprovalAsync(ReadApproval(arguments), ct)),
                 McpToolNames.WaitApproval => Ok(await WaitApprovalAsync(Read<WaitApprovalInput>(arguments), ct)),
                 McpToolNames.OpenInbox => Ok(await OpenInboxAsync(Read<OpenInboxInput>(arguments), ct)),
                 McpToolNames.Status => Ok(await StatusAsync(Read<StatusInput>(arguments), ct)),
@@ -874,9 +875,22 @@ internal sealed partial class LocalTools : IAsyncDisposable
     /// Asks a person to approve a step (the original issue). The approver reads the request in the dashboard, so it isn't
     /// end-to-end encrypted: it is checked for secrets here first, like a message body.
     /// </summary>
+    private static RequestApprovalInput ReadApproval(IDictionary<string, JsonElement>? arguments)
+    {
+        // JSON permits escaped lone surrogates. Read them here so malformed impact is a field validation error,
+        // rather than an internal error while the generic reader reserializes the arguments.
+        if (arguments is not null && arguments.TryGetValue("affected", out var affected) && affected.ValueKind == JsonValueKind.String)
+        {
+            try { _ = NormalizeAffected(affected.GetString()); }
+            catch (InvalidOperationException) { throw McpToolException.Invalid("affected", "Use valid Unicode scalar values; invalid surrogates are not accepted."); }
+        }
+        return Read<RequestApprovalInput>(arguments);
+    }
+
     private async Task<ApprovalResult> RequestApprovalAsync(RequestApprovalInput input, CancellationToken ct)
     {
-        foreach (var (field, text) in new[] { ("title", input.Title), ("detail", input.Detail) })
+        input = input with { Affected = NormalizeAffected(input.Affected) };
+        foreach (var (field, text) in new[] { ("title", input.Title), ("detail", input.Detail), ("affected", input.Affected) })
         {
             if (text is { Length: > 0 } && SecretScanner.Scan(text) is { Count: > 0 } findings)
                 throw new McpToolException(new McpError
@@ -885,8 +899,50 @@ internal sealed partial class LocalTools : IAsyncDisposable
                     Message = $"The {field} looks like it holds a secret ({string.Join(", ", findings.Select(f => f.Kind).Distinct())}). Take it out and ask again.",
                 });
         }
+        if (input.Affected is not null && !await TargetCapabilities.SupportsAsync(_o.Http, "approvalAffectedV1", ct))
+            throw new McpToolException(new McpError
+            {
+                Code = McpErrorCodes.Unavailable, Field = "affected",
+                Message = "The actual target did not confirm approvalAffectedV1 support. The approval was not sent; do not retry by removing affected.",
+            });
         var projectId = input.ProjectId ?? DefaultProject();
-        return await ForwardAsync<RequestApprovalInput, ApprovalResult>(McpToolNames.RequestApproval, input with { ProjectId = projectId }, ct);
+        var result = await ForwardAsync<RequestApprovalInput, ApprovalResult>(McpToolNames.RequestApproval, input with { ProjectId = projectId }, ct);
+        if (input.Affected is { } affected)
+        {
+            VerifyApproval(result, affected);
+            _approvalRequests[result.ApprovalId] = (affected, result.RequestDigest!);
+        }
+        return result;
+    }
+
+    private static string? NormalizeAffected(string? text)
+    {
+        if (text is null) return null;
+        text = text.Replace("\r\n", "\n", StringComparison.Ordinal).Replace('\r', '\n');
+        var rest = text.AsSpan();
+        while (!rest.IsEmpty)
+        {
+            if (Rune.DecodeFromUtf16(rest, out var rune, out var consumed) != System.Buffers.OperationStatus.Done
+                || Rune.IsControl(rune) && rune.Value is not ('\n' or '\t'))
+                throw McpToolException.Invalid("affected", "Use valid Unicode plain text without control characters other than LF/TAB.");
+            rest = rest[consumed..];
+        }
+        text = text.Trim();
+        if (text.EnumerateRunes().Count() > 1000)
+            throw McpToolException.Invalid("affected", "Give at most 1000 Unicode scalars after normalization; text is not truncated.");
+        return text.Length == 0 ? null : text;
+    }
+
+    private static void VerifyApproval(ApprovalResult result, string affected, string? digest = null)
+    {
+        if (!string.Equals(result.Affected, affected, StringComparison.Ordinal)
+            || string.IsNullOrWhiteSpace(result.RequestDigest)
+            || digest is not null && !string.Equals(result.RequestDigest, digest, StringComparison.Ordinal))
+            throw new McpToolException(new McpError
+            {
+                Code = McpErrorCodes.Internal,
+                Message = "Approval protocol failure: affected or requestDigest did not match the request. This response is not authorization to proceed.",
+            });
     }
 
     /// <summary>Waits for the decision in chunks, returning by the client's limit like <c>wait</c>.</summary>
@@ -896,6 +952,12 @@ internal sealed partial class LocalTools : IAsyncDisposable
         while (true)
         {
             var result = await ForwardAsync<WaitApprovalInput, ApprovalResult>(McpToolNames.WaitApproval, input with { TimeoutSeconds = Chunk(deadline) }, ct);
+            if (_approvalRequests.TryGetValue(input.ApprovalId, out var requested))
+            {
+                if (result.ApprovalId != input.ApprovalId)
+                    throw new McpToolException(new McpError { Code = McpErrorCodes.Internal, Message = "Approval protocol failure: the response identifies a different approval." });
+                VerifyApproval(result, requested.Affected, requested.Digest);
+            }
             if (result.Status != ApprovalState.Pending || _o.Time.GetUtcNow() >= deadline) return result;
         }
     }
@@ -1113,6 +1175,7 @@ internal sealed partial class LocalTools : IAsyncDisposable
 
     private async Task<SettleOutput> SettleCoreAsync(SettleInput input, bool runnerTask, CancellationToken ct)
     {
+        input = input with { Attempt = TrustedAttempt(input) };
         var pinned = input.Attach?.Any(spec => spec is { Format: AttachmentFormat.GitBundle, ExpectedHead: not null }) == true;
         if (runnerTask && pinned)
             File.Delete(KeptAnswer.KeptFile(_o.SettleFile!));
@@ -1184,9 +1247,22 @@ internal sealed partial class LocalTools : IAsyncDisposable
             }
         }
 
-        if (!runnerTask) return await ForwardAsync<SettleInput, SettleOutput>(McpToolNames.Settle, input, ct);
+        if (!runnerTask) return await ForwardSettleAsync(input, ct);
         return await SettleRunnerTaskAsync(input, ct);
     }
+
+    private async Task<SettleOutput> ForwardSettleAsync(SettleInput input, CancellationToken ct)
+    {
+        // Only the runner-owned delivery is trusted. Never use an agent's arguments, delivery file or kept answer for identity.
+        var attempt = TrustedAttempt(input);
+        if (attempt is not null && !await TargetCapabilities.SupportsAsync(_o.Http, "settleAttemptV1", ct)) attempt = null;
+        return await ForwardAsync<SettleInput, SettleOutput>(McpToolNames.Settle, input with { Attempt = attempt }, ct);
+    }
+
+    private int? TrustedAttempt(SettleInput input) =>
+        _o.Delivery is { } delivery && RunnerThreadId(delivery) == input.ThreadId
+        && (input.DeliveryId is null || RunnerDeliveryId(delivery) == input.DeliveryId)
+            ? delivery.Attempt : null;
 
     /// <summary>
     /// A runner task's answer (sealed, its code packaged): the runner settles after the agent exits, with this result, so the
@@ -1194,9 +1270,10 @@ internal sealed partial class LocalTools : IAsyncDisposable
     /// </summary>
     private async Task<SettleOutput> SettleRunnerTaskAsync(SettleInput input, CancellationToken ct)
     {
+        input = input with { Attempt = TrustedAttempt(input) };
         var output = input.SealedReply is null
             ? new SettleOutput { Status = ThreadStatus.Working }
-            : await ForwardAsync<SettleInput, SettleOutput>(McpToolNames.Settle, input with { ReplyOnly = true }, ct);
+            : await ForwardSettleAsync(input with { ReplyOnly = true }, ct);
         await File.WriteAllTextAsync(_o.SettleFile!, MessageBusJson.Serialize(input with { SealedReply = null, Attachments = [], ReplyOnly = false }), ct);
         File.Delete(KeptAnswer.KeptFile(_o.SettleFile!));
         return output;
