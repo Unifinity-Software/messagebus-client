@@ -46,8 +46,8 @@ internal sealed record DoctorServerView(MachineInfo? Machine, RunnerReleasePolic
         {
             return new(null, null, null);
         }
-        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        cts.CancelAfter(Timeout);
+        using var timeout = new CancellationTokenSource(Timeout, context.Host.Time);
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeout.Token);
         PreparedServerSend? observation = null;
         ServerBinding? persistedBinding = null;
         try
@@ -83,13 +83,18 @@ internal sealed record DoctorServerView(MachineInfo? Machine, RunnerReleasePolic
         }
         catch (ServerBindingException)
         {
+            ct.ThrowIfCancellationRequested();
             return new(null, null, "Server binding validation refused. Restore the saved binding or enroll explicitly at the selected endpoint; credentials were not retried.")
             { Discovery = observation?.Discovery, PreparedBinding = observation?.Binding, PersistedBinding = persistedBinding, BindingRefused = true };
         }
         catch (Exception ex) when (ex is HttpRequestException or JsonException || (ex is OperationCanceledException && !ct.IsCancellationRequested))
         {
-            return new(null, null, ex is OperationCanceledException ? $"no answer within {Timeout.TotalSeconds:0} seconds." : ex.Message, Suspended: ex is WorkspaceSuspendedException)
-            { Discovery = observation?.Discovery, PreparedBinding = observation?.Binding, PersistedBinding = persistedBinding };
+            ct.ThrowIfCancellationRequested();
+            var problem = ex is OperationCanceledException ? $"no answer within {Timeout.TotalSeconds:0} seconds." : ex.Message;
+            // Until discovery and durable preparation finish, readiness is unknown. A timeout
+            // here is a binding refusal too; only subsequent optional lookups may warn.
+            return new(null, null, observation is null ? "Server binding validation refused: " + problem : problem, Suspended: ex is WorkspaceSuspendedException)
+            { Discovery = observation?.Discovery, PreparedBinding = observation?.Binding, PersistedBinding = persistedBinding, BindingRefused = observation is null };
         }
     }
 

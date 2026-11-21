@@ -3,6 +3,7 @@ using System.Net;
 using MessageBus.Cli.Commands;
 using MessageBus.Cli.Configuration;
 using MessageBus.Cli.Hosting;
+using MessageBus.Cli.Output;
 using MessageBus.Cli.Server;
 using MessageBus.Cli.Tests.Infrastructure;
 using MessageBus.Contracts.Http;
@@ -15,6 +16,113 @@ public sealed class DoctorRegionalTests
     private const string Origin = "https://eu.stamps.example.test";
     private const string Isolated = """{"product":"messagebus.ai","stamp":{"stampId":"eu","geography":"eu","azureRegion":"westeurope","url":"https://eu.stamps.example.test","aliases":[]},"signIn":{"authority":{"version":1,"stampId":"eu","issuer":"https://eu.stamps.example.test","audience":"https://eu.stamps.example.test"},"machineSignature":{"version":2,"required":true}}}""";
     private const string Legacy = """{"product":"messagebus.ai","signIn":{"microsoft":true},"stamp":{"stampId":"eu","geography":"eu","azureRegion":"westeurope","url":"https://eu.stamps.example.test","aliases":[]}}""";
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task Host_clock_timeout_blocks_before_observation_but_only_warns_on_later_lookup(bool isolated, bool laterLookup)
+    {
+        using var machine = Machine(Origin);
+        if (isolated)
+            await new ConfigStore(machine.MbusFolder, "file").WithProfileSecurityLockAsync(tx =>
+                Task.FromResult(tx.PrepareBinding(ServerEndpoint.Parse(Origin + "/gateway"), ServerDiscoveryParser.Parse(Isolated))),
+                TestContext.Current.CancellationToken);
+        machine.Server.On(HttpMethod.Get, "/gateway/api/server", _ => Json(isolated ? Isolated : Legacy));
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var host = TimeoutHost(machine, laterLookup, entered);
+        var asking = DoctorServerView.AskAsync(Context(host), TestContext.Current.CancellationToken);
+        await entered.Task.WaitAsync(TestContext.Current.CancellationToken);
+        machine.Time.Advance(TimeSpan.FromSeconds(8));
+        var view = await asking;
+
+        Assert.Contains("no answer within 8 seconds", view.Problem);
+        Assert.Equal(!laterLookup, view.BindingRefused);
+        Assert.Equal(laterLookup, view.Discovery is not null);
+        Assert.Equal(isolated && laterLookup, view.PreparedBinding is not null);
+        Assert.Equal(isolated, view.PersistedBinding is not null);
+        Assert.Equal(laterLookup ? SummaryTone.Note : SummaryTone.Bad, Assert.Single(view.Rows()).Tone);
+        if (!laterLookup)
+            Assert.DoesNotContain(machine.Server.Requests, r => r.Header("Authorization") is not null);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Parent_cancellation_propagates_during_discovery_and_later_lookup(bool laterLookup)
+    {
+        using var machine = Machine(Origin);
+        machine.Server.On(HttpMethod.Get, "/gateway/api/server", _ => Json(Legacy));
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var stop = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        var asking = DoctorServerView.AskAsync(Context(TimeoutHost(machine, laterLookup, entered)), stop.Token);
+        await entered.Task.WaitAsync(TestContext.Current.CancellationToken);
+        await stop.CancelAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => asking);
+    }
+
+    [Theory]
+    [InlineData(false, 1)]
+    [InlineData(true, 0)]
+    public async Task Actual_doctor_command_timeout_exit_depends_on_successful_initial_observation(bool laterLookup, int expectedExit)
+    {
+        using var machine = Machine(Origin);
+        machine.InstallFake("git", new("git version 2.50.1"));
+        machine.InstallFake("codex", new("codex-cli 0.169.0"), new Dictionary<string, FakeAnswer>
+        { ["login"] = new("Logged in using ChatGPT", ToStderr: true) });
+        machine.Server.On(HttpMethod.Get, "/gateway/api/server", _ => Json(Legacy));
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var output = new StringWriter();
+        var running = CliApp.RunAsync(["doctor"], TimeoutHost(machine, laterLookup, entered, output), TestContext.Current.CancellationToken);
+        await entered.Task.WaitAsync(TestContext.Current.CancellationToken);
+        machine.Time.Advance(TimeSpan.FromSeconds(8));
+        Assert.Equal(expectedExit, await running);
+        Assert.Contains("no answer within 8 seconds", output.ToString());
+        if (laterLookup) Assert.DoesNotContain("Server binding validation refused", output.ToString());
+        else Assert.Contains("Server binding validation refused", output.ToString());
+    }
+
+    private static CliHost TimeoutHost(TestMachine machine, bool laterLookup, TaskCompletionSource entered, TextWriter? output = null)
+    {
+        var basis = machine.CreateHost();
+        var discoveries = 0;
+        Task<HttpResponseMessage> Wait(CancellationToken ct)
+        {
+            entered.TrySetResult();
+            return new TaskCompletionSource<HttpResponseMessage>(TaskCreationOptions.RunContinuationsAsynchronously).Task.WaitAsync(ct);
+        }
+        return new CliHost
+        {
+            Out = output ?? basis.Out, Error = basis.Error, In = basis.In,
+            OpenStandardInput = basis.OpenStandardInput, OpenStandardOutput = basis.OpenStandardOutput,
+            GetEnvironmentVariable = basis.GetEnvironmentVariable, HomeDirectory = basis.HomeDirectory,
+            MachineName = basis.MachineName, MbusCommand = basis.MbusCommand, Browser = basis.Browser,
+            Skills = basis.Skills, McpServer = basis.McpServer, Time = machine.Time,
+            ExtraAgentDirectories = basis.ExtraAgentDirectories, SleepSettings = basis.SleepSettings,
+            CreateReleaseHttpClient = basis.CreateReleaseHttpClient, RunnerServices = basis.RunnerServices,
+            CreateDiscoveryHttpHandler = () => new CancellationHandler(async (request, ct) =>
+            {
+                Assert.Null(request.Headers.Authorization);
+                Assert.False(request.Headers.Contains(MbusHeaders.Workspace));
+                // Doctor starts its observation first; the concurrent optional key-readiness
+                // check must be able to finish independently of that diagnostic deadline.
+                if (!laterLookup && Interlocked.Increment(ref discoveries) == 1) return await Wait(ct);
+                using var invoker = new HttpMessageInvoker(machine.Server, false);
+                return await invoker.SendAsync(request, ct);
+            }),
+            CreateHttpHandler = () => new CancellationHandler(async (request, ct) =>
+            {
+                if (request.RequestUri!.AbsolutePath == "/gateway/api/w/ws_fixture/machines/mch_fixture")
+                {
+                    Assert.NotNull(request.Headers.Authorization);
+                    return await Wait(ct);
+                }
+                using var invoker = new HttpMessageInvoker(machine.Server, false);
+                return await invoker.SendAsync(request, ct);
+            }),
+        };
+    }
 
     [Theory]
     [InlineData(true, Origin)]
@@ -256,9 +364,18 @@ public sealed class DoctorRegionalTests
         root.Options.Add(options.Server);
         return CommandContext.Load(machine.CreateHost(), root.Parse([]), options);
     }
+    private static CommandContext Context(CliHost host)
+    {
+        var options = new CommonOptions();
+        return CommandContext.Load(host, new RootCommand { options.Server }.Parse([]), options);
+    }
     private static HttpResponseMessage Json(string value) => new(HttpStatusCode.OK) { Content = new StringContent(value) };
     private sealed class DiscoveryHandler(Func<HttpRequestMessage, Task<HttpResponseMessage>> send) : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) => send(request);
+    }
+    private sealed class CancellationHandler(Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> send) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) => send(request, cancellationToken);
     }
 }

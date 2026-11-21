@@ -15,6 +15,7 @@ using MessageBus.Cli.Keys;
 using MessageBus.Cli.Runner;
 using MessageBus.Cli.Server;
 using MessageBus.Cli.Tests.Infrastructure;
+using MessageBus.Contracts;
 using MessageBus.Contracts.Attachments;
 using MessageBus.Contracts.Json;
 using MessageBus.Contracts.Mcp;
@@ -102,7 +103,7 @@ public sealed class ComposedAttachmentCallerTests
         Assert.NotNull(replayed);
         Assert.Equal("reader", replayed.ToRole);
         var moved = Assert.Single(replayed.Attachments!);
-        f.AssertCiphertext(moved);
+        f.AssertCiphertext(moved, f.RoleKey);
         Assert.Equal(f.RoleKey.KeyId, moved.Encryption!.KeyId);
         Assert.Equal("attachment plaintext", await f.Open(moved));
         var sealedReply = replayed.SealedBody!;
@@ -132,14 +133,14 @@ public sealed class ComposedAttachmentCallerTests
         {
             await using var client = await McpClient.CreateAsync(new StreamClientTransport(input.Writer.AsStream(), output.Reader.AsStream()), cancellationToken: Ct);
             var result = await Call(client, McpToolNames.Settle, f.SettleWithFile());
-            Assert.False(result.IsError == true, result.StructuredContent.ToString());
+            Assert.False(result.IsError == true, result.StructuredContent + f.Diagnostics);
             var sent = Assert.Single(f.Settles);
             var reference = Assert.Single(sent.Attachments!);
             f.AssertCiphertext(reference);
             Assert.Equal("kept answer payload", f.OpenReply(sent).Summary);
             var fetched = await Call(client, McpToolNames.FetchAttachment, new FetchAttachmentInput
             { ThreadId = f.Delivery.Envelope.ThreadId, DeliveryId = f.Delivery.DeliveryId, AttachmentId = reference.Id, Path = Path.Combine(f.Run.Root, "fetched.txt") });
-            Assert.False(fetched.IsError == true, fetched.StructuredContent.ToString());
+            Assert.False(fetched.IsError == true, fetched.StructuredContent + f.Diagnostics);
             Assert.Equal("attachment plaintext", await File.ReadAllTextAsync(Path.Combine(f.Run.Root, "fetched.txt"), Ct));
             Assert.All(f.Blobs, f.AssertBlob);
             if (isolated)
@@ -213,7 +214,7 @@ public sealed class ComposedAttachmentCallerTests
             f.AssertStrippedWithoutSend();
             return;
         }
-        Assert.True(result.Succeeded, result.Error?.Message);
+        Assert.True(result.Succeeded, result.Error?.Message + f.Diagnostics);
         var sent = Assert.Single(f.Settles);
         var reference = Assert.Single(sent.Attachments!);
         f.AssertCiphertext(reference);
@@ -276,6 +277,7 @@ public sealed class ComposedAttachmentCallerTests
         private readonly ConcurrentDictionary<string, byte[]> _ciphertexts = new();
         private readonly Dictionary<string, UploadLinkRequest> _uploads = new();
         private readonly ConcurrentQueue<RecordedRequest> _apiRequests = new();
+        private readonly ConcurrentQueue<Exception> _fixtureFailures = new();
         private int _next;
         private string _last = "att_source";
         public TestMachine Machine { get; } = new();
@@ -286,6 +288,8 @@ public sealed class ComposedAttachmentCallerTests
         public PublicKeyInfo WorkspaceKey { get; }
         public PublicKeyInfo RoleKey { get; }
         public PublicKeyInfo DeviceKey { get; }
+        public string MachineId { get; }
+        public string Diagnostics => string.Join(Environment.NewLine, _fixtureFailures.Select(e => e.ToString()));
         public string Endpoint { get; }
         private string BlobEndpoint { get; }
         public string Discovery { get; set; }
@@ -316,11 +320,12 @@ public sealed class ComposedAttachmentCallerTests
             if (machineAuthentication) Machine.Env.Remove(EnvVars.ApiKey);
             Machine.Env[ConfigStore.KeyStoreVariable] = "file";
             Store = new ConfigStore(Machine.MbusFolder, "file");
-            Store.Save(new CliConfig { Server = Endpoint, WorkspaceId = "ws_test", MachineId = "mch_fixture" });
+            MachineId = ContractIds.New(ContractIds.Machine, Machine.Time.GetUtcNow());
+            Store.Save(new CliConfig { Server = Endpoint, WorkspaceId = "ws_test", MachineId = MachineId });
             Store.SaveKeyPem(_device.ExportPem());
             WorkspaceKey = Key(_recipient, "ek_workspace", KeyScope.Workspace);
             RoleKey = Key(_role, "ek_reader", KeyScope.Role, "reader");
-            DeviceKey = Key(_device, "ek_device", KeyScope.Machine, "mch_fixture");
+            DeviceKey = Key(_device, "ek_device", KeyScope.Machine, MachineId);
             Ring.Add(WorkspaceKey.KeyId, KeyPair.FromPem(_recipient.ExportPem()));
             Ring.Add(RoleKey.KeyId, KeyPair.FromPem(_role.ExportPem()));
             Ring.Add(DeviceKey.KeyId, KeyPair.FromPem(_device.ExportPem()));
@@ -371,6 +376,17 @@ public sealed class ComposedAttachmentCallerTests
 
         public HttpMessageHandler Handler() => new AsyncHandler(async (request, ct) =>
         {
+            try { return await RespondAsync(request, ct); }
+            catch (Exception ex)
+            {
+                // LocalTools returns a short MCP error. Preserve the original fixture assertion
+                // and stack so a failing composed test identifies the actual wire mismatch.
+                _fixtureFailures.Enqueue(ex);
+                throw;
+            }
+        });
+        private async Task<HttpResponseMessage> RespondAsync(HttpRequestMessage request, CancellationToken ct)
+        {
             if (request.Headers.Authorization is not null)
             {
                 Assert.Equal(new Uri(Endpoint).Authority, request.RequestUri!.Authority);
@@ -396,9 +412,9 @@ public sealed class ComposedAttachmentCallerTests
             Assert.NotNull(request.Headers.Authorization);
             using var invoker = new HttpMessageInvoker(Machine.Server, false);
             return await invoker.SendAsync(request, ct);
-        });
+        }
         public HttpClient Api() => ServerConnection.CreateAuthenticatedClient(Host, Context.Settings, Store, "mcp");
-        public LocalServerOptions Options(HttpClient api) => LocalServer.Options(api, "ws_test", "mch_fixture", Store.Directory,
+        public LocalServerOptions Options(HttpClient api) => LocalServer.Options(api, "ws_test", MachineId, Store.Directory,
             Stream.Null, Stream.Null, TextWriter.Null, "fixture", _ => null) with
         {
             Delivery = Delivery, SettleFile = Run.SettleFile, Scope = RunToolScope.For(Delivery, Run.Root),
@@ -419,10 +435,23 @@ public sealed class ComposedAttachmentCallerTests
             Machine.Server.On(HttpMethod.Get, "/gateway/api/w/ws_test/keys", _ => FakeServer.Json<IReadOnlyList<PublicKeyInfo>>([DeviceKey, WorkspaceKey, RoleKey]));
             var grant = GrantCrypto.Create("ws_test", WorkspaceKey, _recipient, DeviceKey, DeviceKey, _device, "person_fixture", Machine.Time.GetUtcNow());
             Machine.Server.On(HttpMethod.Get, "/gateway/api/w/ws_test/keys/grants", _ => FakeServer.Json<IReadOnlyList<KeyGrant>>([grant]));
-            Machine.Server.On(HttpMethod.Get, "/gateway/api/w/ws_test/keys/rotation", _ => FakeServer.Json<IReadOnlyList<KeyRotationState>>([
-                new() { Scope = KeyScope.Workspace, Key = WorkspaceKey }, new() { Scope = KeyScope.Role, Owner = "reader", Key = RoleKey }]));
+            Machine.Server.On(HttpMethod.Get, "/gateway/api/w/ws_test/keys/rotation", r =>
+            {
+                KeyRotationState workspace = new() { Scope = KeyScope.Workspace, Key = WorkspaceKey };
+                KeyRotationState reader = new() { Scope = KeyScope.Role, Owner = "reader", Key = RoleKey };
+                // The service filters this route. Returning workspace first for a role query
+                // made RecipientAsync select the wrong key despite a valid role directory entry.
+                return FakeServer.Json<IReadOnlyList<KeyRotationState>>(r.Uri.Query switch
+                {
+                    "" => [workspace, reader],
+                    "?scope=workspace" => [workspace],
+                    "?scope=role&owner=reader" => [reader],
+                    _ => throw new InvalidOperationException("Unexpected key rotation query: " + r.Uri.Query),
+                });
+            });
             Machine.Server.On(HttpMethod.Get, "/gateway/api/w/ws_test/threads/thr_composed/messages", _ =>
-                FakeServer.Json<IReadOnlyList<MessageEnvelope>>([Delivery.Envelope with { Attachments = Settles.LastOrDefault()?.Attachments ?? [] }]));
+                Json(new JsonArray(JsonSerializer.SerializeToNode(Delivery.Envelope with
+                { Attachments = Settles.LastOrDefault()?.Attachments ?? [] }, MessageBusJson.Options)).ToJsonString()));
             Machine.Server.On(HttpMethod.Post, "/gateway/api/w/ws_test/deliveries/dlv_composed/attachment-links", _ =>
                 FakeServer.Json<IReadOnlyList<DownloadLink>>((Settles.LastOrDefault()?.Attachments ?? []).Select(a => Download(a.Id)).ToArray()));
             Machine.Server.On(HttpMethod.Post, "/gateway/api/w/ws_test/attachments/upload-link", r =>
@@ -444,6 +473,11 @@ public sealed class ComposedAttachmentCallerTests
                 var request = JsonNode.Parse(r.BodyText)!;
                 if (request["id"] is null) return new(HttpStatusCode.Accepted);
                 var method = (string?)request["method"];
+                // Current SDKs probe discovery before initialize. This legacy-shaped MCP
+                // fixture refuses that optional method exactly as the live older service does.
+                if (method == "server/discover")
+                    return Json(new JsonObject { ["jsonrpc"] = "2.0", ["id"] = request["id"]!.DeepClone(),
+                        ["error"] = new JsonObject { ["code"] = -32601, ["message"] = "Method not found" } }.ToJsonString());
                 JsonNode result;
                 if (method == "initialize") result = JsonNode.Parse("""{"protocolVersion":"2025-11-25","serverInfo":{"name":"fixture","version":"1"},"capabilities":{"tools":{}}}""")!;
                 else if (method == "tools/list") result = JsonNode.Parse("""{"tools":[]}""")!;
@@ -466,8 +500,9 @@ public sealed class ComposedAttachmentCallerTests
             return new AttachmentRef { Id = "att_source", Name = "file.txt", Format = AttachmentFormat.File,
                 SizeBytes = sealedFile.CiphertextLength, Sha256 = sealedFile.Sha256, Encryption = sealedFile.Encryption };
         }
-        public void AssertCiphertext(AttachmentRef reference)
+        public void AssertCiphertext(AttachmentRef reference, PublicKeyInfo? recipient = null)
         {
+            Assert.Equal((recipient ?? WorkspaceKey).KeyId, reference.Encryption!.KeyId);
             var bytes = _ciphertexts[reference.Id];
             Assert.Equal(reference.SizeBytes, bytes.LongLength);
             Assert.Equal(reference.Sha256, Convert.ToHexStringLower(SHA256.HashData(bytes)));
@@ -526,7 +561,9 @@ public sealed class ComposedAttachmentCallerTests
                     var headers = lines.Skip(1).Where(l => l.Contains(':')).Select(l => l.Split(':', 2)).ToDictionary(p => p[0], p => p[1].Trim(), StringComparer.OrdinalIgnoreCase);
                     var body = new byte[headers.TryGetValue("Content-Length", out var length) ? int.Parse(length, System.Globalization.CultureInfo.InvariantCulture) : 0];
                     await stream.ReadExactlyAsync(body, _stop.Token);
-                    using var response = Blob(new RecordedRequest(new HttpMethod(first[0]), new Uri(new Uri(Endpoint), first[1]), headers, body));
+                    var actualHost = headers["Host"];
+                    Assert.Equal(new Uri(BlobEndpoint).Authority, actualHost);
+                    using var response = Blob(new RecordedRequest(new HttpMethod(first[0]), new Uri("http://" + actualHost + first[1]), headers, body));
                     var content = await response.Content.ReadAsByteArrayAsync(_stop.Token);
                     await stream.WriteAsync(Encoding.ASCII.GetBytes($"HTTP/1.1 200 OK\r\nContent-Length: {content.Length}\r\nConnection: close\r\n\r\n"), _stop.Token);
                     await stream.WriteAsync(content, _stop.Token);
