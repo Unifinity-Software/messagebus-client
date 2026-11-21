@@ -40,7 +40,15 @@ public sealed class LoginTests
 
         Assert.True(run.ExitCode == 0, run.Error);
         Assert.Equal(FakeServer.Url, new ConfigStore(machine.MbusFolder).Load().Server);
-        machine.Server.Single(HttpMethod.Get, "/api/server");
+        var discoveries = machine.Server.Requests.Where(request => request.Method == HttpMethod.Get && request.Uri.AbsolutePath == "/api/server").ToArray();
+        Assert.NotEmpty(discoveries);
+        Assert.All(discoveries, request =>
+        {
+            Assert.Null(request.Header("Authorization"));
+            Assert.Null(request.Header(MbusHeaders.Workspace));
+            Assert.Null(request.Header(MbusHeaders.Signature));
+            Assert.Empty(request.Body);
+        });
         Assert.Equal("MbusKey mbk_test", machine.Server.Single(HttpMethod.Put, ApiRoutes.MachineInventory).Header("Authorization"));
     }
 

@@ -238,6 +238,9 @@ public sealed class ServerSendGateTests
     public async Task Consumption_orders_actual_send_before_competing_durable_pin_and_rejects_escaped_signing()
     {
         using var fixture = new Fixture();
+        // Construction reads the profile under its lock, so create the competing store before
+        // deliberately holding that lock across the send callback.
+        var otherStore = new ConfigStore(fixture.Store.Directory, "file");
         using var gate = new ServerSendGate(fixture.Host(), fixture.Store, new Uri(Origin + "/gateway"));
         var target = new Uri(Origin + "/gateway/api/items");
         var prepared = await gate.PrepareSendAsync(target, TestContext.Current.CancellationToken);
@@ -253,7 +256,6 @@ public sealed class ServerSendGateTests
             return new MachineRequestSigner(fixture.Key, Machine, TimeProvider.System).CreateHeaders(authorization, request, []);
         }, TestContext.Current.CancellationToken);
         await entered.Task.WaitAsync(TestContext.Current.CancellationToken);
-        var otherStore = new ConfigStore(fixture.Store.Directory, "file");
         var pin = otherStore.WithProfileSecurityLockAsync(tx => Task.FromResult(tx.PrepareBinding(
             ServerEndpoint.Parse(Origin + "/gateway"), ServerDiscoveryParser.Parse(Isolated))), TestContext.Current.CancellationToken);
         try { Assert.False(pin.IsCompleted); }
