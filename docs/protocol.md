@@ -64,6 +64,84 @@ Other request headers: `X-Mbus-Workspace` (when the path doesn't name the worksp
 `X-Mbus-Client` (`cli`, `mcp` or `runner`), `X-Mbus-Agent` (the agent behind an MCP call), `X-Mbus-Request-Id`, and
 W3C `traceparent` / `tracestate`.
 
+### Frozen isolated machine domain (v2 core; runtime integration pending)
+
+`MachineRequestSigningV2` is a separate additive builder. The existing `MachineRequestSigning.CanonicalString`
+and v1 wire remain unchanged. This core does not activate isolated signing, persist a binding ledger, or gate
+credential transports. It makes no regional availability or release-readiness claim.
+
+Isolated discovery retains `product: "messagebus.ai"`, optional `capabilities: string[]` and all existing tokens.
+The descriptive shape is `stamp:{stampId,geography,azureRegion,url,aliases}`. The security extension is exactly
+`signIn.authority:{version:1,stampId,issuer,audience}` with sibling
+`signIn.machineSignature:{version:2,required:true}`. Issuer and audience equal the normalized canonical stamp
+origin and agree with `stamp.url` and `stampId`. Unknown unrelated additive properties are ignored.
+
+Both security descriptors absent, with no expected or surviving isolated pin, means legacy v1 at the exact
+selected endpoint, even when descriptive stamp metadata is present. Presence of either descriptor, including
+explicit null, requires the complete valid consistent isolated bundle. Duplicate or ambiguously cased security
+properties, malformed fields, partial bundles and unsupported versions refuse. Use `ServerDiscoveryParser`,
+which tracks JSON property presence before generated deserialization; nullable DTO values alone cannot decide
+this. Discovery failures and redirects are never evidence of legacy support.
+
+The v2 header is exactly one `X-Mbus-Signature-Version: 2`. Missing, lower, unknown, duplicate and comma-joined
+values cannot select v2. ES256 signs UTF-8 without BOM, IEEE P1363 fixed 64-byte `r||s`, encoded as canonical
+unpadded base64url. The signed input is exactly these ten fields joined by one LF, with no final LF:
+
+1. Literal `mbus-machine-v2`.
+2. Normalized canonical credential authority origin.
+3. Exact stamp ID (`ca`, `eu` or `us`).
+4. Exact enrolled machine ID.
+5. Actual exact `X-Mbus-Workspace` value, or an empty field only when the header is absent.
+6. Invariant uppercase HTTP method.
+7. Actual escaped origin-form raw path and query, including the selected base prefix and original query order.
+8. Canonical nonnegative decimal Unix seconds, without leading zeros except `0`.
+9. Exactly 22 canonical unpadded base64url characters representing 16 random nonce bytes.
+10. Lowercase 64-character hex SHA-256 of the exact transmitted body bytes.
+
+Reject control/whitespace/delimiter injection in identifiers and headers, empty present workspace headers,
+invalid method tokens, absolute/network-path targets, fragments and malformed percent escapes. Do not decode,
+sort, slash-collapse or re-encode the signed raw target, normalize the body, or compress content after signing.
+The service must use its actual raw target and immutable local canonical authority/stamp, never Host or an
+unsigned requester-provided authority. Proxies must preserve the exact signed target. Retain the existing
+five-minute skew and local replay checks; validate provenance, placement and authorization before any nonce,
+Seen, audit or endpoint mutation. V2 cannot be reinterpreted as v1 by stripping its version header.
+
+`ProtocolOrigin` normalizes scheme, IDNA host and effective port; removes default ports/root slash; preserves
+nondefault ports; rejects userinfo, paths, queries, fragments, whitespace, backslashes, trailing DNS dots,
+escaped hosts and scoped IPv6. Isolated policy requires HTTPS except exact loopback HTTP under explicit local
+fixture policy. `ServerEndpoint` separately retains escaped API base scope with a trailing separator. Equal
+canonical authority does not make different selected origins or base paths interchangeable for saved credentials.
+Its destination-scope check refuses encoded path separators, encoded traversal and nested escapes rather than
+granting a scope that server-side path decoding could change. Query escapes remain untouched.
+
+`ServerBindingPolicy.Evaluate` is a pure decision over one current anonymous observation, selected endpoint,
+an explicit complete `ServerBindingFloor` and optional trusted local expectation. It never authorizes a send.
+Unknown/corrupt binding state refuses. Any origin-keyed ledger entry or surviving credential/checkpoint ever-pin
+establishes the isolated floor. Missing/lower/malformed/conflicting discovery cannot erase it. Integration must
+read all state under the existing single profile security lock, reconcile and durably persist the ledger and
+credential snapshots before first credential transmission, and preserve the floor through every writer, logout,
+refresh, expiry and failure. These persistence/locking and transport gates remain subsequent implementation work.
+
+The trusted local `MBUS_SERVER_BINDING` JSON object is parsed by `ServerBindingExpectation.Parse`:
+
+```json
+{"version":1,"transportOrigin":"https://eu.stamps.example.test","stampId":"eu","issuer":"https://eu.stamps.example.test","audience":"https://eu.stamps.example.test","authorityVersion":1,"minimumMachineSignatureVersion":2,"machineSignatureRequired":true}
+```
+
+It strengthens a floor and cannot replace a conflicting pin. For alias transport it supplies an explicit exact
+local transport-to-canonical mapping; current discovery must also list that selected alias. Discovery aliases
+alone never authorize a new mapping or credential migration. The canonical signing authority stays separate
+from the selected alias transport. Changing selected origin/base requires fresh explicit credential binding.
+
+First contact with no provisioned or surviving pin cannot distinguish an old server from a response with its
+entire isolated advertisement stripped. Isolated automation must provision the exact expected binding and a
+durable writable `MBUS_HOME`, validated before credential probes. This is trusted local deployment input, not a
+new server-signed manifest. No geography, availability, residency or initial stripping detection can be inferred
+from descriptive metadata or this core. All credential paths still require fresh anonymous validation before
+each actual send, no stale-context fallback, no credential redirects and no host/v1 retry. Full native client
+tests, real HTTP/WS/proxy and persistence fixtures, combined independent review and client-first publication must
+precede server package pin/enforcement. Public update-feed release-key verification remains unchanged.
+
 ## REST routes the client calls
 
 `ApiRoutes` in `src/MessageBus.Contracts/Http/Http.cs` lists them. The client uses: enrollment and the machine's own
