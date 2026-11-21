@@ -7,9 +7,10 @@ It opens no port.
 
 ## Build
 
-Build your image from released source or from a development checkout. The project
-does not supply a ready-made runner image. To build from a release, start at
-the repository root and use the release version in both the checkout and image tag.
+Copy the public Linux amd64 image reference from the
+[client release notes](https://github.com/Unifinity-Software/messagebus-client/releases).
+The digest identifies the exact image. To build your own from a release, start
+at the repository root and use the release version in both the checkout and image tag.
 
 ```sh
 version='<version>'
@@ -28,7 +29,7 @@ podman build --ignorefile docker/runner/Dockerfile.dockerignore -f docker/runner
 docker build -f docker/runner/Dockerfile -t "messagebus-runner:$version" .
 ```
 
-The agent CLIs are installed at their newest version unless you pin them:
+The Dockerfile pins the agent CLI versions. Override a pin with its build argument:
 `--build-arg CLAUDE_CODE_VERSION=… --build-arg CODEX_VERSION=… --build-arg OPENCODE_VERSION=… --build-arg COPILOT_VERSION=…`.
 A release image records its CLI version and full source commit in OCI labels. Use
 `mbus --version` for the CLI version and `mbus doctor` for the full source revision
@@ -146,11 +147,12 @@ by UID 10001 that preserves the runner settings and machine key. Use one writer 
 verify storage permissions and restart behavior before relying on it. The supplied template uses
 ephemeral storage.
 
-The stock image runs as UID 10001 and lacks bubblewrap, so Linux runs fall back to basic isolation.
-Basic isolation gives each task its own worktree, temporary files, Git settings and filtered
-environment. The container is the OS boundary. Use a dedicated runner for workloads that can
-share that boundary. The run's network allow-list uses a local proxy and is advisory on Linux.
-If egress must be enforced, apply network controls outside the task process.
+The image runs as UID 10001. On Container Apps, check the runner's reported isolation
+before adding work. If the host cannot start the standard Linux sandbox, basic isolation
+gives each task its own worktree, temporary files, Git settings and filtered environment.
+The container is then the OS boundary. Use a dedicated runner for workloads that can
+share that boundary. Apply network controls outside the task process if you need to
+enforce egress.
 
 When configuring an upstream proxy for the runner, use `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`
 and `NO_PROXY` as applicable. The run proxy supports an `http://` upstream, including for CONNECT
