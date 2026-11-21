@@ -5,7 +5,6 @@ using MessageBus.Cli.Agents;
 using MessageBus.Cli.Commands;
 using MessageBus.Cli.Hosting;
 using MessageBus.Cli.Runner.Service;
-using MessageBus.Contracts.Releases;
 using MessageBus.Contracts.Runner;
 
 namespace MessageBus.Cli.Update;
@@ -19,14 +18,16 @@ internal static class DotnetToolUpdateCommand
         bool check, bool yes, CancellationToken ct, Func<string, string, string, int>? handoff = null,
         string? currentVersion = null, string? entryAssembly = null)
     {
-        var current = currentVersion ?? CliHost.Version;
+        var assemblyVersion = currentVersion ?? CliHost.Version;
         channel = string.IsNullOrWhiteSpace(channel) ? host.GetEnvironmentVariable(UpdateEnvVars.Channel) ?? "stable" : channel;
         if (channel is not ("stable" or "preview")) throw new CliException($"'{channel}' isn't a release channel name.", 2);
         var source = host.GetEnvironmentVariable("MBUS_UPDATE_NUGET_SOURCE");
         try
         {
+            var current = tool.ToolsPath is null ? assemblyVersion : tool.Package?.Version
+                ?? throw new IOException(DotnetToolPackage.IdentityUnknown);
             var version = string.IsNullOrEmpty(requested) ? await DotnetToolUpdater.LatestAsync(source, channel, ct) : requested;
-            var comparison = ReleaseVersion.Compare(version, current);
+            var comparison = DotnetToolPackage.Compare(version, current);
             var command = tool.UpdateCommand(version);
             await host.Out.WriteLineAsync(comparison switch
             {
@@ -75,7 +76,7 @@ internal static class DotnetToolUpdateCommand
             // Keep manual state separate from pending service updates and other manual attempts.
             var directory = Path.Combine(host.ConfigDirectory, "manual-updates", Guid.NewGuid().ToString("N"));
             var updater = new DotnetToolUpdater(tool, directory, dotnet, host.Error, RunnerUpdateRecord.In(directory),
-                current, host.Time, () => manager.Processes, source, entryAssembly, manual: true);
+                assemblyVersion, host.Time, () => manager.Processes, source, entryAssembly, manual: true);
             if (!await updater.InstallAsync(new UpdateRequest { Version = version, Channel = channel, Pinned = !string.IsNullOrEmpty(requested) }, ct))
                 throw new CliException(updater.WaitingAgain ? "Update stopped: processes are using this mbus install. Close these sessions and try again."
                     : updater.LastResult?.Reason ?? "The update could not be prepared.");

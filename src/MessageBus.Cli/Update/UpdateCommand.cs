@@ -44,7 +44,7 @@ internal static class UpdateCommand
             if (tool is not null)
             {
                 var requested = parse.GetValue(version)?.Trim().TrimStart('v', 'V');
-                if (!string.IsNullOrEmpty(requested) && !ReleaseFeed.IsPinnableVersion(requested))
+                if (!string.IsNullOrEmpty(requested) && !DotnetToolUpdater.IsReleaseVersion(requested))
                     throw new CliException($"'{requested}' isn't an mbus version.", 2);
                 return await DotnetToolUpdateCommand.RunAsync(host, tool, requested, parse.GetValue(channel),
                     parse.GetValue(check), parse.GetValue(yes), ct);

@@ -53,6 +53,8 @@ public sealed class RunnerUpdateRecord(string path)
 
     internal RunnerUpdateReport? Load(string runningVersion, DotnetToolInstall? toolInstall)
     {
+        var version = toolInstall is null ? runningVersion : toolInstall.Package?.Version;
+        int? Compare(string? a, string? b) => toolInstall is null ? ReleaseVersion.Compare(a, b) : DotnetToolPackage.Compare(a, b);
         RunnerUpdateReport? report;
         try
         {
@@ -67,8 +69,8 @@ public sealed class RunnerUpdateRecord(string path)
                 return null;
             }
             report = MessageBusJson.Deserialize<RunnerUpdateReport>(json);
-            if (report is not null && ReleaseVersion.Compare(runningVersion, report.FromVersion) is > 0
-                && ReleaseVersion.Compare(runningVersion, report.ToVersion) is > 0)
+            if (report is not null && Compare(version, report.FromVersion) is > 0
+                && Compare(version, report.ToVersion) is > 0)
             {
                 Clear();
                 return null;
@@ -79,13 +81,13 @@ public sealed class RunnerUpdateRecord(string path)
             return null;
         }
         if (report is { Outcome: RunnerUpdateOutcome.Updated, ToVersion: { } installed }
-            && (ReleaseVersion.Compare(installed, runningVersion) is > 0
-                || (ReleaseVersion.Compare(runningVersion, report.FromVersion) is 0 && ReleaseVersion.Compare(installed, runningVersion) is < 0)))
+            && (Compare(installed, version) is > 0
+                || (Compare(version, report.FromVersion) is 0 && Compare(installed, version) is < 0)))
         {
             return report with
             {
                 Outcome = RunnerUpdateOutcome.RolledBack,
-                Reason = $"mbus {installed} was installed, but the runner started again on mbus {runningVersion}.",
+                Reason = $"mbus {installed} was installed, but the runner started again on mbus {version}.",
             };
         }
         return report;

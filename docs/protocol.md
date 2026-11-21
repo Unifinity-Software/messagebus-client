@@ -724,7 +724,10 @@ The service asks a runner to update with `POST /update` on the runner connection
 `latest`, whether it is pinned, the channel, a mirror, and how the runner is installed). The runner takes no new
 work, lets running tasks finish, reports each stage on `/api/runner/update-progress`, installs, and exits with code
 75 so its service manager starts the new version. It reports how the update went with its next inventory
-(`RunnerUpdateReport`). Versions compare as SemVer and ignore `+build` metadata (`ReleaseVersion`).
+(`RunnerUpdateReport`). Standalone releases compare as SemVer and ignore `+build` metadata (`ReleaseVersion`).
+For a .NET tool, the runner compares the requested release against the normalized NuGet package version from the
+store entry containing its running assembly. It uses package versions for update attempts, recovery and outcome
+reports. The assembly's informational version remains available in the runner's inventory and `mbus --version`.
 
 ## Making a change to the protocol
 

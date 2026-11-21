@@ -11,6 +11,9 @@ using MessageBus.Cli.Runner;
 using MessageBus.Contracts.Runner;
 using MessageBus.Contracts.Releases;
 using MessageBus.Cli.Runner.Service;
+using MessageBus.Cli.Tests.Infrastructure;
+using MessageBus.Cli.Tests.Runner;
+using MessageBus.Contracts.Json;
 using Xunit;
 
 namespace MessageBus.Cli.Tests.Update;
@@ -26,6 +29,89 @@ public sealed class RealDotnetUpdateTests(ITestOutputHelper output)
         && !new[] { "CI", "GITHUB_ACTIONS", "TF_BUILD", "GITLAB_CI", "JENKINS_URL", "TEAMCITY_VERSION", "BUILDKITE", "CIRCLECI" }.Any(name =>
             Environment.GetEnvironmentVariable(name) is { Length: > 0 } value
             && !value.Equals("false", StringComparison.OrdinalIgnoreCase) && value != "0");
+
+    [Fact]
+    public async Task Service_updates_and_rolls_back_using_package_versions_when_both_tools_report_the_same_dev_build()
+    {
+        using var machine = new TestMachine();
+        _probeHome = machine.MbusFolder;
+        _cliHome = Path.Combine(machine.Home, "dotnet-home");
+        var feed = Directory.CreateDirectory(Path.Combine(machine.Home, "feed")).FullName;
+        var config = Path.Combine(machine.Home, "NuGet.Config");
+        File.WriteAllText(config, DotnetToolUpdater.NuGetConfig(feed));
+        var packages = Path.Combine(machine.Home, "packages");
+        var tools = Path.Combine(machine.Home, "tools");
+        const string older = "1.0.0", newer = "1.2.0", assemblyVersion = "9.0.0+dev.012abcd";
+        var project = Path.Combine(machine.Home, "mbus.csproj");
+        File.WriteAllText(project, $"""
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup>
+                <TargetFramework>net10.0</TargetFramework>
+                <OutputType>Exe</OutputType>
+                <PackAsTool>true</PackAsTool>
+                <ToolCommandName>mbus</ToolCommandName>
+                <PackageId>{DotnetToolInstall.PackageId}</PackageId>
+                <InformationalVersion>{assemblyVersion}</InformationalVersion>
+                <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+              </PropertyGroup>
+            </Project>
+            """);
+        File.WriteAllText(Path.Combine(machine.Home, "Program.cs"), """
+            using System;
+            using System.Reflection;
+            if (args is not ["--version"]) return 2;
+            Console.WriteLine(Assembly.GetExecutingAssembly().GetCustomAttribute<AssemblyInformationalVersionAttribute>()!.InformationalVersion);
+            return 0;
+            """);
+        foreach (var version in new[] { older, newer })
+            await Run("dotnet", ["pack", project, "-c", "Release", "-o", feed, "-p:PackageVersion=" + version,
+                "-p:RestoreConfigFile=" + config], packages);
+        await Run("dotnet", ["tool", "install", "--tool-path", tools, DotnetToolInstall.PackageId,
+            "--version", older, "--configfile", config], packages);
+
+        string Entry(string version) => Directory.GetFiles(Path.Combine(tools, ".store", "messagebus.ai.cli", version),
+            "mbus.dll", SearchOption.AllDirectories).Single();
+        var entry = Entry(older);
+        var install = DotnetToolInstall.Find(entry)!;
+        var shim = install.Shim!;
+        await Run(shim, ["--version"], expectedOutput: assemblyVersion);
+        var dotnet = CommandLocator.Find("dotnet", Environment.GetEnvironmentVariable, [])!;
+        var settings = machine.MbusFolder;
+        var record = RunnerUpdateRecord.In(settings);
+        DotnetToolUpdater Updater(string path) => new(DotnetToolInstall.Find(path)!, settings, dotnet, TextWriter.Null,
+            record, assemblyVersion, machine.Time, () => ProcessTable.Empty, source: feed, entryAssembly: path);
+        var updater = Updater(entry);
+        await using var runner = new RunnerHarness(extensions: e => e with { SessionUpdater = updater });
+        var ct = TestContext.Current.CancellationToken;
+        var response = await runner.Routes.HandleAsync("POST", RunnerRoutes.Update,
+            MessageBusJson.Serialize(new UpdateRequest { Version = newer, Via = RunnerInstallKind.DotnetTool }), ct);
+        Assert.Equal(202, response.StatusCode);
+        var ready = await runner.Engine.UpdateReady.WaitAsync(ct);
+        Assert.True(await updater.InstallAsync(ready, ct), updater.LastResult?.Reason);
+        var root = Path.Combine(settings, "update");
+        var attempt = DotnetToolUpdater.Read<ToolUpdateAttempt>(Path.Combine(root, "attempt.json"))!;
+        Assert.Equal(older, attempt.From);
+        Assert.Equal(newer, attempt.To);
+
+        // Enter the same applier as the service wrapper, with no live service or mbus subprocess.
+        File.Move(Path.Combine(root, OperatingSystem.IsWindows() ? "pending.cmd" : "pending.sh"), Path.Combine(root, "applying"));
+        Assert.Equal(0, await DotnetToolUpdater.RunApplierAsync("apply", root));
+        var newEntry = Entry(newer);
+        Updater(newEntry).Startup();
+        Assert.Equal(RunnerUpdateOutcome.Updated, record.Load(assemblyVersion, DotnetToolInstall.Find(newEntry))?.Outcome);
+        Assert.False(File.Exists(entry));
+        await Run(shim, ["--version"], expectedOutput: assemblyVersion);
+
+        // Simulate a runner that starts but cannot confirm its connection, with the original feed offline.
+        Directory.Move(feed, feed + "-offline");
+        for (var starts = 0; starts < 3; starts++)
+            Assert.Equal(0, await DotnetToolUpdater.RunApplierAsync("start", root));
+        Assert.Equal(RunnerUpdateOutcome.RolledBack,
+            DotnetToolUpdater.Read<ToolUpdateResult>(Path.Combine(root, "result.json"))?.Outcome);
+        Assert.Equal(older, DotnetToolInstall.Find(Entry(older))?.Package?.Version);
+        Assert.False(File.Exists(newEntry));
+        await Run(shim, ["--version"], expectedOutput: assemblyVersion);
+    }
 
     [Fact(SkipUnless = nameof(Enabled), Skip = "Manual only: MBUS_REAL_DOTNET_TESTS=1 outside CI.")]
     public async Task Local_feed_update_with_and_without_running_mcp()
@@ -169,7 +255,7 @@ public sealed class RealDotnetUpdateTests(ITestOutputHelper output)
         var installed = Path.Combine(tools, ".store", "messagebus.ai.cli", older);
         var entry = Directory.GetFiles(installed, "mbus.dll", SearchOption.AllDirectories).Single();
         var dotnet = CommandLocator.Find("dotnet", Environment.GetEnvironmentVariable, [])!;
-        var updater = new DotnetToolUpdater(new(tools, false), settings, dotnet, TextWriter.Null,
+        var updater = new DotnetToolUpdater(DotnetToolInstall.Find(entry)!, settings, dotnet, TextWriter.Null,
             RunnerUpdateRecord.In(settings), older, TimeProvider.System, source: feed, entryAssembly: entry);
         using (var holder = Start(shim, ["mcp"], packages))
         {
@@ -266,7 +352,7 @@ public sealed class RealDotnetUpdateTests(ITestOutputHelper output)
             var shim = Path.Combine(tools, OperatingSystem.IsWindows() ? "mbus.exe" : "mbus");
             var entry = Directory.GetFiles(Path.Combine(tools, ".store", "messagebus.ai.cli", older), "mbus.dll", SearchOption.AllDirectories).Single();
             var settings = Path.Combine(temp, "global-settings");
-            var updater = new DotnetToolUpdater(new(tools, true), settings, CommandLocator.Find("dotnet", Environment.GetEnvironmentVariable, [])!,
+            var updater = new DotnetToolUpdater(DotnetToolInstall.Find(entry)! with { Global = true }, settings, CommandLocator.Find("dotnet", Environment.GetEnvironmentVariable, [])!,
                 TextWriter.Null, RunnerUpdateRecord.In(settings), older, TimeProvider.System, source: feed, entryAssembly: entry);
             Assert.True(await updater.InstallAsync(new() { Version = newer }, TestContext.Current.CancellationToken), updater.LastResult?.Reason);
             var wrapper = Path.Combine(settings, "update", OperatingSystem.IsWindows() ? "wrapper.cmd" : "wrapper.sh");
@@ -380,7 +466,11 @@ public sealed class RealDotnetUpdateTests(ITestOutputHelper output)
         start.Environment["MBUS_SERVER"] = "http://127.0.0.1:1";
         start.Environment["MBUS_API_KEY"] = "synthetic-probe-only";
         if (_updateSource is not null) start.Environment["MBUS_UPDATE_NUGET_SOURCE"] = _updateSource;
-        if (_cliHome is not null) start.Environment["DOTNET_CLI_HOME"] = _cliHome;
+        if (_cliHome is not null)
+        {
+            start.Environment["DOTNET_CLI_HOME"] = _cliHome;
+            start.Environment["DOTNET_ADD_GLOBAL_TOOLS_TO_PATH"] = "0";
+        }
         start.Environment["DOTNET_NOLOGO"] = "1";
         start.Environment["DOTNET_CLI_TELEMETRY_OPTOUT"] = "1";
         if (packages is not null) start.Environment["NUGET_PACKAGES"] = packages;
