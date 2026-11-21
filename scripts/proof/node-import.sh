@@ -12,6 +12,7 @@ for tool in python3 openssl update-ca-certificates runuser timeout dotnet git; d
 [[ "$(/usr/bin/node --version)" == v24.* ]]
 [[ "$(dotnet --version)" == 10.* ]]
 : "${NUGET_PACKAGES:?Mount a populated offline NuGet package cache and set NUGET_PACKAGES}"
+offline_feed=${MBUS_PROOF_FEED:-}
 source_root=$(cd "$(dirname "$0")/../.." && pwd)
 proof_root=$(mktemp -d /tmp/mbus-node-proof.XXXXXXXX)
 echo "Retained proof/cleanup root: $proof_root"
@@ -29,6 +30,7 @@ chown -R mbusproof:mbusproof "$proof_root"
 python3 "$source_root/scripts/proof/https-git.py" "$proof_root/served" \
     "$proof_root/server.crt" "$proof_root/server.key" >"$proof_root/https.log" 2>&1 &
 server_pid=$!
+if [[ -n "$offline_feed" ]]; then cp "$offline_feed"/*.nupkg "$proof_root/feed/"; fi
 trap 'kill "$server_pid" 2>/dev/null || true' EXIT
 # env -i prevents real runner configuration or proxy settings entering this fixture.
 # Restore is offline and bounded. No packages, tools or images are downloaded here.

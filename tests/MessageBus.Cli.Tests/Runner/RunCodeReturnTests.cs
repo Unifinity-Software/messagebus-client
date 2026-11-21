@@ -27,6 +27,7 @@ public sealed class RunCodeReturnTests
     [InlineData(false, false, true)]
     public async Task Missing_bundle_uses_local_settle_keys_before_upload(bool roleReply, bool rotationNeeded, bool checkedReturn)
     {
+        Assert.SkipWhen(checkedReturn && !OperatingSystem.IsLinux(), "Checked return uses the Linux-only verification toolchain.");
         Assert.SkipWhen(CommandLocator.Find("git", Environment.GetEnvironmentVariable, []) is null, "git isn't installed.");
         await using var h = new RunnerHarness();
         using var run = RunWorkspace.Create(h.WorkRoot, "dlv_code", 1);
