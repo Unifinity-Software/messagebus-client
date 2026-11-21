@@ -219,7 +219,7 @@ public sealed class KeychainEnrollmentTests
         store.Save(new CliConfig { Server = Server, MachineId = "old", KeyFingerprint = oldKey.Fingerprint });
         store.SaveKeyPem(oldKey.ExportPrivateKeyPem());
         var binding = new RunnerEnrollmentBinding { SelectedEndpoint = ServerEndpoint.Parse(Server).Value,
-            ApiKeyFingerprint = "0123456789abcdef", MachineKeyFingerprint = newKey.Fingerprint };
+            ApiKeyFingerprint = MessageBus.Cli.Runner.RunnerKeyEnrollment.Fingerprint("fixture-bootstrap"), MachineKeyFingerprint = newKey.Fingerprint };
         var pending = await store.WithProfileSecurityLockAsync(tx => Task.FromResult(
             tx.StageRunnerReplacement(binding, newKey.ExportPrivateKeyPem(), Ct)), Ct);
         var restarted = new ConfigStore(store.Directory, osVault: Vault());
@@ -263,7 +263,7 @@ public sealed class KeychainEnrollmentTests
         await Enroll(store, active, "active");
         var pending = await store.WithProfileSecurityLockAsync(tx => Task.FromResult(tx.StageRunnerReplacement(
             new RunnerEnrollmentBinding { SelectedEndpoint = ServerEndpoint.Parse(Server).Value,
-                ApiKeyFingerprint = "0123456789abcdef", MachineKeyFingerprint = replacement.Fingerprint },
+                ApiKeyFingerprint = MessageBus.Cli.Runner.RunnerKeyEnrollment.Fingerprint("fixture-bootstrap"), MachineKeyFingerprint = replacement.Fingerprint },
             replacement.ExportPrivateKeyPem(), Ct)), Ct);
         var before = store.Load();
         Assert.Equal(2, backend.Secrets.Count);
@@ -298,7 +298,7 @@ public sealed class KeychainEnrollmentTests
         else if (change == "backend") competitor.PrepareKeyStoreChange("keychain").Commit();
         else await competitor.WithProfileSecurityLockAsync(tx => Task.FromResult(tx.StageRunnerReplacement(
             new RunnerEnrollmentBinding { SelectedEndpoint = ServerEndpoint.Parse(Server).Value,
-                ApiKeyFingerprint = "0123456789abcdef", MachineKeyFingerprint = replacement.Fingerprint },
+                ApiKeyFingerprint = MessageBus.Cli.Runner.RunnerKeyEnrollment.Fingerprint("fixture-bootstrap"), MachineKeyFingerprint = replacement.Fingerprint },
             replacement.ExportPrivateKeyPem(), Ct)), Ct);
         var published = File.ReadAllBytes(competitor.ConfigPath);
         var secrets = backend.Secrets.ToDictionary(pair => pair.Key, pair => pair.Value.ToArray());
