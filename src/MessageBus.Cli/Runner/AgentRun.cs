@@ -1022,7 +1022,7 @@ internal sealed class AgentRun
             await _s.Log.WriteLineAsync($"{DeliveryId}: Stopped because the workspace was suspended ({reference}).").ConfigureAwait(false);
             return true; // The server releases the held task; clean up its local work as usual.
         }
-        var settle = new RunnerSettle { DeliveryId = DeliveryId, Result = result, Declined = _declined, UnreadableRole = _unreadableRole };
+        var settle = new RunnerSettle { DeliveryId = DeliveryId, Attempt = Delivery.Attempt, Result = result, Declined = _declined, UnreadableRole = _unreadableRole };
         for (var attempt = 0; ; attempt++)
         {
             try

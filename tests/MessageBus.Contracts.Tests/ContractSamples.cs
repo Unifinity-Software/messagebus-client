@@ -398,7 +398,7 @@ internal static class ContractSamples
         SuspensionSample,
         LeaseSample,
         new RunnerProgress { DeliveryId = Dlv, Progress = Progress },
-        new RunnerSettle { DeliveryId = Dlv, Result = Result, Declined = DeclineReason.MachineNotReady, UnreadableRole = "developer" },
+        new RunnerSettle { DeliveryId = Dlv, Attempt = 2, Result = Result, Declined = DeclineReason.MachineNotReady, UnreadableRole = "developer" },
         new RunnerRepoCredentialRequest { DeliveryId = Dlv, Repository = "https://github.com/acme/api.git", CanPush = true },
         new RunnerRepoCredential { UserName = "x-access-token", Secret = "ghs_x", ExpiresAt = T.AddHours(1) },
         new RunnerTelemetryCredentialRequest { DeliveryId = Dlv },
@@ -434,7 +434,7 @@ internal static class ContractSamples
         new InboxResult { Messages = [Received] },
         new ProgressInput { ThreadId = Thr, DeliveryId = Dlv, Message = "Running tests", Percent = 60, Request = CodeRequest },
         new ProgressResult { LeaseExpiresAt = T.AddMinutes(30), CancelRequested = true },
-        new SettleInput { ThreadId = Thr, DeliveryId = Dlv, Friction = [Friction], Result = Result, Reply = PlainBody, SealedReply = Sealed, ReplyOnly = true, FrictionOnly = true, Attach = [AttachSpec], Attachments = [Attachment] },
+        new SettleInput { ThreadId = Thr, DeliveryId = Dlv, Attempt = 2, Friction = [Friction], Result = Result, Reply = PlainBody, SealedReply = Sealed, ReplyOnly = true, FrictionOnly = true, Attach = [AttachSpec], Attachments = [Attachment] },
         new FetchAttachmentInput { ThreadId = Thr, AttachmentId = Att, DeliveryId = Dlv, Repository = "/src/app", Into = "refs/remotes/mbus/feature", Path = "/tmp/a.patch" },
         new FetchAttachmentResult { AttachmentId = Att, Format = AttachmentFormat.GitBundle, Commit = "0123abcd", Ref = "refs/remotes/mbus/feature", Path = "/tmp/a.patch" },
         new SettleOutput { Status = ThreadStatus.Replied, ReplyMessageId = Msg },
@@ -469,15 +469,18 @@ internal static class ContractSamples
         new RetryInput { ThreadId = Thr, Note = "The Mac now has the .NET SDK.", Repository = "/src/app" },
         new RequestApprovalInput
         {
+            Affected = "Archived task rows.",
             Title = "Drop the archived_tasks table", Detail = "Deletes 1,200 archived rows.", Approver = "role:developer", ThreadId = Thr, ProjectId = Prj,
             HighRisk = true, ExpiresInSeconds = 3600, ReplyTo = RoleTo,
         },
         new WaitApprovalInput { ApprovalId = "apr_01jcz7m2v1g3x4y5z6a7b8c9dn", TimeoutSeconds = 55 },
         new ApprovalResult
         {
+            Affected = "Archived task rows.",
             ApprovalId = "apr_01jcz7m2v1g3x4y5z6a7b8c9dn", Status = ApprovalState.Approved, Title = "Drop the archived_tasks table", Approvers = ["Ada"],
             ExpiresAt = T.AddHours(1), DecidedBy = "Ada", DecidedAt = T.AddMinutes(5), Comment = "After the backup.", RequestDigest = "ab12", TimedOut = true,
         },
+        new MessageBus.Contracts.Http.ServerCapabilitiesResponse { Product = "messagebus.ai", Capabilities = ["approvalAffectedV1", "settleAttemptV1"] },
     }.ToDictionary(o => o.GetType());
 
 
