@@ -17,7 +17,11 @@ namespace MessageBus.Contracts.Mcp;
 /// <param name="Title">A short title.</param>
 /// <param name="Description">When to use it, what comes back and what to do on error, written for an agent.</param>
 /// <param name="ReadOnly">True when it changes nothing.</param>
-public sealed record McpToolSpec(string Name, Type Input, Type Output, string Title, string Description, bool ReadOnly = false);
+public sealed record McpToolSpec(string Name, Type Input, Type Output, string Title, string Description, bool ReadOnly = false)
+{
+    /// <summary>Optional service features required by this tool; local visibility remains independent.</summary>
+    public McpCatalogFeatures Features { get; init; }
+}
 
 /// <summary>
 /// The tool list both MCP servers expose: names from <see cref="McpToolNames"/>, input schemas generated
@@ -162,9 +166,12 @@ public static class McpToolCatalog
     /// The tool list. <paramref name="local"/>: the local server's (all tools, sealed fields hidden); else the remote endpoint's.
     /// <paramref name="only"/>: just these (a runner-started worker's, see <see cref="WorkerTools"/>); null for all.
     /// </summary>
-    public static IList<Tool> Tools(bool local, IReadOnlySet<string>? only = null) =>
+    public static IList<Tool> Tools(bool local, IReadOnlySet<string>? only = null) => Tools(local, only, McpCatalogFeatures.None);
+
+    /// <summary>The tool list with optional features explicitly supported by installed service handlers.</summary>
+    public static IList<Tool> Tools(bool local, IReadOnlySet<string>? only, McpCatalogFeatures features) =>
     [
-        .. Specs.Where(s => (local || !McpToolNames.LocalOnly.Contains(s.Name)) && (only is null || only.Contains(s.Name))).Select(s => new Tool
+        .. Specs.Where(s => (local || !McpToolNames.LocalOnly.Contains(s.Name)) && (local || (features & s.Features) == s.Features) && (only is null || only.Contains(s.Name))).Select(s => new Tool
         {
             Name = s.Name,
             Title = s.Title,

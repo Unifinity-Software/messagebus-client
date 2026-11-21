@@ -191,6 +191,7 @@ public static class MessageBusJson
 [JsonSerializable(typeof(AttachSpec))]
 [JsonSerializable(typeof(IReadOnlyList<DownloadLink>))]
 // MCP
+[JsonSerializable(typeof(McpCatalogFeatures))]
 [JsonSerializable(typeof(McpError))]
 [JsonSerializable(typeof(SealedBody))]
 [JsonSerializable(typeof(SendInput))]
