@@ -45,6 +45,7 @@ internal static class RunToolsServer
                 Scope = RunToolScope.For(request.Delivery, run.Root) with { ProposalAuthority = request.ProposalAuthority },
                 ProposalAuthority = request.ProposalAuthority,
                 Refused = request.Refused,
+                RecordVerifiedTaskSettle = request.RecordVerifiedTaskSettle,
                 TempDirectory = Directory.CreateDirectory(Path.Combine(run.Root, "tmp")).FullName,
                 PrepareGit = start => InRun(start, request, git),
                 Session = request.Session,

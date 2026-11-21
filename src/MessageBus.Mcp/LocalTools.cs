@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Net;
+using System.Net.Http.Json;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -122,7 +123,8 @@ internal sealed partial class LocalTools : IAsyncDisposable
                 McpToolNames.WaitApproval => Ok(await WaitApprovalAsync(Read<WaitApprovalInput>(arguments), ct)),
                 McpToolNames.OpenInbox => Ok(await OpenInboxAsync(Read<OpenInboxInput>(arguments), ct)),
                 McpToolNames.Status => Ok(await StatusAsync(Read<StatusInput>(arguments), ct)),
-                McpToolNames.Move or McpToolNames.FindProject or McpToolNames.Cancel or McpToolNames.Directory
+                McpToolNames.Directory => await DirectoryAsync(Read<DirectoryInput>(arguments), ct),
+                McpToolNames.Move or McpToolNames.FindProject or McpToolNames.Cancel
                     or McpToolNames.DescribeRole or McpToolNames.Subscribe => await PassThroughAsync(name, arguments, ct),
                 _ => McpToolCatalog.Error(new McpError { Code = McpErrorCodes.NotFound, Message = $"There's no tool named {name}." }),
             };
@@ -260,20 +262,52 @@ internal sealed partial class LocalTools : IAsyncDisposable
         return await client.CallToolAsync(new CallToolRequestParams { Name = name, Arguments = arguments }, ct);
     }
 
-    private async Task<TOut> ForwardAsync<TIn, TOut>(string name, TIn input, CancellationToken ct)
+    private Task<CallToolResult> CallServiceAsync(string name, object? input, JsonTypeInfo type, CancellationToken ct)
     {
-        var element = JsonSerializer.SerializeToElement(input, MessageBusJson.Options.GetTypeInfo(typeof(TIn)));
+        var element = JsonSerializer.SerializeToElement(input, type);
         var arguments = element.EnumerateObject().ToDictionary(p => p.Name, p => p.Value.Clone(), StringComparer.Ordinal);
-        return McpToolCatalog.ReadResult<TOut>(await CallServiceAsync(name, arguments, ct));
+        return CallServiceAsync(name, arguments, ct);
     }
 
-    private async Task<CallToolResult> PassThroughAsync(string name, IDictionary<string, JsonElement>? arguments, CancellationToken ct)
+    private async Task<TOut> ForwardAsync<TIn, TOut>(string name, TIn input, CancellationToken ct) =>
+        McpToolCatalog.ReadResult<TOut>(await CallServiceAsync(name, input, MessageBusJson.Options.GetTypeInfo(typeof(TIn)), ct));
+
+    private Task<CallToolResult> PassThroughAsync(string name, IDictionary<string, JsonElement>? arguments, CancellationToken ct)
     {
         // Validated here first (same parsing as the service), so a bad call never leaves the machine.
         var spec = McpToolCatalog.Find(name)!;
         var input = McpToolCatalog.ReadInput(spec.Input, arguments);
-        var element = JsonSerializer.SerializeToElement(input, MessageBusJson.Options.GetTypeInfo(spec.Input));
-        return await CallServiceAsync(name, element.EnumerateObject().ToDictionary(p => p.Name, p => p.Value.Clone(), StringComparer.Ordinal), ct);
+        return CallServiceAsync(name, input, MessageBusJson.Options.GetTypeInfo(spec.Input), ct);
+    }
+
+    private async Task<CallToolResult> DirectoryAsync(DirectoryInput input, CancellationToken ct)
+    {
+        const string prefix = "github:";
+        var repositoryId = input.VerificationRepositoryId;
+        if (repositoryId is not null
+            && (!repositoryId.StartsWith(prefix, StringComparison.Ordinal)
+                || repositoryId.Length == prefix.Length
+                || repositoryId[prefix.Length] == '0'
+                || repositoryId.AsSpan(prefix.Length).ContainsAnyExceptInRange('0', '9')))
+            throw McpToolException.Invalid("verificationRepositoryId", "Use the trusted GitHub repository's numeric ID in github:<numeric-id> form.");
+
+        // Only the role filters go to the hosted MCP endpoint.
+        var directory = await CallServiceAsync(McpToolNames.Directory, input with { VerificationRepositoryId = null },
+            MessageBusJson.Options.GetTypeInfo(typeof(DirectoryInput)), ct);
+        if (directory.IsError == true || repositoryId is null) return directory;
+
+        var route = ApiRoutes.VerificationEnvironments.Replace("{workspaceId}", Uri.EscapeDataString(_ws), StringComparison.Ordinal);
+        using var response = await _o.Http.GetAsync($"{route.TrimStart('/')}?repositoryId={Uri.EscapeDataString(repositoryId)}", ct);
+        if (response.StatusCode == HttpStatusCode.NotFound) return directory;
+        if (response.StatusCode is HttpStatusCode.Forbidden or HttpStatusCode.Unauthorized)
+            throw McpToolException.Forbidden("The session is not authorized to discover verification environments for this repository.");
+        if (!response.IsSuccessStatusCode)
+            throw McpToolException.Unavailable($"Couldn't discover verification environments ({(int)response.StatusCode}).");
+
+        var verification = await response.Content.ReadFromJsonAsync(
+            (JsonTypeInfo<VerificationDirectory>)MessageBusJson.Options.GetTypeInfo(typeof(VerificationDirectory)), ct)
+            ?? throw McpToolException.Unavailable("The verification registry returned an empty response.");
+        return Ok(McpToolCatalog.ReadResult<DirectoryResult>(directory) with { Verification = verification });
     }
 
     // ---- the runner's task ----
@@ -323,8 +357,11 @@ internal sealed partial class LocalTools : IAsyncDisposable
 
     private async Task<SendResult> SendAsync(SendInput input, CancellationToken ct)
     {
+        if (input.Verification is not null)
+            await RequireVerifiedSendAsync(McpToolNames.SendVerified, ct);
         var bundles = new List<SentBundle>();
-        var sent = await ForwardAsync<SendInput, SendResult>(McpToolNames.Send, await PrepareAsync(WithSessionReplyTo(input), null, ct, bundles), ct);
+        var tool = input.Verification is null ? McpToolNames.Send : McpToolNames.SendVerified;
+        var sent = await ForwardAsync<SendInput, SendResult>(tool, await PrepareAsync(WithSessionReplyTo(input), null, ct, bundles), ct);
         _started[sent.ThreadId] = true;
         Remember(sent.ThreadId, bundles);
         return WithProjectNotice(sent with { Notice = JoinNotices(sent.Notice, bundles) }, input);
@@ -333,6 +370,8 @@ internal sealed partial class LocalTools : IAsyncDisposable
     private async Task<SendManyResult> SendManyAsync(SendManyInput input, CancellationToken ct)
     {
         if (input.Messages is not { Count: > 0 }) throw McpToolException.Invalid("messages", "Send between 1 and 100 messages.");
+        if (input.Messages.Any(message => message.Verification is not null))
+            await RequireVerifiedSendAsync(McpToolNames.SendManyVerified, ct);
         var project = input.ProjectId;
         var prepared = new List<SendInput>();
         var parents = new Dictionary<string, StatusResult>(StringComparer.Ordinal);
@@ -342,7 +381,8 @@ internal sealed partial class LocalTools : IAsyncDisposable
             bundles.Add([]);
             prepared.Add(await PrepareAsync(WithSessionReplyTo(message with { ProjectId = message.ProjectId ?? project }), $"messages[{i}].", ct, bundles[i], parents));
         }
-        var sent = await ForwardAsync<SendManyInput, SendManyResult>(McpToolNames.SendMany,
+        var tool = prepared.Any(message => message.Verification is not null) ? McpToolNames.SendManyVerified : McpToolNames.SendMany;
+        var sent = await ForwardAsync<SendManyInput, SendManyResult>(tool,
             input with { Messages = prepared, ProjectId = project ?? DefaultProject() }, ct);
         foreach (var result in sent.Results) _started[result.ThreadId] = true;
         foreach (var (result, i) in sent.Results.Select((r, i) => (r, i)).Where(r => r.i < bundles.Count)) Remember(result.ThreadId, bundles[i]);
@@ -360,6 +400,34 @@ internal sealed partial class LocalTools : IAsyncDisposable
         };
     }
 
+    private async Task RequireVerifiedSendAsync(string tool, CancellationToken ct)
+    {
+        // A listed tool alone is not negotiation: older services can share the catalog while
+        // lacking required-task admission. Check the live registry before packaging any child.
+        var route = ApiRoutes.VerificationEnvironments.Replace("{workspaceId}", Uri.EscapeDataString(_ws), StringComparison.Ordinal);
+        using var response = await _o.Http.GetAsync(route.TrimStart('/'), ct);
+        if (response.StatusCode is HttpStatusCode.Forbidden or HttpStatusCode.Unauthorized)
+            throw McpToolException.Forbidden("The session is not authorized to request required verification.");
+        if (!response.IsSuccessStatusCode)
+            throw McpToolException.Unavailable("The service has not negotiated required verification requests.");
+        VerificationDirectory? registry;
+        try
+        {
+            registry = await response.Content.ReadFromJsonAsync(
+                (JsonTypeInfo<VerificationDirectory>)MessageBusJson.Options.GetTypeInfo(typeof(VerificationDirectory)), ct);
+        }
+        catch (JsonException)
+        {
+            throw McpToolException.Unavailable("The verification registry returned an invalid response.");
+        }
+        if (registry is not { RegistryVersion: 1, RequiredTaskRequestsSupported: true, Recipes: not null, Environments: not null })
+            throw McpToolException.Unavailable("The service does not support required verification requests in registry version 1.");
+
+        var listed = await (await ServiceAsync(ct)).ListToolsAsync(cancellationToken: ct);
+        if (!listed.Any(candidate => candidate.Name == tool))
+            throw McpToolException.Unavailable("The service has not installed the required verification send handler.");
+    }
+
     private static string? JoinNotices(string? notice, IReadOnlyList<SentBundle> bundles)
     {
         var notices = new[] { notice }.Concat(bundles.Select(b => b.Notice)).Where(n => !string.IsNullOrEmpty(n)).Distinct().ToList();
@@ -375,6 +443,16 @@ internal sealed partial class LocalTools : IAsyncDisposable
         at ??= "";
         if (input.To is null) throw McpToolException.Invalid(at + "to", "Say who the message is for, for example role:developer.");
         if (input.Body is not { } body) throw McpToolException.Invalid(at + "body", "A message needs a body: {summary, details?, data?}.");
+        if (input.Verification is { } verification)
+        {
+            if (input.To is not RoleTarget || input.Type?.StartsWith("task.", StringComparison.Ordinal) != true)
+                throw McpToolException.Invalid(at + "verification", "Required verification is only available for role-targeted tasks.");
+            if (string.IsNullOrWhiteSpace(verification.Environment))
+                throw McpToolException.Invalid(at + "verification.environment", "Name a workspace-approved environment.");
+            if (verification.RequiredChecks is not { Count: > 0 }
+                || verification.RequiredChecks.Any(check => check is not ("test" or "typecheck" or "build" or "browser")))
+                throw McpToolException.Invalid(at + "verification.requiredChecks", "Name one or more checks: test, typecheck, build or browser.");
+        }
         Scan(body, at + "body");
 
         var key = await RecipientAsync(input.To, ct);
@@ -564,6 +642,8 @@ internal sealed partial class LocalTools : IAsyncDisposable
                    ?? throw McpToolException.NotFound($"Thread {input.ThreadId}'s task message wasn't found.");
         if (task.Attachments.Count(a => a.Format is AttachmentFormat.GitBundle or AttachmentFormat.Patch) > 1)
             throw McpToolException.Invalid("repository", "Retry cannot identify the original repositories for multiple code attachments. Use a fresh send with an explicit path and branch per code attachment and expectedHead for each Git bundle.");
+        if (thread.Verification is not null && task.Verification is null)
+            throw McpToolException.Invalid("threadId", "The original task's verification requirements are unavailable.");
         if (task.Body.Data is not { } data)
             throw new McpToolException(new McpError
             {
@@ -614,7 +694,7 @@ internal sealed partial class LocalTools : IAsyncDisposable
             var sent = await SendAsync(new SendInput
             {
                 To = task.Target, Type = task.Type, Title = RoundTitle(task.Title, round), Body = body,
-                SourceThreadId = input.ThreadId,
+                SourceThreadId = input.ThreadId, Verification = task.Verification,
                 ProjectId = task.ProjectId, ParentThreadId = thread.ParentThreadId, Expect = task.Expect, ReplyTo = task.ReplyTo,
                 Priority = task.Priority, DedupeKey = dedupeKey, Labels = labels, Refs = task.Refs,
                 Attach = attach, Attachments = keep, ExcludeAgents = task.ExcludeAgents, Model = task.Model,
@@ -1203,6 +1283,23 @@ internal sealed partial class LocalTools : IAsyncDisposable
         else if (input.Reply is { Friction.Count: > 0 })
             throw McpToolException.Invalid("friction", "Give notes in settle.friction so their kinds can be counted.");
 
+        if (runnerTask)
+        {
+            input = input with { DeliveryId = RunnerDeliveryId(Delivery!) };
+            if (_o.RecordVerifiedTaskSettle is not null)
+            {
+                if (input.Attach is { Count: > 0 } || input.Attachments is { Count: > 0 })
+                    throw McpToolException.Invalid("attach", "For required verification, the runner returns the checked commit. Settle with your reply and leave the commit on the runner branch.");
+                input = input with
+                {
+                    Result = input.Result with
+                    {
+                        Refs = (input.Result.Refs ?? []).Where(reference => reference.Kind != "git.commit" && reference.Kind != "git.branch").ToArray(),
+                    },
+                };
+            }
+        }
+
         if (input.Reply is not null || input.Attach is { Count: > 0 })
         {
             // Sealed for whoever reads the answer: the reply-to role's key, else the workspace key (the asker's machine holds it).
@@ -1274,8 +1371,16 @@ internal sealed partial class LocalTools : IAsyncDisposable
         var output = input.SealedReply is null
             ? new SettleOutput { Status = ThreadStatus.Working }
             : await ForwardSettleAsync(input with { ReplyOnly = true }, ct);
-        await File.WriteAllTextAsync(_o.SettleFile!, MessageBusJson.Serialize(input with { SealedReply = null, Attachments = [], ReplyOnly = false }), ct);
-        File.Delete(KeptAnswer.KeptFile(_o.SettleFile!));
+        var recorded = input with { SealedReply = null, Attachments = [], ReplyOnly = false };
+        if (_o.RecordVerifiedTaskSettle is { } record)
+        {
+            record(recorded);
+        }
+        else
+        {
+            await File.WriteAllTextAsync(_o.SettleFile!, MessageBusJson.Serialize(recorded), ct);
+            File.Delete(KeptAnswer.KeptFile(_o.SettleFile!));
+        }
         return output;
     }
 

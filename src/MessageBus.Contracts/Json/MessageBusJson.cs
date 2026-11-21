@@ -227,6 +227,7 @@ public static class MessageBusJson
 [JsonSerializable(typeof(CompleteProjectResult))]
 [JsonSerializable(typeof(DirectoryInput))]
 [JsonSerializable(typeof(DirectoryResult))]
+[JsonSerializable(typeof(VerificationDirectory))]
 [JsonSerializable(typeof(DescribeRoleInput))]
 [JsonSerializable(typeof(DescribeRoleResult))]
 [JsonSerializable(typeof(SubscribeInput))]

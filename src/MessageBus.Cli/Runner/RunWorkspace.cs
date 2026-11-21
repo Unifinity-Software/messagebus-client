@@ -67,6 +67,8 @@ public sealed partial class RunWorkspace : IDisposable
 
     internal bool? LocalRepositoryAfterExit { get; set; }
 
+    internal string? VerifiedReturnRevision { get; set; }
+
     /// <summary>
     /// For a resumed session (the original issue): the folder the session works in, which is the agent's working directory instead of
     /// a worktree of the run's own. The run only reads it; nothing the runner cleans up is ever removed from it.

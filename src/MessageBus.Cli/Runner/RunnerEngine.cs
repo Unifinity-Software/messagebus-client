@@ -13,6 +13,9 @@ public sealed record RunnerExtensions
     /// <summary>Gets decrypted git bundles (the original issue, the original issue).</summary>
     public IBundleSource? Bundles { get; init; }
 
+    internal NodeVerification? Verification { get; init; }
+    internal INodeVerificationReadiness? VerificationReadiness { get; init; }
+
     /// <summary>Wraps agent commands in a sandbox (the original issue).</summary>
     public IRunSandbox Sandbox { get; init; } = new NoSandbox();
 
@@ -146,7 +149,7 @@ public sealed class RunnerEngine : IAsyncDisposable
         _ext = extensions ?? new RunnerExtensions();
         _service = _ext.Readiness?.Watch(service) ?? service;
         _acceptance = new WorkAcceptance(host.Policy);
-        _services = new RunServices(options, host, _service, time, _log, _ext.Sandbox, _ext.Bundles, _stopping.Token, _ext.Tools, _ext.RunApprovals, _ext.SendKeptAnswer, _ext.ReturnCommits);
+        _services = new RunServices(options, host, _service, time, _log, _ext.Sandbox, _ext.Bundles, _stopping.Token, _ext.Tools, _ext.RunApprovals, _ext.SendKeptAnswer, _ext.ReturnCommits, _ext.Verification);
         Directory.CreateDirectory(options.WorkRoot);
         // Heartbeats start now, not with the first task: an idle runner's beats keep its agents online and
         // its free slots current on the service (a delivery can only shorten the interval).
@@ -180,6 +183,17 @@ public sealed class RunnerEngine : IAsyncDisposable
     /// <summary>Answers a delivery at once: accepted (the run starts) or declined (it goes back to the queue).</summary>
     public DeliveryDecision Deliver(TaskDelivery delivery)
     {
+        if (delivery.Verification is not null || delivery.Envelope.Verification is not null)
+        {
+            if (_ext.Verification is not { } verifier)
+                return Decline(DeclineReason.VerificationUnavailable, "This runner has no approved isolated verification runtime.");
+            if (verifier.Refusal(delivery) is { } unsupported)
+                return Decline(DeclineReason.VerificationUnavailable, unsupported);
+        }
+        else if (_ext.Verification is not null)
+        {
+            return Decline(DeclineReason.MachineNotReady, "This dedicated runner accepts only required Node verification deliveries.");
+        }
         AgentRun run;
         if (delivery.Envelope.Target is InboxTarget && delivery.Envelope.Type == ProgressRequestKinds.GitHistoryMessageType)
         {
@@ -459,6 +473,9 @@ public sealed class RunnerEngine : IAsyncDisposable
         // the original issue: the ceiling and this machine's size, for the dashboard's slot setting and its suggestion.
         inventory = inventory with
         {
+            Capabilities = _ext.Verification is { IsReady: true }
+                ? [.. inventory.Capabilities.Where(c => c != CapabilityNames.NodeVerificationV1), CapabilityNames.NodeVerificationV1]
+                : [.. inventory.Capabilities.Where(c => c != CapabilityNames.NodeVerificationV1)],
             Slots = slots,
             SlotCeiling = _ceiling,
             SlotMachineMax = _machineMax,
