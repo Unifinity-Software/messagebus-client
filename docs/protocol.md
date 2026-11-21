@@ -80,6 +80,25 @@ verified against their size and SHA-256 before resealing. Only encrypted inputs 
 recipient key are replaced. The service validates input ownership and collects abandoned uploads;
 the client never deletes original shared references on failure.
 
+Dead-letter replay discovers `replayIndependentInputsV1` in the actual service's
+`GET /api/server` response (`product: "messagebus.ai"`, optional `capabilities: string[]`).
+The CLI checks freshly with its authenticated operation client before downloading body bytes,
+requesting attachment download links or uploading replacements when the body can stay shared
+but files need a different key, or another input shape needs independent handling. Missing,
+malformed, unknown or failed discovery refuses with upgrade guidance and zero replacement uploads.
+Catalog tool advertising is not support evidence. Plain replay with no replacements and legacy
+cross-role replay with a replaced encrypted body (including files) do not require this token.
+Destination key metadata is resolved once for this preparation; all old keys are then checked
+before content transfers. A retry never wraps a completed upload in the key-ring retry loop.
+
+On a capable service, `sealedBody` and `attachments` are independently optional for an explicit
+destination role. The destination's current recipient key is resolved and checked separately from
+body replacement. Exact plaintext and same-key attachment references retain their original ownership;
+fresh encrypted replacements preserve count, order, name, format, branch and base commit, and are
+acquired using the authenticated uploader's exact upload-row CAS and permanent ownership receipt.
+Historical messages and bodies remain unchanged. Ordinary replay to the original target retains its
+existing historical-key behavior. Discovery grants no authorization to replay or acquire uploads.
+
 Thread notifications reuse the existing `message` event kind (`ThreadMessageAdded`), adding optional
 `retarget: {previousMessageId, from, to, reason?}` metadata. Old events omit it; no new polymorphic
 event discriminator is introduced. All new wire types use the source-generated `MessageBusJson` context.

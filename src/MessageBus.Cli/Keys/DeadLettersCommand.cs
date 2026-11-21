@@ -73,7 +73,9 @@ internal static class DeadLettersCommand
                 var title = letter.Envelope.Title ?? letter.Envelope.Type;
                 try
                 {
-                    var (sealedBody, files) = await TaskReseal.ResealAsync(keys, http, attachments, letter.Envelope, new RoleTarget { Role = to }, ct);
+                    var target = new RoleTarget { Role = to };
+                    var recipient = await TaskReseal.PrepareReplayAsync(keys, http, letter.Envelope, target, ct);
+                    var (sealedBody, files) = await TaskReseal.ResealAsync(keys, http, attachments, letter.Envelope, target, ct, recipientKey: recipient);
                     var input = new ReplayDeadLetterInput { ToRole = to, SealedBody = sealedBody, Attachments = files };
                     using var content = new StringContent(MessageBusJson.Serialize(input), Encoding.UTF8);
                     content.Headers.ContentType = new MediaTypeHeaderValue("application/json");

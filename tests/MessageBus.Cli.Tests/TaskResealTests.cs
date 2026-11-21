@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using MessageBus.Attachments.Client;
 using MessageBus.Cli.Tests.Infrastructure;
+using MessageBus.Cli.Configuration;
 using MessageBus.Contracts.Attachments;
 using MessageBus.Contracts.Json;
 using MessageBus.Contracts.Mcp;
@@ -18,6 +19,148 @@ namespace MessageBus.Cli.Tests;
 public sealed class TaskResealTests
 {
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Replay_command_refuses_old_service_without_content_requests_or_replacement_uploads(bool sameKeyBody)
+    {
+        using var machine = new TestMachine();
+        using var device = KeyPair.GenerateP256();
+        var store = new ConfigStore(machine.MbusFolder, "file");
+        store.Save(new CliConfig { Server = FakeServer.Url, WorkspaceId = "ws_test", MachineId = "mch_test" });
+        store.SaveKeyPem(device.ExportPem());
+        store.SaveSession(new CliSessionFile { Server = FakeServer.Url, AccessToken = "test-access", RefreshToken = "test-refresh", AccessExpiresAt = machine.Time.GetUtcNow().AddHours(1) });
+        using var oldPair = KeyPair.GenerateP256();
+        using var newPair = KeyPair.GenerateP256();
+        var destination = Key(newPair, "ek_new", "new-role");
+        using var unused = Configure(machine, destination);
+        var file = MessageCrypto.Seal("private file"u8, Key(oldPair, "ek_old", "old-role"));
+        var body = sameKeyBody ? BodyCrypto.Seal(new MessageBody { Summary = "Already readable" }, destination).ToSealedBody() : null;
+        var envelope = Envelope(body, [FileRef("att_original", file.Ciphertext) with { Encryption = file.Encryption }]);
+        machine.Server.On(HttpMethod.Get, "/api/w/ws_test/deadletters", _ => FakeServer.Json<IReadOnlyList<DeadLetter>>([new()
+        {
+            Id = "dead_test", Envelope = envelope, Role = "old-role", Reason = DeadLetterReason.Expired,
+            DeadLetteredAt = machine.Time.GetUtcNow(), ExpiresAt = machine.Time.GetUtcNow().AddDays(1),
+        }]));
+
+        var result = await machine.RunAsync("deadletters", "replay", "--to-role", "new-role", "dead_test");
+
+        Assert.Equal(1, result.ExitCode);
+        Assert.Contains("Upgrade the service", result.Output + result.Error);
+        Assert.DoesNotContain(machine.Server.Requests, r => r.Uri.AbsolutePath.Contains("attachments")
+            || r.Uri.AbsolutePath.EndsWith("/body") || r.Uri.AbsolutePath.EndsWith("/replay"));
+        Assert.DoesNotContain(machine.Server.Requests, r => r.Method == HttpMethod.Put || r.Method == HttpMethod.Delete);
+    }
+
+    [Theory]
+    [InlineData("{}")]
+    [InlineData("{\"product\":\"messagebus.ai\"}")]
+    [InlineData("{\"product\":\"other\",\"capabilities\":[\"replayIndependentInputsV1\"]}")]
+    [InlineData("{\"product\":\"messagebus.ai\",\"capabilities\":{\"replayIndependentInputsV1\":true}}")]
+    [InlineData("{\"product\":\"messagebus.ai\",\"capabilities\":[null,\"replayIndependentInputsV1\"]}")]
+    [InlineData("{\"product\":\"messagebus.ai\",\"capabilities\":[\"replayIndependentInputsV2\"]}")]
+    [InlineData("not json")]
+    public async Task Independent_replay_refuses_unconfirmed_services_before_any_content_request(string discovery)
+    {
+        using var machine = new TestMachine();
+        using var oldPair = KeyPair.GenerateP256();
+        using var newPair = KeyPair.GenerateP256();
+        var old = Key(oldPair, "ek_old", "old-role");
+        var destination = Key(newPair, "ek_new", "new-role");
+        using var http = Configure(machine, destination);
+        machine.Server.On(HttpMethod.Get, "/api/server", _ => new(HttpStatusCode.OK) { Content = new StringContent(discovery) });
+        using var keys = new MachineKeys(http, "ws_test", null, machine.Home, TextWriter.Null, machine.Time);
+        var file = MessageCrypto.Seal("private input"u8, old);
+        var envelope = Envelope(null, [FileRef("att_original", file.Ciphertext) with { Encryption = file.Encryption }]);
+
+        var error = await Assert.ThrowsAsync<McpToolException>(() => TaskReseal.PrepareReplayAsync(keys, http,
+            envelope, new RoleTarget { Role = "new-role" }, Ct));
+
+        Assert.Equal(McpErrorCodes.Conflict, error.Error.Code);
+        Assert.DoesNotContain(machine.Server.Requests, r => r.Uri.AbsolutePath.Contains("attachments") || r.Uri.AbsolutePath.EndsWith("/body"));
+        Assert.DoesNotContain(machine.Server.Requests, r => r.Method == HttpMethod.Put || r.Method == HttpMethod.Delete);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Independent_replay_discovery_errors_refuse_before_transfers(bool networkFailure)
+    {
+        using var machine = new TestMachine();
+        using var oldPair = KeyPair.GenerateP256();
+        using var newPair = KeyPair.GenerateP256();
+        var destination = Key(newPair, "ek_destination", "new-role");
+        using var http = Configure(machine, destination);
+        machine.Server.On(HttpMethod.Get, "/api/server", _ => networkFailure
+            ? throw new HttpRequestException("discovery unavailable") : new(HttpStatusCode.Forbidden));
+        using var keys = new MachineKeys(http, "ws_test", null, machine.Home, TextWriter.Null, machine.Time);
+        var file = MessageCrypto.Seal("input"u8, Key(oldPair, "ek_old", "old-role"));
+        var envelope = Envelope(null, [FileRef("att_original", file.Ciphertext) with { Encryption = file.Encryption }]);
+
+        await Assert.ThrowsAsync<McpToolException>(() => TaskReseal.PrepareReplayAsync(keys, http, envelope,
+            new RoleTarget { Role = "new-role" }, Ct));
+
+        Assert.DoesNotContain(machine.Server.Requests, r => r.Uri.AbsolutePath.Contains("attachments") || r.Uri.AbsolutePath.EndsWith("/body"));
+        Assert.DoesNotContain(machine.Server.Requests, r => r.Method == HttpMethod.Put || r.Method == HttpMethod.Delete);
+    }
+
+    [Fact]
+    public async Task Independent_replay_discovers_each_actual_target_afresh_and_then_reseals_only_files()
+    {
+        using var machine = new TestMachine();
+        using var oldPair = KeyPair.GenerateP256();
+        using var newPair = KeyPair.GenerateP256();
+        var old = Key(oldPair, "ek_file", "old-role");
+        var destination = Key(newPair, "ek_body", "new-role");
+        using var http = Configure(machine, destination);
+        using var keys = new MachineKeys(http, "ws_test", null, machine.Home, TextWriter.Null, machine.Time);
+        keys.Ring.Add(old.KeyId, KeyPair.FromPem(oldPair.ExportPem()));
+        var file = await SealFile("independent file"u8.ToArray(), old);
+        var reference = FileRef("att_original", file.Ciphertext) with { Encryption = file.Encryption };
+        ConfigureDownload(machine, reference, file.Ciphertext);
+        var body = BodyCrypto.Seal(new MessageBody { Summary = "Already readable" }, destination).ToSealedBody();
+        var envelope = Envelope(body, [reference]);
+        machine.Server.On(HttpMethod.Get, "/api/server", _ => new(HttpStatusCode.OK)
+        { Content = new StringContent("{\"product\":\"messagebus.ai\",\"capabilities\":[\"approvalAffectedV1\",\"replayIndependentInputsV1\",\"settleAttemptV1\"]}") });
+        var target = new RoleTarget { Role = "new-role" };
+        var recipient = await TaskReseal.PrepareReplayAsync(keys, http, envelope, target, Ct);
+        var result = await TaskReseal.ResealAsync(keys, http, new AttachmentClient(http, http, "ws_test"), envelope, target, Ct,
+            tempDirectory: machine.Home, recipientKey: recipient);
+        Assert.Null(result.Body);
+        var replacement = Assert.Single(result.Attachments!);
+        using var ring = new KeyRing().Add(destination.KeyId, KeyPair.FromPem(newPair.ExportPem()));
+        using var encrypted = new MemoryStream(machine.Server.Single(HttpMethod.Put, "/blobs/replacement").Body);
+        using var plaintext = new MemoryStream();
+        await MessageCrypto.OpenAsync(encrypted, plaintext, replacement.Encryption!, ring, Ct);
+        Assert.Equal("independent file"u8.ToArray(), plaintext.ToArray());
+
+        machine.Server.On(HttpMethod.Get, "/api/server", _ => new(HttpStatusCode.NotFound));
+        await Assert.ThrowsAsync<McpToolException>(() => TaskReseal.PrepareReplayAsync(keys, http, envelope, target, Ct));
+        Assert.Equal(2, machine.Server.Requests.Count(r => r.Uri.AbsolutePath == "/api/server"));
+        Assert.Single(machine.Server.Requests, r => r.Method == HttpMethod.Put);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Ordinary_replay_shapes_do_not_require_new_service_support(bool encrypted)
+    {
+        using var machine = new TestMachine();
+        using var pair = KeyPair.GenerateP256();
+        using var destinationPair = KeyPair.GenerateP256();
+        var old = Key(pair, "ek_old", "old-role");
+        var destination = Key(destinationPair, "ek_new", "new-role");
+        using var http = Configure(machine, destination);
+        using var keys = new MachineKeys(http, "ws_test", null, machine.Home, TextWriter.Null, machine.Time);
+        var body = BodyCrypto.Seal(new MessageBody { Summary = "Legacy replay" }, old).ToSealedBody();
+        var file = MessageCrypto.Seal("legacy input"u8, old);
+        var envelope = encrypted ? Envelope(body, [FileRef("att_old", file.Ciphertext) with { Encryption = file.Encryption }]) : Envelope(null, []);
+
+        await TaskReseal.PrepareReplayAsync(keys, http, envelope, new RoleTarget { Role = "new-role" }, Ct);
+
+        Assert.DoesNotContain(machine.Server.Requests, r => r.Uri.AbsolutePath == "/api/server" || r.Uri.AbsolutePath.Contains("attachments"));
+    }
 
     [Theory]
     [InlineData(false, true)]
