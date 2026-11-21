@@ -64,12 +64,12 @@ Other request headers: `X-Mbus-Workspace` (when the path doesn't name the worksp
 `X-Mbus-Client` (`cli`, `mcp` or `runner`), `X-Mbus-Agent` (the agent behind an MCP call), `X-Mbus-Request-Id`, and
 W3C `traceparent` / `tracestate`.
 
-### Frozen isolated machine domain (v2 core; runtime integration pending)
+### Frozen isolated machine domain (bounded HTTP integration; full runtime verification pending)
 
 `MachineRequestSigningV2` is a separate additive builder. The existing `MachineRequestSigning.CanonicalString`
-and v1 wire remain unchanged. The durable binding APIs below are available for subsequent transport integration;
-this core does not activate isolated signing or gate credential transports. It makes no regional availability or
-release-readiness claim.
+and v1 wire remain unchanged. The normal `ServerConnection.CreateAuthenticatedClient` HTTP pipeline now uses
+the binding APIs below and signs v2 for complete isolated discovery. Other credential paths still require the
+integration listed below. This bounded source checkpoint makes no regional availability or release-readiness claim.
 
 Isolated discovery retains `product: "messagebus.ai"`, optional `capabilities: string[]` and all existing tokens.
 The descriptive shape is `stamp:{stampId,geography,azureRegion,url,aliases}`. The security extension is exactly
@@ -121,8 +121,8 @@ Unknown/corrupt binding state refuses. Any origin-keyed ledger entry or survivin
 establishes the isolated floor. Missing/lower/malformed/conflicting discovery cannot erase it. Integration must
 read all state under the existing single profile security lock, reconcile and durably persist the ledger and
 credential snapshots before first credential transmission, and preserve the floor through every writer, logout,
-refresh, expiry and failure. The persistence APIs implement the storage part; actual credential transport gates
-remain subsequent implementation work.
+refresh, expiry and failure. The persistence APIs implement storage; the shared gate below integrates normal
+machine/API-key HTTP sends. It does not yet cover every credential category.
 
 `ConfigStore.WithProfileSecurityLockAsync` supplies an explicit `ProfileSecurityTransaction` using the existing
 `cli-session.lock` and process semaphore. `LoadBindingFloor()` rereads the independent `server-bindings.json`
@@ -176,6 +176,51 @@ expected tuple against the selected origin and current floor, requires an explic
 store, and verifies owner-only durable write access before future caller probes. The caller passes the returned
 expectation to `PrepareBinding`; neither API reads process environment or discovers a server. A writable path
 cannot prove that a container volume survives replacement: provisioning must still enforce the persistent mount.
+
+### Per-send HTTP gate and remaining integration
+
+`ServerSendGate(host, store, server)` owns a separate anonymous `HttpClient` without default headers. The optional
+additive `CliHost.CreateDiscoveryHttpHandler` supplies its transport; when omitted, a fresh raw handler from
+`CreateHttpHandler` is used. These are trusted transport factories, never an existing authenticated client.
+Built-in HTTP handlers disable redirects, cookies, preauthentication, server credentials and default proxy
+credentials. Custom injected handlers must uphold the same policy and must not inject credentials or follow
+redirects. The real host has separate explicit discovery and API factories. The overload taking `ConfigStore`,
+server URI, anonymous handler factory and environment reader is the seam for hosts without `CliHost`.
+
+`DemandDestination(finalUri)` checks the exact selected origin/base scope before metadata or authentication is
+attached. `PrepareSendAsync(finalUri, cancellationToken, optionalLockHeldTransaction)` checks the destination,
+validates supplied `MBUS_SERVER_BINDING` and explicit matching writable `MBUS_HOME`, fetches current anonymous
+`GET <base>/api/server`, strictly parses the successful response and calls `PrepareBinding` under the existing
+profile security lock. Every actual send repeats discovery; no TTL, stale fallback or legacy choice on failure
+exists. Discovery failure, redirect, downgrade and persistence failure produce terminal `ServerBindingException`.
+
+The returned `PreparedServerSend` carries the selected endpoint, strictly parsed current `Discovery` (for
+approval/destination checks), and optional durably prepared snapshot. It is
+single-use: `Consume(finalUri)` refuses another endpoint, reuse and contexts invalidated by a failed preparation
+in any gate for the same profile/origin in this process. Consume immediately before transmission; never retain it across operations. Already
+sent bytes cannot be recalled and server enforcement remains necessary. A snapshot alone never grants a send.
+The additive `MachineRequestSigner.CreateHeaders(prepared, actualRequest, bodyBytes)` consumes the context and
+uses its canonical issuer/stamp plus the actual single workspace header and final escaped URI. Legacy results
+delegate to the unchanged v1 signer. The normal handler buffers and transmits the same body bytes, removes any
+caller version header and sets v2 only from the prepared binding. API-key sends consume the same gate.
+
+`ServerConnection.CreateAuthenticatedClient` rejects reuse of a stored machine/workspace at another selected
+endpoint/base before loading the machine key or reading its workspace for headers. `CreateSigner` enforces
+the same scope before key loading. Equal API-key fingerprints only select the old machine signer at the exact
+saved endpoint. The normal HTTP transport disables redirects and rejects all 3xx responses without replay.
+
+Integrated callers are the normal client returned to CLI machine/inventory/key operations, doctor authenticated
+probes, local MCP and script API operations, runner REST/tool services, and attachment-link API requests that
+use that client. Factory use supplies this gate; separate transports do not inherit it automatically.
+
+Remaining required work is explicit: `CliSession` access-token/refresh/logout sends, login and device approval/
+start/poll/collection, anonymous caller-key and enrollment probes, environment-runner factories/checkpoint
+reuse, WebSocket connect/reconnect and terminal refusal classification, attachment transfer/query credentials
+and all separate MCP/script/dead-letter transfer clients, public signed update-feed transport and diagnostics.
+`CreateAnonymousClient` now restricts its raw HTTP transport, but is not itself a per-send credential gate.
+The old three-argument signer remains available for compatibility and is not evidence of gated WS integration.
+Native full suites, real isolated HTTPS/WS/proxy fixtures, remaining transport integration, independent combined
+review and client-first publication are required before server enforcement or any regional availability claim.
 
 ## REST routes the client calls
 

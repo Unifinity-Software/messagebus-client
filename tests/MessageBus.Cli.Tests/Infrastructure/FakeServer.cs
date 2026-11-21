@@ -64,7 +64,8 @@ public sealed class FakeServer : HttpMessageHandler
     {
         Content = new StringContent(
             value is ServerInfoResponse info
-                ? System.Text.Json.JsonSerializer.Serialize(info, new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web))
+                ? System.Text.Json.JsonSerializer.Serialize(info, new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web)
+                { DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull })
                 : MessageBusJson.Serialize(value),
             Encoding.UTF8, "application/json"),
     };

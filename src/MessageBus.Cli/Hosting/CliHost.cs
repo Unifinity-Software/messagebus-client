@@ -56,6 +56,9 @@ public sealed class CliHost
     /// <summary>Handler every server call goes through; the real one is <see cref="SocketsHttpHandler"/>.</summary>
     public required Func<HttpMessageHandler> CreateHttpHandler { get; init; }
 
+    /// <summary>Optional separate anonymous discovery transport factory. It must not inject credentials or follow redirects.</summary>
+    public Func<HttpMessageHandler>? CreateDiscoveryHttpHandler { get; init; }
+
     /// <summary>Clock for request signatures and scan times.</summary>
     public TimeProvider Time { get; init; } = TimeProvider.System;
 
@@ -104,7 +107,8 @@ public sealed class CliHost
         MachineName = Environment.MachineName,
         MbusCommand = McpLaunchCommand.ForCurrentProcess(),
         ExtraAgentDirectories = DefaultExtraAgentDirectories(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)),
-        CreateHttpHandler = () => new SocketsHttpHandler { PooledConnectionLifetime = TimeSpan.FromMinutes(5) },
+        CreateHttpHandler = () => new SocketsHttpHandler { PooledConnectionLifetime = TimeSpan.FromMinutes(5), AllowAutoRedirect = false, UseCookies = false },
+        CreateDiscoveryHttpHandler = () => new SocketsHttpHandler { AllowAutoRedirect = false, UseCookies = false, Credentials = null },
         Browser = new SystemBrowser(Environment.GetEnvironmentVariable),
         Skills = new EmbeddedSkillSource(),
         McpServer = LocalMcpServerRegistration.Create(),

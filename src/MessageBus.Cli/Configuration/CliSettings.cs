@@ -1,4 +1,5 @@
 using MessageBus.Cli.Hosting;
+using MessageBus.Cli.Server;
 
 namespace MessageBus.Cli.Configuration;
 
@@ -35,16 +36,19 @@ public sealed record CliSettings
     public static CliSettings Resolve(CliHost host, CliConfig stored, string? serverOption)
     {
         var serverText = NonEmpty(serverOption) ?? NonEmpty(host.GetEnvironmentVariable(EnvVars.Server)) ?? stored.Server;
+        var server = serverText is null ? null : ParseServer(serverText);
         var apiKey = NonEmpty(host.GetEnvironmentVariable(EnvVars.ApiKey));
         // the original issue: a runner that enrolled itself with this (runner) key signs as its machine instead.
-        if (apiKey is not null && stored.MachineId is not null && stored.EnrolledWithApiKey == Runner.RunnerKeyEnrollment.Fingerprint(apiKey))
+        if (apiKey is not null && stored.MachineId is not null && server is not null && stored.Server is not null
+            && ServerEndpoint.Parse(server.AbsoluteUri) == ServerEndpoint.Parse(stored.Server)
+            && stored.EnrolledWithApiKey == Runner.RunnerKeyEnrollment.Fingerprint(apiKey))
         {
             apiKey = null;
         }
         return new CliSettings
         {
             Stored = stored,
-            Server = serverText is null ? null : ParseServer(serverText),
+            Server = server,
             ApiKey = apiKey,
             MachineName = NonEmpty(host.GetEnvironmentVariable(EnvVars.MachineName)) ?? stored.MachineName ?? host.MachineName,
             Location = NonEmpty(host.GetEnvironmentVariable(EnvVars.Location)) ?? stored.Location,

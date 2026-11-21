@@ -32,15 +32,16 @@ public static class ServerConnection
     public static HttpClient CreateAuthenticatedClient(CliHost host, CliSettings settings, ConfigStore store, string component)
     {
         var server = settings.Server ?? throw NotSignedIn();
+        DemandStoredCredentialScope(settings);
         AuthenticatingHandler handler;
         if (settings.ApiKey is { } apiKey)
         {
-            handler = AuthenticatingHandler.WithApiKey(host.CreateHttpHandler(), apiKey, settings.Stored.WorkspaceId, component, CliHost.Version);
+            handler = AuthenticatingHandler.WithApiKey(ServerHttpTransport.Restrict(host.CreateHttpHandler()), apiKey, settings.Stored.WorkspaceId, component, CliHost.Version, new ServerSendGate(host, store, server));
         }
         else
         {
             var signer = CreateSigner(host, settings, store) ?? throw NotSignedIn();
-            handler = AuthenticatingHandler.WithMachineKey(host.CreateHttpHandler(), signer, settings.Stored.WorkspaceId, component, CliHost.Version);
+            handler = AuthenticatingHandler.WithMachineKey(ServerHttpTransport.Restrict(host.CreateHttpHandler()), signer, settings.Stored.WorkspaceId, component, CliHost.Version, new ServerSendGate(host, store, server));
         }
         return new HttpClient(handler, disposeHandler: true) { BaseAddress = CliSettings.BaseAddress(server) };
     }
@@ -48,6 +49,7 @@ public static class ServerConnection
     /// <summary>The enrolled machine's request signer, or null when this machine isn't enrolled.</summary>
     public static MachineRequestSigner? CreateSigner(CliHost host, CliSettings settings, ConfigStore store)
     {
+        DemandStoredCredentialScope(settings);
         if (settings.Stored.MachineId is not { } machineId || store.LoadKeyPem() is not { } pem)
         {
             return null;
@@ -55,10 +57,19 @@ public static class ServerConnection
         return new MachineRequestSigner(MachineKey.FromPem(pem), machineId, host.Time);
     }
 
+    // A selected destination is not permission to reuse an identity or workspace from another endpoint.
+    private static void DemandStoredCredentialScope(CliSettings settings)
+    {
+        if (settings.Stored.MachineId is null && settings.Stored.WorkspaceId is null) return;
+        if (settings.Server is null || settings.Stored.Server is null
+            || ServerEndpoint.Parse(settings.Server.AbsoluteUri) != ServerEndpoint.Parse(settings.Stored.Server))
+            throw new ServerBindingException("Saved machine credentials belong to a different server or API base path. Enroll explicitly at the selected endpoint.");
+    }
+
     /// <summary>A client with no credentials, for <c>/api/server</c> and enrollment.</summary>
     internal static HttpClient CreateAnonymousClient(CliHost host, Uri server)
     {
-        var client = new HttpClient(host.CreateHttpHandler(), disposeHandler: true) { BaseAddress = CliSettings.BaseAddress(server) };
+        var client = new HttpClient(ServerHttpTransport.Restrict(host.CreateHttpHandler()), disposeHandler: true) { BaseAddress = CliSettings.BaseAddress(server) };
         client.DefaultRequestHeaders.TryAddWithoutValidation(MbusHeaders.ClientVersion, CliHost.Version);
         client.DefaultRequestHeaders.TryAddWithoutValidation(MbusHeaders.ClientComponent, "cli");
         return client;
