@@ -42,26 +42,24 @@ RUN rm -f skills/global.json \
       -p:PublishSingleFile=true -p:DebugType=none -p:MbusImageManaged=true "$@" -o /out
 
 # ── runtime: Node (the agent CLIs are npm packages) plus mbus ─────────────────
-FROM node:${NODE_VERSION}-bookworm-slim
-ARG MBUS_RELEASE_VERSION
-ARG MBUS_SOURCE_REVISION
-LABEL org.opencontainers.image.source="https://github.com/Unifinity-Software/messagebus-client" \
-      org.opencontainers.image.version="$MBUS_RELEASE_VERSION" \
-      org.opencontainers.image.revision="$MBUS_SOURCE_REVISION"
+FROM node:${NODE_VERSION}-trixie-slim
 
 # Keep the release harness versions exact. Custom builds can override them.
 ARG CLAUDE_CODE_VERSION=2.1.330
 ARG CODEX_VERSION=0.171.0
 ARG OPENCODE_VERSION=1.19.6
 ARG COPILOT_VERSION=1.0.114
+ARG NPM_VERSION=12.2.3
 
 # git and ssh for the code the agents work on, ICU for .NET, tini to pass signals to mbus.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates git openssh-client libicu72 tini \
+ && apt-get upgrade -y \
+ && apt-get install -y --no-install-recommends ca-certificates git openssh-client libicu76 tini \
  && rm -rf /var/lib/apt/lists/*
 
-# npm 11 skips install scripts unless allowed; these two fetch each CLI's native binary.
-RUN npm install -g --no-fund --no-audit --allow-scripts=@anthropic-ai/claude-code,opencode-ai \
+# Allow the two install scripts that fetch each CLI's native binary.
+RUN npm install -g --no-fund --no-audit --ignore-scripts "npm@${NPM_VERSION}" \
+ && npm install -g --no-fund --no-audit --allow-scripts=@anthropic-ai/claude-code,opencode-ai \
       "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
       "@openai/codex@${CODEX_VERSION}" \
       "opencode-ai@${OPENCODE_VERSION}" \
@@ -84,6 +82,12 @@ WORKDIR /home/runner/work
 # The image is updated by rebuilding it, so the agents don't update themselves inside it.
 ENV DISABLE_AUTOUPDATER=1 \
     MBUS_SECRETS_DIR=/run/secrets
+
+ARG MBUS_RELEASE_VERSION
+ARG MBUS_SOURCE_REVISION
+LABEL org.opencontainers.image.source="https://github.com/Unifinity-Software/messagebus-client" \
+      org.opencontainers.image.version="$MBUS_RELEASE_VERSION" \
+      org.opencontainers.image.revision="$MBUS_SOURCE_REVISION"
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/mbus-entrypoint"]
 CMD ["runner"]

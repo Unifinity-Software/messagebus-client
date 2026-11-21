@@ -70,10 +70,16 @@ earlier merged commit, pass its full SHA as `tagged_commit` or push
 main so the environment's branch restriction applies. The workflow packs
 and verifies the packages and builds a Linux amd64 OCI image once from the
 exact release commit. Preparation verifies the image's source provenance,
-non-root configuration and all five CLI versions, and scans for secrets and
-high or critical vulnerabilities. The protected `ghcr` job promotes the exact
+non-root configuration and all five CLI versions. The scan reports high and
+critical vulnerabilities, including those without an upstream fix. It blocks
+publication on secret findings and high or critical findings with a fix.
+The protected `ghcr` job promotes the exact
 OCI index by digest and verifies a full anonymous pull before NuGet publishing
 can use GitHub OIDC and a short-lived nuget.org credential.
+
+The ACI template defaults to the first official runner image, `1.3.0`.
+For controlled upgrades, use the digest from the newer release notes and keep
+the existing runner name and identity storage.
 
 The publish job rechecks Build and the disclosure status before publishing. It
 submits the libraries in dependency order so NuGet can index them together.

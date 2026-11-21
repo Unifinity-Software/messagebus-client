@@ -172,7 +172,17 @@ jobs:
           manifest=$(skopeo inspect --raw oci-archive:artifacts/runner/image.tar | sha256sum)
           printf 'digest=sha256:%s\n' "${manifest%% *}" >> "$GITHUB_OUTPUT"
           printf 'versions=%s\n' "$(paste -sd ';' "$RUNNER_TEMP/runner-versions")" >> "$GITHUB_OUTPUT"
-      - name: Scan the staged runner
+      - name: Report high and critical vulnerabilities in the staged runner
+        uses: aquasecurity/trivy-action@v0.36.0
+        env:
+          TRIVY_IMAGE_SRC: docker
+        with:
+          image-ref: mbus-runner:candidate
+          scan-type: image
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          cache: 'false'
+      - name: Reject fixable high and critical vulnerabilities and secret findings
         uses: aquasecurity/trivy-action@v0.36.0
         env:
           TRIVY_IMAGE_SRC: docker
@@ -181,6 +191,7 @@ jobs:
           scan-type: image
           scanners: vuln,secret
           severity: HIGH,CRITICAL
+          ignore-unfixed: 'true'
           exit-code: '1'
           cache: 'false'
       - uses: actions/upload-artifact@v4

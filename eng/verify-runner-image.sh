@@ -48,8 +48,14 @@ docker image inspect --format '{{json .Config.Labels}}' mbus-runner:candidate | 
 check_version() {
   local executable=$1 expected=$2 reported
   reported=$(docker run --rm --network none --platform linux/amd64 --entrypoint "$executable" mbus-runner:candidate --version)
-  # Harnesses may print a product name alongside the version.
-  if ! awk -v expected="$expected" '{ for (i = 1; i <= NF; i++) if ($i == expected) found = 1 } END { exit !found }' <<<"$reported"; then
+  # Harnesses may print a product name and end the version sentence with a period.
+  if ! awk -v expected="$expected" '
+    { for (i = 1; i <= NF; i++) {
+        value = $i
+        sub(/\.$/, "", value)
+        if (value == expected) found = 1
+      } }
+    END { exit !found }' <<<"$reported"; then
     printf '%s reported %s, expected %s\n' "$executable" "$reported" "$expected" >&2
     return 1
   fi

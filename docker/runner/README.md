@@ -210,9 +210,9 @@ upgrade, select the digest from the newer release and redeploy with the same
 runner name, resource group and identity storage. For a custom image, supply
 its own tag or digest and set `containerRegistryName` for a private ACR.
 
-The template takes an explicit image until a first public digest passes the
-release pull check. At that point, set the template's default to the exact
-release pin and record its release version alongside it.
+The template defaults to the official `1.3.0` image. Use that default once the
+release notes list a successful public image, or choose a verified digest pin.
+You can supply a custom image before the first public release.
 
 ### Deploy in Azure
 
@@ -223,7 +223,7 @@ mbus task slot, two CPU cores, four GiB of memory and no public ingress. Agents 
 | Parameter | Value |
 |---|---|
 | `runnerName` | Your ACI container group name. |
-| `runnerImage` | The supplied image tag or, preferably, its pinned digest. |
+| `runnerImage` | Defaults to the official `1.3.0` tag. Set a verified digest to pin the exact image, or supply a custom image. |
 | `containerRegistryName` | Existing private ACR name in the resource group; empty for a public image. |
 | `serverUrl` | Your reachable mbus server address. |
 | `machineName` | How the runner appears in Fleet; defaults to the container group name. |
