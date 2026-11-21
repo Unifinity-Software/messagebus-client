@@ -8,4 +8,7 @@ public sealed record ServerCapabilitiesResponse
 
     /// <summary>Optional supported protocol features. Absent or unknown features imply no support.</summary>
     public IReadOnlyList<string>? Capabilities { get; init; }
+
+    /// <summary>Optional role proposal descriptor; requires the <c>roleProposalsV1</c> capability token.</summary>
+    public Roles.RoleProposalsCapability? RoleProposals { get; init; }
 }

@@ -1,7 +1,6 @@
 using System.Net;
 using System.Text;
 using System.Text.Json;
-using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 using System.Text.Json.Serialization.Metadata;
 using MessageBus.Contracts.Http;
@@ -15,6 +14,11 @@ namespace MessageBus.Mcp;
 internal sealed partial class LocalTools
 {
     private bool? _roleProposalsSupported;
+    private static readonly JsonSerializerOptions RoleDiscoveryJson = new(MessageBusJson.Options)
+    {
+        NumberHandling = JsonNumberHandling.Strict,
+        PropertyNameCaseInsensitive = false,
+    };
     private static readonly JsonSerializerOptions ProposalJson = new(MessageBusJson.Options)
     {
         UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
@@ -105,12 +109,15 @@ internal sealed partial class LocalTools
         if (!response.IsSuccessStatusCode) return (_roleProposalsSupported = false).Value;
         try
         {
-            var root = JsonNode.Parse(await response.Content.ReadAsStringAsync(ct));
-            var capability = root?["capabilities"]?["roleProposals"];
-            _roleProposalsSupported = capability is not null
-                && capability["version"]?.GetValue<int>() == 1
-                && capability["baselineVersion"]?.GetValue<string>() is { Length: > 0 }
-                && capability["normalizerVersion"]?.GetValue<string>() is { Length: > 0 };
+            var info = JsonSerializer.Deserialize(await response.Content.ReadAsStringAsync(ct),
+                (JsonTypeInfo<ServerCapabilitiesResponse>)RoleDiscoveryJson.GetTypeInfo(typeof(ServerCapabilitiesResponse)));
+            _roleProposalsSupported = info is
+                {
+                    Product: "messagebus.ai", Capabilities: { } capabilities,
+                    RoleProposals: { Version: 1, BaselineVersion: "role-proposal-readonly-v1", NormalizerVersion: "role-definition-v1" },
+                }
+                && capabilities.All(token => token is not null)
+                && capabilities.Contains("roleProposalsV1", StringComparer.Ordinal);
         }
         catch (Exception e) when (e is JsonException or InvalidOperationException or FormatException)
         {

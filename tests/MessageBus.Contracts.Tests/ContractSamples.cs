@@ -541,7 +541,8 @@ internal static class ContractSamples
             ApprovalId = "apr_01jcz7m2v1g3x4y5z6a7b8c9dn", Status = ApprovalState.Approved, Title = "Drop the archived_tasks table", Approvers = ["Ada"],
             ExpiresAt = T.AddHours(1), DecidedBy = "Ada", DecidedAt = T.AddMinutes(5), Comment = "After the backup.", RequestDigest = "ab12", TimedOut = true,
         },
-        new MessageBus.Contracts.Http.ServerCapabilitiesResponse { Product = "messagebus.ai", Capabilities = ["approvalAffectedV1", "settleAttemptV1"] },
+        new MessageBus.Contracts.Http.ServerCapabilitiesResponse { Product = "messagebus.ai", Capabilities = ["approvalAffectedV1", "settleAttemptV1", "roleProposalsV1"],
+            RoleProposals = new RoleProposalsCapability { Version = 1, BaselineVersion = "role-proposal-readonly-v1", NormalizerVersion = "role-definition-v1" } },
     }.ToDictionary(o => o.GetType());
 
 

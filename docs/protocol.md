@@ -92,9 +92,12 @@ must keep working against a newer service, and the reverse.
 
 ## Role proposals (optional version 1)
 
-`GET /api/server` may advertise
-`capabilities.roleProposals = {version: 1, baselineVersion: "role-proposal-readonly-v1",
-normalizerVersion: "role-definition-v1"}`. Missing, malformed or unknown protocol versions mean
+`GET /api/server` identifies `product: "messagebus.ai"` and keeps `capabilities` as an optional
+array of string tokens. Role proposals require both `"roleProposalsV1"` in that array and the optional
+top-level `roleProposals: {version: 1, baselineVersion: "role-proposal-readonly-v1",
+normalizerVersion: "role-definition-v1"}` descriptor. Existing `approvalAffectedV1` and `settleAttemptV1`
+tokens retain their meaning. Missing or wrong product, absent token or descriptor, malformed data, or
+unknown protocol, baseline or normalizer versions mean
 `unsupported`, independently of the product version. Existing tools keep working. Proposal tools are hidden
 when unsupported; forced calls return a nonretryable `unsupported`. Endpoint absence triggers one capability
 refresh. There is no role CRUD fallback.

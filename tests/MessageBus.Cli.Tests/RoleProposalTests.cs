@@ -254,6 +254,73 @@ public sealed class RoleProposalTests
         Assert.All(machine.Server.Requests, r => Assert.Equal("/api/server", r.Uri.AbsolutePath));
     }
 
+    [Theory]
+    [InlineData("missing-product")]
+    [InlineData("wrong-product")]
+    [InlineData("missing-tokens")]
+    [InlineData("missing-token")]
+    [InlineData("wrong-token-case")]
+    [InlineData("malformed-tokens")]
+    [InlineData("mixed-tokens")]
+    [InlineData("null-token")]
+    [InlineData("missing-descriptor")]
+    [InlineData("malformed-descriptor")]
+    [InlineData("missing-version")]
+    [InlineData("malformed-version")]
+    [InlineData("unknown-version")]
+    [InlineData("missing-baseline")]
+    [InlineData("unknown-baseline")]
+    [InlineData("missing-normalizer")]
+    [InlineData("unknown-normalizer")]
+    [InlineData("unsupported-object-capabilities")]
+    public async Task Unrecognized_discovery_never_exposes_proposal_tools_or_calls_proposal_endpoints(string scenario)
+    {
+        using var machine = new TestMachine();
+        var info = JsonNode.Parse("""{"product":"messagebus.ai","capabilities":["approvalAffectedV1","settleAttemptV1","roleProposalsV1"],"roleProposals":{"version":1,"baselineVersion":"role-proposal-readonly-v1","normalizerVersion":"role-definition-v1"}}""")!.AsObject();
+        switch (scenario)
+        {
+            case "missing-product": info.Remove("product"); break;
+            case "wrong-product": info["product"] = "other-product"; break;
+            case "missing-tokens": info.Remove("capabilities"); break;
+            case "missing-token": info["capabilities"] = JsonNode.Parse("""["approvalAffectedV1","settleAttemptV1"]"""); break;
+            case "wrong-token-case": info["capabilities"] = JsonNode.Parse("""["RoleProposalsV1"]"""); break;
+            case "malformed-tokens": info["capabilities"] = "roleProposalsV1"; break;
+            case "mixed-tokens": info["capabilities"] = JsonNode.Parse("""["roleProposalsV1",5]"""); break;
+            case "null-token": info["capabilities"] = JsonNode.Parse("""["roleProposalsV1",null]"""); break;
+            case "missing-descriptor": info.Remove("roleProposals"); break;
+            case "malformed-descriptor": info["roleProposals"] = "invalid"; break;
+            case "missing-version": info["roleProposals"]!.AsObject().Remove("version"); break;
+            case "malformed-version": info["roleProposals"]!["version"] = "1"; break;
+            case "unknown-version": info["roleProposals"]!["version"] = 2; break;
+            case "missing-baseline": info["roleProposals"]!.AsObject().Remove("baselineVersion"); break;
+            case "unknown-baseline": info["roleProposals"]!["baselineVersion"] = "future"; break;
+            case "missing-normalizer": info["roleProposals"]!.AsObject().Remove("normalizerVersion"); break;
+            case "unknown-normalizer": info["roleProposals"]!["normalizerVersion"] = "future"; break;
+            case "unsupported-object-capabilities":
+                info["capabilities"] = new JsonObject { ["roleProposals"] = info["roleProposals"]!.DeepClone() };
+                info.Remove("roleProposals"); break;
+        }
+        machine.Server.On(HttpMethod.Get, "/api/server", _ => new(HttpStatusCode.OK) { Content = new StringContent(info.ToJsonString()) });
+        using var http = Client(machine);
+        await using var tools = new LocalTools(Options(machine, http));
+        Assert.DoesNotContain(await tools.ListToolsAsync(null, Ct), t => McpToolNames.IsRoleProposal(t.Name));
+        var result = await tools.CallAsync("codex", McpToolNames.GetRoleProposal, Args(new GetRoleProposalInput { ProposalId = "rpr_test" }), Ct);
+        Assert.Equal(McpErrorCodes.Unsupported, Error(result).Code);
+        Assert.All(machine.Server.Requests, r => Assert.Equal("/api/server", r.Uri.AbsolutePath));
+    }
+
+    [Fact]
+    public async Task Additive_discovery_retains_existing_feature_tokens_and_exposes_supported_proposals()
+    {
+        using var machine = new TestMachine();
+        Capability(machine, 1);
+        using var http = Client(machine);
+        Assert.True(await TargetCapabilities.SupportsAsync(http, "approvalAffectedV1", Ct));
+        Assert.True(await TargetCapabilities.SupportsAsync(http, "settleAttemptV1", Ct));
+        await using var tools = new LocalTools(Options(machine, http));
+        Assert.Contains(await tools.ListToolsAsync(null, Ct), t => t.Name == McpToolNames.ProposeRole);
+    }
+
     [Fact]
     public async Task Own_expired_inbox_still_reads_waits_and_submits_with_original_binding_and_preserves_errors()
     {
@@ -441,7 +508,7 @@ public sealed class RoleProposalTests
     };
     private static void Capability(TestMachine machine, int? version) => machine.Server.On(HttpMethod.Get, "/api/server", _ => new(HttpStatusCode.OK)
     {
-        Content = new StringContent(version is null ? "{\"product\":\"messagebus.ai\"}" : """{"capabilities":{"roleProposals":{"version":VERSION,"baselineVersion":"role-proposal-readonly-v1","normalizerVersion":"role-definition-v1"}}}""".Replace("VERSION", version.ToString())),
+        Content = new StringContent(version is null ? "{\"product\":\"messagebus.ai\"}" : """{"product":"messagebus.ai","capabilities":["approvalAffectedV1","settleAttemptV1","roleProposalsV1"],"roleProposals":{"version":VERSION,"baselineVersion":"role-proposal-readonly-v1","normalizerVersion":"role-definition-v1"}}""".Replace("VERSION", version.ToString())),
     });
     private static IDictionary<string, JsonElement> Args<T>(T value) => JsonSerializer.SerializeToElement(value, MessageBusJson.Options.GetTypeInfo(typeof(T)))
         .EnumerateObject().ToDictionary(p => p.Name, p => p.Value.Clone());
