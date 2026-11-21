@@ -17,6 +17,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Include="..\Shared\CredentialFreeProxy.cs" Link="Http\CredentialFreeProxy.cs" />
     <InternalsVisibleTo Include="MessageBus.Cli.Tests" />
   </ItemGroup>
 

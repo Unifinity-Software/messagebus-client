@@ -220,6 +220,11 @@ Built-in HTTP handlers disable redirects, cookies, preauthentication, server cre
 credentials. Custom injected handlers must uphold the same policy and must not inject credentials or follow
 redirects. The real host has separate explicit discovery and API factories. The overload taking `ConfigStore`,
 server URI, anonymous handler factory and environment reader is the seam for hosts without `CliHost`.
+Anonymous discovery, public release and attachment transports preserve explicit/system proxy routing and bypass
+decisions through a per-transport credential-stripping proxy adapter. They neither read nor mutate the routing
+proxy's credentials; proxy URI userinfo is removed too. HTTP 407 and HTTPS CONNECT 407 are terminal, including
+Basic, Negotiate and NTLM challenges. A proxy requiring authentication cannot serve these anonymous transports.
+Authenticated API transports retain their existing explicit/system proxy behavior.
 
 `DemandDestination(finalUri)` checks the exact selected origin/base scope before metadata or authentication is
 attached. `PrepareSendAsync(finalUri, cancellationToken, optionalLockHeldTransaction)` checks the destination,
