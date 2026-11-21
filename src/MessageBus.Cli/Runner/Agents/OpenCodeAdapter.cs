@@ -32,6 +32,7 @@ public sealed class OpenCodeAdapter(string? version = null, string? configuredMo
     private Func<OpenCodeSettings>? _readSettings;
     private OpenCodeSelection? _selection;
     private Func<HttpMessageHandler>? _readinessHandler;
+    private Func<string?>? _managedProblem;
     internal Uri? LocalEndpoint => _selection?.Endpoint;
 
     internal static OpenCodeAdapter ForRunner(string? version, Func<string, string?> env, string home,
@@ -39,6 +40,7 @@ public sealed class OpenCodeAdapter(string? version = null, string? configuredMo
         {
             _readSettings = () => OpenCodeSettings.Read(new SignInEnvironment(env, storedEnvironment?.Invoke() ?? new Dictionary<string, string>()).Get, home, version),
             _readinessHandler = handler,
+            _managedProblem = () => OpenCodeLocalRuntime.ManagedProblem(new SignInEnvironment(env, storedEnvironment?.Invoke() ?? new Dictionary<string, string>()).Get),
         };
 
     internal async Task<(OpenCodeAdapter Adapter, string? Error)> SelectAsync(string? requested, CancellationToken ct)
@@ -49,10 +51,13 @@ public sealed class OpenCodeAdapter(string? version = null, string? configuredMo
         if (settings.SelectionProblem(requested) is { } invalid) return (this, invalid);
         if (settings.LocalRunProblem(requested, version) is { } unsafeLocal) return (this, unsafeLocal);
         var selection = settings.Select(requested);
+        if (selection.Endpoint is not null && _managedProblem?.Invoke() is { } managed) return (this, managed);
         var error = await OpenCodeReadiness.CheckAsync(selection, ct, _readinessHandler).ConfigureAwait(false);
+        if (error is not null) return (this, error);
+        if (selection.Endpoint is not null) selection = OpenCodeLocalRuntime.Confine(selection);
         return (new OpenCodeAdapter(version, selection.Id, mbus)
         {
-            // Primary readiness alone cannot establish that auxiliary inference is local.
+            _managedProblem = _managedProblem,
             _selection = selection,
         }, error);
     }
@@ -76,19 +81,28 @@ public sealed class OpenCodeAdapter(string? version = null, string? configuredMo
     /// <inheritdoc />
     public AgentLaunch BuildLaunch(AgentLaunchContext context)
     {
+        var environment = new Dictionary<string, string>();
+        if (_selection?.ConfinedLocal == true)
+        {
+            if (_managedProblem?.Invoke() is { } managed) return new AgentLaunch([], null) { CannotStart = managed };
+            if (context.RunDirectory is not { Length: > 0 } runDirectory)
+                return new AgentLaunch([], null) { CannotStart = "Local OpenCode requires a run-owned configuration directory." };
+            environment = OpenCodeLocalRuntime.EnvironmentFor(runDirectory);
+        }
+        environment[ConfigContentVariable] = RunConfig(context).ToJsonString();
         List<string> args = ["run"];
         if (UsesSharedServer(version))
         {
             args.Add("--standalone");
         }
-        if ((_selection?.Id ?? context.Model ?? configuredModel) is { Length: > 0 } model)
+        if ((_selection?.ConfinedLocal == true ? OpenCodeLocalRuntime.Model : _selection?.Id ?? context.Model ?? configuredModel) is { Length: > 0 } model)
         {
             args.AddRange(["--model", model]); // the role's cheaper model (the original issue), as OpenCode names it: provider/model
         }
         args.AddRange(["--format", "json", $"Read the task in the file {context.PromptFile} and do it."]);
         return new AgentLaunch(args, null)
         {
-            Environment = new Dictionary<string, string> { [ConfigContentVariable] = RunConfig(context).ToJsonString() },
+            Environment = environment,
         };
     }
 
@@ -126,8 +140,7 @@ public sealed class OpenCodeAdapter(string? version = null, string? configuredMo
             shell = rules;
         }
         var config = _selection is { } selected ? JsonNode.Parse(selected.ConfigJson)!.AsObject() : new JsonObject();
-        // Supply the selected primary snapshot. This is not proof of effective inference confinement:
-        // managed settings and auxiliary/agent models have their own precedence and selection paths.
+        // Local selections supply a fresh single-provider config; cloud selections retain their settings.
         OpenCodeSettings.Merge(config, new JsonObject
         {
             ["permission"] = new JsonObject
@@ -163,10 +176,10 @@ public sealed class OpenCodeAdapter(string? version = null, string? configuredMo
     }
 
     /// <inheritdoc />
-    public IAgentOutputParser CreateParser() => new OpenCodeOutputParser(_selection?.Id ?? configuredModel);
+    public IAgentOutputParser CreateParser() => new OpenCodeOutputParser(_selection?.Id ?? configuredModel, _selection?.ConfinedLocal == true);
 
     /// <inheritdoc />
-    public IAgentOutputParser CreateParser(string? model) => new OpenCodeOutputParser(_selection?.Id ?? (model is { Length: > 0 } ? model : configuredModel));
+    public IAgentOutputParser CreateParser(string? model) => new OpenCodeOutputParser(_selection?.Id ?? (model is { Length: > 0 } ? model : configuredModel), _selection?.ConfinedLocal == true);
 
     /// <summary>OpenCode's settings folder: <c>OPENCODE_CONFIG_DIR</c>, else <c>$XDG_CONFIG_HOME/opencode</c>, else <c>~/.config/opencode</c> (on every OS).</summary>
     public static string ConfigDirectory(Func<string, string?> env, string home) =>
@@ -193,7 +206,7 @@ public sealed class OpenCodeAdapter(string? version = null, string? configuredMo
 /// (<c>provider/model</c>), unknown when they name none.
 /// </summary>
 /// <param name="configuredModel">The <c>model</c> in OpenCode's settings, if any.</param>
-/// <param name="knownLocal">The caller independently guarantees all inference is local; primary endpoint readiness alone is insufficient. The runner does not currently assert this.</param>
+/// <param name="knownLocal">The caller independently guarantees all inference is local; primary endpoint readiness alone is insufficient. The runner asserts this only for the pinned isolated local runtime.</param>
 public sealed class OpenCodeOutputParser(string? configuredModel, bool knownLocal = false) : IAgentOutputParser
 {
     private long _in;

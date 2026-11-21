@@ -129,6 +129,7 @@ internal sealed class SmokeTest(SmokeTestOptions options)
             var launch = agent.Adapter.BuildLaunch(new AgentLaunchContext(prompt, workspace.PromptFile, TestCommands.Apply(profile, workspace.WorkTree), workspace.WorkTree,
                 new Dictionary<string, string> { [Hosting.EnvVars.Home] = noMbus }, RunnerSandboxed: options.Sandbox.ConfinesAgents, RunDirectory: workspace.Root,
                 RunnerIsolationEnabled: options.Sandbox.IsolationEnabled));
+            if (launch.CannotStart is { } cannotStart) return new(agent.Kind, cannotStart, [], null, workspace.Root);
             var agentEnvironment = WithStoredSignIns(environment);
             foreach (var (name, value) in launch.Environment)
             {

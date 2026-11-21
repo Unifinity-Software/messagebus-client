@@ -84,13 +84,13 @@ public sealed class OpenCodeLocalTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task Both_generations_refuse_local_execution_even_with_a_healthy_primary(bool v2)
+    public async Task Unverified_versions_refuse_local_execution_even_with_a_healthy_primary(bool v2)
     {
         using var machine = new TestMachine();
         machine.WriteHomeFile(".config/opencode/opencode.jsonc", Config(v2));
         machine.Env[OpenCodeAdapter.ConfigContentVariable] = """{"description":"environment overlay","permission":{"edit":"allow"}}""";
         var requests = new List<string>();
-        var adapter = OpenCodeAdapter.ForRunner(v2 ? "2.3.0" : "1.19.5", machine.Env.GetValueOrDefault, machine.Home,
+        var adapter = OpenCodeAdapter.ForRunner(v2 ? "2.3.0" : "1.19.4", machine.Env.GetValueOrDefault, machine.Home,
             () => GoodHandler(requests));
         var selected = await adapter.SelectAsync(null, TestContext.Current.CancellationToken);
         Assert.Contains("local-only inference is not verified", selected.Error);
@@ -347,7 +347,7 @@ public sealed class OpenCodeLocalTests
         using var machine = new TestMachine();
         var path = machine.WriteHomeFile(".config/opencode/opencode.jsonc", Config(v2));
         machine.Env[OpenCodeAdapter.ConfigContentVariable] = inherited;
-        var adapter = OpenCodeAdapter.ForRunner(v2 ? "2.3.0" : "1.19.5", machine.Env.GetValueOrDefault, machine.Home,
+        var adapter = OpenCodeAdapter.ForRunner(v2 ? "2.3.0" : "1.19.4", machine.Env.GetValueOrDefault, machine.Home,
             () => throw new InvalidOperationException("No model requests before confinement"));
         var local = await adapter.SelectAsync(null, TestContext.Current.CancellationToken);
         Assert.Contains("local-only inference is not verified", local.Error);
@@ -372,7 +372,7 @@ public sealed class OpenCodeLocalTests
     }
 
     [Theory]
-    [InlineData("1.19.5", false)]
+    [InlineData("1.19.4", false)]
     [InlineData("2.3.0", true)]
     [InlineData("2.3.1", true)]
     [InlineData(null, true)]
@@ -472,6 +472,93 @@ public sealed class OpenCodeLocalTests
         Assert.NotNull(OpenCodeSettings.Read(machine.Env.GetValueOrDefault, machine.Home).Problem);
         machine.Env[OpenCodeAdapter.ConfigContentVariable] = new string(' ', OpenCodeSettings.MaxBytes + 1);
         Assert.Empty(OpenCodeSettings.Read(machine.Env.GetValueOrDefault, machine.Home).Inventory.Models);
+    }
+
+    [Theory]
+    [InlineData("{\"small_model\":\"cloud/paid\"}")]
+    [InlineData("{\"agent\":{\"helper\":{\"model\":\"cloud/paid\"},\"compaction\":{\"model\":\"cloud/paid\"}}}")]
+    [InlineData("{\"provider\":{\"backup\":{\"models\":{\"fallback\":{}}}},\"plugin\":[\"untrusted-plugin\"]}")]
+    public async Task Pinned_local_launch_discards_inherited_auxiliary_agents_fallback_and_repository_config(string inherited)
+    {
+        using var machine = new TestMachine();
+        var original = Config(v2: false);
+        var file = machine.WriteHomeFile(".config/opencode/opencode.jsonc", original);
+        var repository = machine.WriteHomeFile("repository/.opencode/agents/helper.md", "---\nmodel: cloud/paid\n---\nhelper");
+        machine.Env[OpenCodeAdapter.ConfigContentVariable] = inherited;
+        machine.Env["ProgramData"] = Path.Combine(machine.Home, "system");
+        var requests = new List<string>();
+        var adapter = OpenCodeAdapter.ForRunner("1.19.5", machine.Env.GetValueOrDefault, machine.Home, () => GoodHandler(requests));
+        var selected = await adapter.SelectAsync(null, TestContext.Current.CancellationToken);
+        Assert.Null(selected.Error);
+        Assert.Equal(2, requests.Count);
+        var context = Context() with { RunDirectory = Path.Combine(machine.Home, "run"), WorkingDirectory = Path.GetDirectoryName(Path.GetDirectoryName(Path.GetDirectoryName(repository)))! };
+        var launch = selected.Adapter.BuildLaunch(context);
+        Assert.Null(launch.CannotStart);
+        Assert.Contains(OpenCodeLocalRuntime.Model, launch.Arguments);
+        var config = JsonNode.Parse(launch.Environment[OpenCodeAdapter.ConfigContentVariable])!;
+        Assert.Equal(OpenCodeLocalRuntime.Model, config["model"]!.GetValue<string>());
+        Assert.Equal(OpenCodeLocalRuntime.Model, config["small_model"]!.GetValue<string>());
+        Assert.Equal("mbus-local", Assert.Single(config["enabled_providers"]!.AsArray())!.GetValue<string>());
+        var provider = Assert.Single(config["provider"]!.AsObject()).Value!;
+        Assert.Equal("selected", Assert.Single(provider["whitelist"]!.AsArray())!.GetValue<string>());
+        Assert.Equal("api-coder", provider["models"]!["selected"]!["id"]!.GetValue<string>());
+        Assert.All(config["agent"]!.AsObject(), agent => Assert.Equal(OpenCodeLocalRuntime.Model, agent.Value!["model"]!.GetValue<string>()));
+        Assert.DoesNotContain("cloud/paid", config.ToJsonString());
+        Assert.Null(config["plugin"]);
+        Assert.Null(config["mode"]);
+        Assert.Equal("true", launch.Environment["OPENCODE_DISABLE_PROJECT_CONFIG"]);
+        Assert.Equal("true", launch.Environment["OPENCODE_DISABLE_DEFAULT_PLUGINS"]);
+        Assert.Equal("{}", launch.Environment["OPENCODE_AUTH_CONTENT"]);
+        Assert.All(new[] { "HOME", "USERPROFILE", "OPENCODE_TEST_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME", "OPENCODE_CONFIG_DIR", "OPENCODE_DB" },
+            key => Assert.StartsWith(Path.GetFullPath(context.RunDirectory!), launch.Environment[key]));
+        Assert.NotEqual(launch.Environment["HOME"], selected.Adapter.BuildLaunch(context).Environment["HOME"]);
+        Assert.Equal(original, File.ReadAllText(file));
+        Assert.Equal(inherited, machine.Env[OpenCodeAdapter.ConfigContentVariable]);
+        Assert.Contains("cloud/paid", File.ReadAllText(repository));
+        var parser = selected.Adapter.CreateParser();
+        Assert.Null(parser.Complete().Usage!.EstimatedCostUsd);
+        parser.Observe(Step);
+        Assert.Equal(0m, parser.Complete().Usage!.EstimatedCostUsd);
+        parser.Observe(Step.Replace("\"cost\":0", "\"cost\":0.12", StringComparison.Ordinal));
+        Assert.Equal(0.12m, parser.Complete().Usage!.EstimatedCostUsd);
+        var cloud = await adapter.SelectAsync("cloud/paid", TestContext.Current.CancellationToken);
+        Assert.Null(cloud.Error);
+        Assert.Single(cloud.Adapter.BuildLaunch(Context()).Environment);
+        Assert.Equal(2, requests.Count);
+    }
+
+    [Fact]
+    public async Task Pinned_local_failed_readiness_never_asserts_known_zero()
+    {
+        using var machine = new TestMachine();
+        machine.Env[OpenCodeAdapter.ConfigContentVariable] = Config(v2: false);
+        machine.Env["ProgramData"] = Path.Combine(machine.Home, "system");
+        var selected = await OpenCodeAdapter.ForRunner("1.19.5", machine.Env.GetValueOrDefault, machine.Home, DownHandler)
+            .SelectAsync(null, TestContext.Current.CancellationToken);
+        Assert.Contains("not reachable", selected.Error);
+        var parser = selected.Adapter.CreateParser();
+        parser.Observe(Step);
+        Assert.Null(parser.Complete().Usage!.EstimatedCostUsd);
+    }
+
+    [Fact]
+    public async Task Managed_settings_refuse_pinned_local_before_probe_and_are_rechecked_at_launch()
+    {
+        using var machine = new TestMachine();
+        machine.Env[OpenCodeAdapter.ConfigContentVariable] = Config(v2: false);
+        machine.Env["ProgramData"] = Path.Combine(machine.Home, "system");
+        var managed = Path.Combine(machine.Home, "managed");
+        machine.Env["OPENCODE_TEST_MANAGED_CONFIG_DIR"] = managed;
+        var requests = new List<string>();
+        var adapter = OpenCodeAdapter.ForRunner("1.19.5", machine.Env.GetValueOrDefault, machine.Home, () => GoodHandler(requests));
+        var selected = await adapter.SelectAsync(null, TestContext.Current.CancellationToken);
+        Assert.Null(selected.Error);
+        Directory.CreateDirectory(managed);
+        File.WriteAllText(Path.Combine(managed, "opencode.json"), "{\"small_model\":\"cloud/paid\"}");
+        Assert.Contains("managed/system", (await adapter.SelectAsync(null, TestContext.Current.CancellationToken)).Error);
+        Assert.Equal(2, requests.Count);
+        Assert.Contains("managed/system", selected.Adapter.BuildLaunch(Context() with { RunDirectory = Path.Combine(machine.Home, "run") }).CannotStart);
+        Assert.Null((await adapter.SelectAsync("cloud/paid", TestContext.Current.CancellationToken)).Error);
     }
 
     internal static Handler GoodHandler(List<string> requests) => new((request, _) =>

@@ -24,47 +24,43 @@ Help center: [messagebus.ai/docs](https://messagebus.ai/docs).
 
 ## OpenCode with LM Studio
 
-The runner reads a partial configured model inventory from OpenCode JSON/JSONC settings without inference and
-checks LM Studio model state. **Local task execution is currently refused before checkout/setup**, including with
-OpenCode 1.19.5 and 2.3.0. A loaded local primary does not prove that compaction, agents/subagents, auxiliary models
-or fallback cannot call a cloud provider. Explicit cloud task selections remain usable; personal settings are unchanged.
+The runner reads a partial configured model inventory and checks LM Studio's loaded-model state without inference.
+Local execution supports **OpenCode `opencode-ai@1.19.5` with `@ai-sdk/openai-compatible` on an unmanaged host**.
+The runner creates fresh run-owned home/config/data/cache/state folders, skips repository OpenCode configuration,
+and constructs a single-provider, single-model runtime. Primary, small, title, summary, compaction and subagent
+inference use the selected local model. Inherited plugins, credentials, model overrides and fallback providers are
+excluded. Managed/system configuration (including macOS MDM) is refused because it loads after run content.
+OpenCode 2 and unverified versions still refuse local execution. Explicit cloud task selections preserve their settings.
 
-The reader accepts the `provider`/`npm`/`options`/model `id` and `providers`/`package`/`settings`/model `modelID` shapes.
-For inventory inspection, an OpenCode 2 example in the runner account's `~/.config/opencode/opencode.jsonc` is:
+Configure a loaded, tool-capable LM Studio model in the runner account's OpenCode settings:
 
 ```jsonc
 {
   "model": "local/coder",
-  "providers": {
+  "provider": {
     "local": {
-      "package": "@opencode/ai/providers/openai-compatible",
-      "settings": { "baseURL": "http://127.0.0.1:1234/v1" },
-      "models": { "coder": { "modelID": "your-loaded-instance-id" } }
+      "npm": "@ai-sdk/openai-compatible",
+      "options": { "baseURL": "http://127.0.0.1:1234/v1" },
+      "models": { "coder": { "id": "your-loaded-instance-id" } }
     }
   }
 }
 ```
 
-Use the actual API ID from LM Studio's `/v1/models`, not the display name. Model keys may contain additional slashes.
-OpenCode 1 uses `"npm": "@ai-sdk/openai-compatible"` and the corresponding singular keys above. These examples describe
-the inventory reader, not a verified effective runtime configuration or a supported local execution baseline.
+Use the API ID served by `/v1/models`, not the display name. Model keys can contain additional slashes.
+The bounded baseline uses an 8192-token context and 2048-token output budget; load a model with at least that context.
+The reader also accepts OpenCode 2's `providers`/`package`/`settings`/`modelID` shape for inventory inspection.
 
 The scan merges global JSON then JSONC, `OPENCODE_CONFIG`, `OPENCODE_CONFIG_DIR` JSON then JSONC, and
-`OPENCODE_CONFIG_CONTENT` in that order. `{env:NAME}` values resolve in the runner session; missing variables, file
+`OPENCODE_CONFIG_CONTENT` in that order. `{env:NAME}` resolves in the runner session; missing variables, file
 substitutions and malformed or oversized settings require a configuration fix. Inventory is partial, capped at 100
 service-compatible IDs of at most 100 characters. Repository, managed/system, remote and file-based agent settings
-are not inventory sources. A fresh runner snapshot and a primary-model pin cannot establish the full effective
-configuration: unmentioned auxiliary settings survive merging, and managed settings can override run content.
+are not inventory sources. They are not copied into the confined local runtime. Personal settings stay unchanged.
 
-Exact upstream source was checked for npm `opencode-ai@1.19.5` and `@opencode/cli@2.3.0`. In
-[1.19.5 config loading](https://github.com/anomalyco/opencode/blob/810c0eba1a7348036f8bdf61e6632d0c36c6876c/packages/opencode/src/config/config.ts),
-run content loads before managed configuration and macOS MDM preferences. In
-[2.3.0 config loading](https://github.com/anomalyco/opencode/blob/a6b15d33daf6ab7d35569f6d711fdb630b9f04e7/packages/core/src/config.ts),
-managed settings likewise load last; managed policies have separate precedence. The runner has no verified mechanism
-to confine every inference path across those scopes. It therefore refuses local selections in these and unverified
-versions, including arbitrary loopback runtimes, instead of claiming local-only execution. No upstream package was
-installed or executed to establish this source evidence. See also [OpenCode configuration](https://opencode.ai/docs/config/)
-and [LM Studio model state](https://lmstudio.ai/docs/developer/rest/list).
+The implementation is based on [exact pinned upstream source and package integrity](docs/opencode-local-runtime.md).
+That page contains executable native acceptance commands. Package execution, full suites, actual LM Studio inference,
+two-model trials and the cross-machine handoff still require coordinator verification; source analysis and compilation
+alone do not establish those acceptance results.
 
 `mbus doctor` and scans make only read-only model-list GETs under **one five-second budget for all candidates**, at
 most two requests per candidate, 1 MiB per response, without redirects. Native `/api/v1/models` must confirm a loaded
@@ -76,12 +72,11 @@ restriction. With LM Studio authentication enabled, configure `settings.apiKey` 
 The runner never starts a server, loads/downloads a model or assumes JIT loading.
 
 After setup, use `mbus connect opencode` and `mbus connect --rescan` to inspect configuration and readiness.
-`mbus doctor --smoke --agent opencode` refuses local selections before creating a scratch repository; an explicit
-cloud selection can still run its smoke inference. A refused local delivery is handed back before checkout/setup.
-The runner does not infer $0 from local primary readiness. Unknown usage remains unknown and positive reported
-cost remains positive. No local inference or privacy guarantee is made: coordination, reports and configured tools
-also use the network. Local execution and any zero-spend claim require future verified confinement of all model
-paths, provider fallback and configuration scopes, with effective-runtime evidence.
+`mbus doctor --smoke --agent opencode` runs inference for the supported local baseline; unsupported local selections
+are handed back before checkout/setup. Only confined local runs with reported token use get known-zero inference
+cost. Missing usage stays unknown and positive reported costs remain positive. Inference for this path stays on the
+configured operator-controlled loopback LM Studio server. Coordination, reports and allowed tools can use the network;
+this is not an offline-agent or zero-total-network-cost guarantee.
 
 Full issue acceptance still needs an operator-run Windows/macOS handoff and bounded tester trials of two already
 downloaded coding candidates. Use one harmless repository SHA and tester prompt, fixed context and timeout, and two

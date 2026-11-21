@@ -1,0 +1,94 @@
+# Pinned local OpenCode runtime
+
+The supported implementation targets npm **opencode-ai 1.19.5**, upstream commit
+`810c0eba1a7348036f8bdf61e6632d0c36c6876c`. It does not use the OpenCode 2 shared server.
+Source inspection and compilation have been performed. The native acceptance below must still be run by the
+coordinator before claiming package execution or actual local inference has passed. No OpenCode package, model call, service
+or test was executed by the implementation worker.
+
+## Why the config confines model resolution
+
+All links below name the exact commit, rather than mutable documentation or a guessed environment flag.
+
+| Path | Pinned source and behavior |
+| --- | --- |
+| Repository config and file agents | [config loader](https://github.com/anomalyco/opencode/blob/810c0eba1a7348036f8bdf61e6632d0c36c6876c/packages/opencode/src/config/config.ts) and [config paths](https://github.com/anomalyco/opencode/blob/810c0eba1a7348036f8bdf61e6632d0c36c6876c/packages/opencode/src/config/paths.ts): `OPENCODE_DISABLE_PROJECT_CONFIG=true` skips project JSON/JSONC and repository `.opencode` discovery. Remaining config directories are the isolated global, home and explicit config directories. |
+| Global/home scopes | [global paths](https://github.com/anomalyco/opencode/blob/810c0eba1a7348036f8bdf61e6632d0c36c6876c/packages/core/src/global.ts): XDG config/data/cache/state roots and `OPENCODE_TEST_HOME` control these paths. The implementation sets them, HOME and USERPROFILE to fresh owned paths. This use of the internal home override is deliberately version-pinned. |
+| Accounts and remote config | [auth](https://github.com/anomalyco/opencode/blob/810c0eba1a7348036f8bdf61e6632d0c36c6876c/packages/opencode/src/auth/index.ts) accepts `OPENCODE_AUTH_CONTENT={}`. [database path](https://github.com/anomalyco/opencode/blob/810c0eba1a7348036f8bdf61e6632d0c36c6876c/packages/core/src/database/database.ts) accepts `OPENCODE_DB`; each launch gets a fresh database, so no active account/organization config is inherited. The original auth files and account DB are never written. |
+| Model catalog | [models-dev](https://github.com/anomalyco/opencode/blob/810c0eba1a7348036f8bdf61e6632d0c36c6876c/packages/core/src/models-dev.ts) uses `OPENCODE_MODELS_PATH` before its embedded snapshot. An owned `{}` file prevents catalog collisions/inherited model options; fetch is disabled. |
+| Providers and fallback | [provider resolver](https://github.com/anomalyco/opencode/blob/810c0eba1a7348036f8bdf61e6632d0c36c6876c/packages/opencode/src/provider/provider.ts) filters providers with `enabled_providers`, models with provider `whitelist`, and resolves language models from that filtered map. The only provider is `mbus-local`; its only model is `selected`, with an explicit checked API ID, bundled `@ai-sdk/openai-compatible` runtime, and loopback baseURL. A reference to any other provider/model fails resolution. Default/recent/small-model selection cannot select an absent cloud provider. |
+| Auxiliary/subagent inference | [agent construction](https://github.com/anomalyco/opencode/blob/810c0eba1a7348036f8bdf61e6632d0c36c6876c/packages/opencode/src/agent/agent.ts) supports model overrides for build, plan, general, explore, title, summary and compaction. All seven and top-level `model`/`small_model` are pinned to `mbus-local/selected`. [compaction](https://github.com/anomalyco/opencode/blob/810c0eba1a7348036f8bdf61e6632d0c36c6876c/packages/opencode/src/session/compaction.ts) resolves its agent's model through the same provider service. |
+| Plugins | [runtime flags](https://github.com/anomalyco/opencode/blob/810c0eba1a7348036f8bdf61e6632d0c36c6876c/packages/opencode/src/effect/runtime-flags.ts) and [plugin loader](https://github.com/anomalyco/opencode/blob/810c0eba1a7348036f8bdf61e6632d0c36c6876c/packages/opencode/src/plugin/index.ts): `OPENCODE_PURE=true` excludes config plugins and `OPENCODE_DISABLE_DEFAULT_PLUGINS=true` excludes built-ins. No user plugins/SDK hooks are copied. |
+| Schema | [config](https://github.com/anomalyco/opencode/blob/810c0eba1a7348036f8bdf61e6632d0c36c6876c/packages/core/src/v1/config/config.ts) and [provider](https://github.com/anomalyco/opencode/blob/810c0eba1a7348036f8bdf61e6632d0c36c6876c/packages/core/src/v1/config/provider.ts) define these singular provider/options/id fields, agent model fields, allowlists and model limits/costs. |
+| Managed/system scopes | [managed configuration](https://github.com/anomalyco/opencode/blob/810c0eba1a7348036f8bdf61e6632d0c36c6876c/packages/opencode/src/config/managed.ts) loads after inline content. The implementation refuses any managed directory or macOS managed plist, and inspection errors, before readiness/checkout and again at launch. It does not redirect managed settings to an empty location. |
+
+Only the endpoint, selected API alias and that local endpoint's optional API key enter the fresh config. Inherited
+small models, deprecated modes, custom agents, fallback providers, plugins, model options and variants are discarded.
+The bounded baseline declares 8192 context tokens and 2048 output tokens; the operator must load a model with at
+least that context. Existing configured cloud selections use the original snapshot and environment as before.
+Successful LM Studio readiness is necessary as well as confinement. Readiness failures never mark usage local.
+The parser reports known-zero inference cost only after token usage appears; positive reported costs are preserved.
+
+This assumes the configured loopback server is operator-controlled LM Studio, not an HTTP redirector or remote
+gateway. The operator must verify that server's actual inference destination. Configuration confinement covers
+OpenCode's model resolver; authorized shell/MCP/web tools can network or invoke other programs. Coordination and
+reporting also use the network. This is not a claim that the whole agent is offline or that electricity/hardware/tools
+have zero cost. It is not an OS egress policy against an agent deliberately changing its own execution environment.
+
+## Artifact provenance
+
+Registry records: [launcher](https://registry.npmjs.org/opencode-ai/1.19.5) and
+[Windows x64 binary](https://registry.npmjs.org/opencode-windows-x64/1.19.5).
+
+The worker downloaded the launcher tarball without installation/execution and verified its registry SHA-512:
+
+```text
+opencode-ai-1.19.5.tgz
+SHA256: 1f97e49381f8a42a629482eff8be98aa96d62e2e94410a8ec98e738f9c787680
+SRI: sha512-tEqMvQahfhdDj8vceYpXtoIrvjPXm5XRfetWnPN5YISueU7adNx9JcUA3zZ+2GKuDVgDpGdQe1ZLtCZDjqodvA==
+
+opencode-windows-x64-1.19.5.tgz (registry metadata; worker did not download or execute)
+SRI: sha512-xCVbrA8A/qQTAdBIKyhK5tx3/mcq18yF82Mi8phry0MJb2631nnnpxF9m6FFfWAVHyer4qFGrO7hbWXesHQ1Gg==
+```
+
+## Native coordinator acceptance
+
+Run outside an mbus task/sandbox with test execution allowed, on an unmanaged Windows x64 host. No global npm
+installation is needed. These commands download and verify the pinned platform binary into an owned scratch folder:
+
+```powershell
+$trial = Join-Path $PWD '.opencode-local-trial'
+New-Item -ItemType Directory -Force -Path $trial | Out-Null
+$archive = Join-Path $trial 'opencode-windows-x64-1.19.5.tgz'
+Invoke-WebRequest 'https://registry.npmjs.org/opencode-windows-x64/-/opencode-windows-x64-1.19.5.tgz' -OutFile $archive
+$hasher = [Security.Cryptography.SHA512]::Create()
+$actual = 'sha512-' + [Convert]::ToBase64String($hasher.ComputeHash([IO.File]::ReadAllBytes($archive)))
+$hasher.Dispose()
+if ($actual -cne 'sha512-xCVbrA8A/qQTAdBIKyhK5tx3/mcq18yF82Mi8phry0MJb2631nnnpxF9m6FFfWAVHyer4qFGrO7hbWXesHQ1Gg==') { throw 'Artifact integrity mismatch' }
+tar -xf $archive -C $trial
+$env:MBUS_TEST_OPENCODE_EXE = Join-Path $trial 'package/bin/opencode.exe'
+$env:MBUS_TEST_LMSTUDIO_URL = 'http://127.0.0.1:1234/v1'
+# Set this to the actual eagerly loaded instance ID from /v1/models; no model auto-load is performed.
+$env:MBUS_TEST_LMSTUDIO_MODEL = 'REPLACE_WITH_LOADED_API_ID'
+$env:MBUS_TEST_OPENCODE_EVIDENCE = Join-Path $trial 'evidence'
+dotnet build MessageBus.Client.slnx -m:1 --disable-build-servers
+dotnet test --solution MessageBus.Client.slnx --no-build
+python eng/check-public-contracts.py
+git diff --check
+```
+
+`OpenCodeLocalHostTests.Pinned_package_effective_config_and_loaded_local_inference` is opt-in through those
+variables and always skips inside a task. It constructs the production adapter launch environment, uses actual
+LM Studio readiness, checks the real package version, calls `debug config`, requires `models` to expose exactly
+`mbus-local/selected`, and executes the real `run --format json` invocation. It injects cloud small/compaction
+settings and repository JSON/file agents and checks that they disappear from effective config. It requires token
+usage, a `LOCAL_OK` response, and known-zero inference cost. Its evidence files contain the effective config,
+available models and JSONL run output, with no user credentials. This authless trial does not touch personal config.
+
+While it runs, capture LM Studio's request log showing actual inference on that host, including auxiliary calls.
+Archive that evidence with the package SRI and test results. Repeat on macOS with its exact registry platform
+package and SRI, then perform both already-downloaded model trials with identical repo/prompt/context/time bounds.
+Windows/macOS three-family handoff and two-model tester trials remain separate #332 acceptance requirements.
+Native package/schema incompatibility or runtime trial failures must be fixed before release; the worker's successful
+compile is not a substitute for these results. Remove trial environment variables and the owned trial folder after
+preserving the evidence, according to the coordinator's cleanup rules.

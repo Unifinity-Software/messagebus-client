@@ -93,7 +93,7 @@ internal static class OpenCodeReadiness
                 linked.Token.ThrowIfCancellationRequested();
                 var next = await CheckAsync(locals[i], linked.Token, handler, time).ConfigureAwait(false);
                 if (next is null)
-                    return new(true, Warning: "LM Studio has a loaded local candidate (no vendor sign-in required). Local execution is refused until effective inference confinement is verified; explicit cloud selections remain available.");
+                    return new(true, Warning: "LM Studio has a loaded local candidate (no vendor sign-in required). Local execution requires the pinned isolated OpenCode 1.19.5 runtime and unmanaged settings; explicit cloud selections remain available.");
                 error ??= next;
             }
             catch (OperationCanceledException) when (!ct.IsCancellationRequested && timeout.IsCancellationRequested)

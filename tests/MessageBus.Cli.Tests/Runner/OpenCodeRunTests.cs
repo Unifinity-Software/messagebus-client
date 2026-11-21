@@ -12,6 +12,35 @@ namespace MessageBus.Cli.Tests.Runner;
 
 public sealed class OpenCodeRunTests
 {
+    [Fact]
+    public async Task Supported_local_delivery_executes_with_owned_config_after_loaded_model_preflight()
+    {
+        using var machine = new MessageBus.Cli.Tests.Infrastructure.TestMachine();
+        var env = machine.Env;
+        env[OpenCodeAdapter.ConfigContentVariable] = OpenCodeLocalTests.Config(v2: false);
+        env["ProgramData"] = Path.Combine(machine.Home, "system");
+        var calls = new List<string>();
+        await using var h = new RunnerHarness(environment: env, openCodeCommand: RunnerHarness.FakeAgentPath,
+            sandbox: _ => new PromptInputSandbox(), extensions: e => e with
+            {
+                Adapters = _ => OpenCodeAdapter.ForRunner("1.19.5", env.GetValueOrDefault, machine.Home,
+                    () => OpenCodeLocalTests.GoodHandler(calls)),
+            });
+        var task = h.Task("dlv_supported", "opencode", directives: d => d["env"] = "OPENCODE_CONFIG_CONTENT,OPENCODE_DISABLE_PROJECT_CONFIG,XDG_DATA_HOME")
+            with { Model = "local/publisher/coder" };
+        Assert.True((await h.DeliverAsync(task)).Accepted);
+        Assert.Equal(SettleStatus.Succeeded, (await h.Service.SettledAsync(task.DeliveryId)).Result.Status);
+        Assert.Equal(2, calls.Count);
+        var work = h.WorkTreeOf(task.DeliveryId);
+        Assert.Contains(OpenCodeLocalRuntime.Model, File.ReadAllLines(Path.Combine(work, "fake-agent-args.txt")));
+        var recorded = File.ReadAllLines(Path.Combine(work, "env.txt"));
+        var config = System.Text.Json.Nodes.JsonNode.Parse(recorded.Single(l => l.StartsWith("OPENCODE_CONFIG_CONTENT=", StringComparison.Ordinal))["OPENCODE_CONFIG_CONTENT=".Length..])!;
+        Assert.Equal(OpenCodeLocalRuntime.Model, config["small_model"]!.GetValue<string>());
+        Assert.Single(config["provider"]!.AsObject());
+        Assert.Contains("OPENCODE_DISABLE_PROJECT_CONFIG=true", recorded);
+        Assert.StartsWith("XDG_DATA_HOME=" + Path.GetDirectoryName(work), recorded.Single(l => l.StartsWith("XDG_DATA_HOME=", StringComparison.Ordinal)));
+    }
+
     [Theory]
     [InlineData("local/publisher/coder")]
     [InlineData("local/alternative")]

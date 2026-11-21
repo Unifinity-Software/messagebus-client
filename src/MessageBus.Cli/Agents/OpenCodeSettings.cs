@@ -131,12 +131,11 @@ internal sealed class OpenCodeSettings
         var loopback = Uri.TryCreate(Str(overlay.Options["baseURL"]), UriKind.Absolute, out var uri) && IsLoopback(uri.Host);
         if (!loopback && overlay.Package != "@opencode/ai/providers/lmstudio") return null;
 
-        // Neither pinned generation makes run content authoritative over managed settings.
-        // Repository/file agents and auxiliary/fallback models also outlive a primary-model pin.
-        // Do not launch (even with a healthy primary), or infer zero cost, until every inference
-        // path can be confined in the effective configuration. Unknown runtimes fail closed too.
+        if (version == OpenCodeLocalRuntime.Version && overlay.Shape == "provider"
+            && overlay.Package == "@ai-sdk/openai-compatible" && _models[id].Endpoint is not null) return null;
+
         var generation = version is "1.19.5" or "2.3.0" ? $"OpenCode {version}" : "This OpenCode version";
-        return $"{generation}: local-only inference is not verified. Run settings cannot guarantee restriction of auxiliary, compaction, agent/subagent and fallback models, including repository and managed/system overrides. Local selections are refused before checkout/setup; use an explicit cloud selection or wait for verified local confinement support. Personal settings are unchanged.";
+        return $"{generation}: local-only inference is not verified. Run settings cannot guarantee restriction of auxiliary, compaction, agent/subagent and fallback models, including repository and managed/system overrides. Local selections are refused before checkout/setup; use the isolated OpenCode 1.19.5 openai-compatible baseline or an explicit cloud selection. Personal settings are unchanged.";
     }
 
     internal static OpenCodeSettings Read(Func<string, string?> env, string home, string? version = null)
@@ -231,4 +230,4 @@ internal sealed class OpenCodeSettings
 }
 
 /// <summary>One immutable selection, passed to readiness, launch, proxy and usage.</summary>
-internal sealed record OpenCodeSelection(string? Id, string? ApiId, Uri? Endpoint, string? ApiKey, string ConfigJson);
+internal sealed record OpenCodeSelection(string? Id, string? ApiId, Uri? Endpoint, string? ApiKey, string ConfigJson, bool ConfinedLocal = false);
