@@ -198,6 +198,29 @@ digest, runner machine ID, task IDs and returned commit SHAs. Keep evidence free
 
 ## Azure Container Instances
 
+The Linux ACI runner requires a protected launch under UID 10001. It enrolls or
+restores its identity before announcing readiness. A startup check uses dummy
+files and a local test endpoint to verify the same task launcher used for real
+work. If the container denies the required namespace operations, the runner
+stays connected and reports its harnesses as unavailable. It won't run tasks
+with basic isolation. Confirm that the target deployment passes the check
+before assigning roles. The original unprivileged ACI deployment failed the
+namespace probe at UID 10001.
+
+- **Files and processes.** A task gets its own home, worktree, temporary
+  directories and PID namespace. The runner's settings, machine key and other
+  worktrees aren't mounted. The image's toolchain is read-only.
+- **Network.** A task has a separate network namespace. Its proxy allows
+  approved public IPv4 connections on HTTPS or SSH ports. The proxy denies
+  private, loopback, link-local and Azure platform addresses, and the runner's
+  identity storage host. Open-network roles still use this allow-list. Upstream
+  proxies and host-local models aren't supported in this mode.
+- **Harnesses.** Claude Code and Codex start with a fresh home. Use credentials
+  supplied by the deployment, no saved sign-ins or tools from the runner's
+  home. A harness that fails its protected launch check is unavailable. Codex
+  also has to start its nested command sandbox. Resumed harness sessions
+  aren't supported in this mode.
+
 `infra/runner-aci.bicep` provisions a Linux ACI runner that enrolls itself in Azure. You do not
 run an enrollment container on your computer or copy a machine private key into a deployment.
 Use a runner image that includes `docker/runner/aci-bootstrap.mjs` and the pending-enrollment

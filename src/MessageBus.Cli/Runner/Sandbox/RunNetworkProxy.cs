@@ -28,25 +28,32 @@ public sealed class RunNetworkProxy : IDisposable
     /// <summary>How many ports from <see cref="PortRangeStart"/> are tried before any free port is taken.</summary>
     public const int PortRangeSize = 100;
 
-    private readonly TcpListener _listener;
+    private readonly Action _closeListener;
     private readonly Func<string, int, CancellationToken, Task<Stream>> _connect;
     private readonly TextWriter _log;
     private readonly CancellationTokenSource _stop = new();
     private readonly ConcurrentDictionary<string, RunNetwork> _runs = new(StringComparer.Ordinal);
     // Each open client connection, with the run it turned out to be for once its request was read (the original issue: withdrawn with it).
-    private readonly ConcurrentDictionary<TcpClient, RunNetwork?> _open = new();
+    private readonly ConcurrentDictionary<Socket, RunNetwork?> _open = new();
     private readonly UpstreamProxy? _upstream;
-    private readonly Func<CancellationToken, ValueTask<TcpClient>> _accept;
+    private readonly Func<CancellationToken, ValueTask<Socket>> _accept;
 
     private RunNetworkProxy(TcpListener listener, TextWriter log, Func<string, int, CancellationToken, Task<Stream>>? connect, UpstreamProxy? upstream,
-        Func<TcpListener, CancellationToken, ValueTask<TcpClient>>? accept = null)
+        Func<TcpListener, CancellationToken, ValueTask<Socket>>? accept = null)
+        : this(((IPEndPoint)listener.LocalEndpoint).Port, log, connect, upstream,
+            accept is null ? listener.AcceptSocketAsync : ct => accept(listener, ct), listener.Stop)
     {
-        _listener = listener;
+    }
+
+    private RunNetworkProxy(int port, TextWriter log, Func<string, int, CancellationToken, Task<Stream>>? connect, UpstreamProxy? upstream,
+        Func<CancellationToken, ValueTask<Socket>> accept, Action closeListener)
+    {
+        _closeListener = closeListener;
         _log = log;
         _upstream = upstream;
         _connect = connect ?? ConnectAsync;
-        _accept = accept is null ? listener.AcceptTcpClientAsync : ct => accept(listener, ct);
-        Port = ((IPEndPoint)_listener.LocalEndpoint).Port;
+        _accept = accept;
+        Port = port;
         _ = Task.Run(AcceptAsync);
     }
 
@@ -69,8 +76,27 @@ public sealed class RunNetworkProxy : IDisposable
         new(Listen(port), log, connect, upstream);
 
     /// <summary>A proxy on any free port whose listener takes connections through <paramref name="accept"/> (tests: a failing accept).</summary>
-    internal static RunNetworkProxy StartWithAccept(TextWriter log, Func<TcpListener, CancellationToken, ValueTask<TcpClient>> accept) =>
+    internal static RunNetworkProxy StartWithAccept(TextWriter log, Func<TcpListener, CancellationToken, ValueTask<Socket>> accept) =>
         new(Listen(0), log, connect: null, upstream: null, accept);
+
+    // Protected ACI launches reach this proxy solely through their own socket and
+    // a listener inside their network namespace. No port is opened on the runner.
+    internal static RunNetworkProxy StartUnix(string path, int relayPort, TextWriter log,
+        Func<string, int, CancellationToken, Task<Stream>> connect)
+    {
+        var listener = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
+        try
+        {
+            listener.Bind(new UnixDomainSocketEndPoint(path));
+            listener.Listen(32);
+            return new(relayPort, log, connect, upstream: null, listener.AcceptAsync, listener.Dispose);
+        }
+        catch
+        {
+            listener.Dispose();
+            throw;
+        }
+    }
 
     /// <summary>
     /// The runner's one proxy, on the port kept in <see cref="FileName"/> in <paramref name="settingsDirectory"/>. With none kept
@@ -245,7 +271,7 @@ public sealed class RunNetworkProxy : IDisposable
         var failures = 0;
         while (!_stop.IsCancellationRequested)
         {
-            TcpClient client;
+            Socket client;
             try
             {
                 client = await _accept(_stop.Token).ConfigureAwait(false);
@@ -296,9 +322,9 @@ public sealed class RunNetworkProxy : IDisposable
         }
     }
 
-    private async Task HandleAsync(TcpClient client, CancellationToken ct)
+    private async Task HandleAsync(Socket client, CancellationToken ct)
     {
-        var stream = client.GetStream();
+        using var stream = new NetworkStream(client);
         var (head, rest) = await ReadHeadAsync(stream, ct).ConfigureAwait(false);
         if (head is null)
         {
@@ -726,7 +752,7 @@ public sealed class RunNetworkProxy : IDisposable
     public void Dispose()
     {
         _stop.Cancel();
-        _listener.Stop();
+        _closeListener();
         foreach (var client in _open.Keys)
         {
             client.Dispose();

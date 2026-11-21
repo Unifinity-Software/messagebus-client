@@ -17,6 +17,10 @@ namespace MessageBus.Cli.Runner;
 /// </remarks>
 public interface IRunSandbox
 {
+    internal string? AgentRefusal(Contracts.Machines.AgentKind kind) => null;
+
+    internal bool UsesPrivateHome => false;
+
     /// <summary>The launch to use instead of <paramref name="launch"/>.</summary>
     ProcessLaunch Wrap(ProcessLaunch launch, RunWorkspace workspace, PermissionProfile profile);
 

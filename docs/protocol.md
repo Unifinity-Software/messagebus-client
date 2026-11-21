@@ -46,6 +46,11 @@ before starting the runner and restores it on subsequent starts. This adds no se
 Blob access uses the container's managed identity and an exclusive lease; the blob's Azure resource binding is
 a bootstrap ownership check and never authorizes mbus lifecycle management.
 
+The ACI runner uses the existing agent `notReady` and runner `isolation` inventory fields when the protected
+launch check fails. In that state it declines tasks with `machine-not-ready` while keeping control-plane
+connectivity. `isolation.network: "enforced"` describes the approved public IPv4 proxy in a separate task network
+namespace after the launch check passes. There is no new wire field or service prerequisite.
+
 - **JSON** is camelCase, written and read through the source-generated context in
   `src/MessageBus.Contracts/Json/MessageBusJson.cs`, which ignores fields it doesn't know. A new field is optional
   for both sides; an absent field means the old behaviour.

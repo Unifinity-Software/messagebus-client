@@ -189,6 +189,8 @@ async function main() {
     delete env.MBUS_API_KEY_FILE
     delete env.MBUS_AZURE_CLIENT_ID
     delete env.MBUS_AZURE_IDENTITY_BLOB_URL
+    // The task proxy denies this hostname. It never receives the identity URL or credentials.
+    env.MBUS_AZURE_IDENTITY_HOST = new URL(config.blob).hostname
     console.log('Azure runner identity restored; starting mbus runner.')
     await command('/usr/local/bin/mbus-entrypoint', ['runner'], env, cancellation.signal)
   } catch (error) {

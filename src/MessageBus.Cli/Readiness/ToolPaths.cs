@@ -123,6 +123,10 @@ public static class ToolPaths
 public sealed class ToolPathSandbox(IRunSandbox inner, IReadOnlyDictionary<string, string> variables,
     Func<IReadOnlyDictionary<string, string>>? refresh = null) : IRunSandbox
 {
+    string? IRunSandbox.AgentRefusal(Contracts.Machines.AgentKind kind) => inner.AgentRefusal(kind);
+
+    bool IRunSandbox.UsesPrivateHome => inner.UsesPrivateHome;
+
     /// <inheritdoc />
     public ProcessLaunch Wrap(ProcessLaunch launch, RunWorkspace workspace, Contracts.Roles.PermissionProfile profile)
     {

@@ -114,6 +114,15 @@ public sealed class RunNetwork : IDisposable
         return network;
     }
 
+    internal static RunNetwork StartAci(string socket, HostAllowList allow, TextWriter log, string runName,
+        Func<string, int, CancellationToken, Task<Stream>> connect)
+    {
+        var proxy = RunNetworkProxy.StartUnix(socket, AciSandbox.ProxyPort, log, connect);
+        var network = new RunNetwork(proxy, ownsProxy: true, allow, runName, credential: null);
+        proxy.Only = network;
+        return network;
+    }
+
     /// <summary>The proxy's port on 127.0.0.1.</summary>
     public int Port => _proxy.Port;
 
