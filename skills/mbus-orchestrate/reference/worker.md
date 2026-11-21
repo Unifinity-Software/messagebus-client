@@ -19,7 +19,15 @@ instructions say what the role does; this says how to use the mbus tools.
    comment), look for one you already made for this task: a task can be delivered twice.
 5. **Check it.** Run the acceptance checks the body lists. Report what you ran and the results;
    never claim a check passed that you didn't run.
+   For verification-only tasks, confirm `git rev-parse HEAD` matches the requested SHA and the
+   tracked checkout is clean before running the checks. Confirm the environment and permissions
+   match the task. In `reply.details`, report the tested SHA, OS and toolchain versions, and each
+   command with its exit status and pass/fail/skip counts or relevant logs. Distinguish smoke
+   checks from full suites. Give the reason for any blocked check. Report verified cleanup
+   and any remaining task-owned artifacts with their paths and reasons.
 6. **Commit** on the task's branch with a clear message. Never commit secrets or build output.
+   For verification-only tasks, skip this step and settle with the evidence and a ref to the tested
+   commit.
 7. **Settle once:** Optional `friction: [{kind, note}]` says what made the work harder (at most 12
    notes, one sentence of up to 500 characters each). Kinds: `code-mismatch`, `build-or-test`,
    `refused`, `missing-context`, `merge-or-rebase`, `other`. Omit it when nothing got in the way.
