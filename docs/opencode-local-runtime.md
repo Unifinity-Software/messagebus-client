@@ -53,42 +53,23 @@ SRI: sha512-xCVbrA8A/qQTAdBIKyhK5tx3/mcq18yF82Mi8phry0MJb2631nnnpxF9m6FFfWAVHyer
 
 ## Native coordinator acceptance
 
-Run outside an mbus task/sandbox with test execution allowed, on an unmanaged Windows x64 host. No global npm
-installation is needed. These commands download and verify the pinned platform binary into an owned scratch folder:
+Use the [native proof packet](../eng/opencode-proof/README.md) and its verified, task-owned setup
+scripts. It includes exact Windows x64 and Darwin arm64 1.19.5 registry SRI pins, tar path checks,
+archive/binary hashes and fail-preserving evidence. Tests never download packages automatically.
 
-```powershell
-$trial = Join-Path $PWD '.opencode-local-trial'
-New-Item -ItemType Directory -Force -Path $trial | Out-Null
-$archive = Join-Path $trial 'opencode-windows-x64-1.19.5.tgz'
-Invoke-WebRequest 'https://registry.npmjs.org/opencode-windows-x64/-/opencode-windows-x64-1.19.5.tgz' -OutFile $archive
-$hasher = [Security.Cryptography.SHA512]::Create()
-$actual = 'sha512-' + [Convert]::ToBase64String($hasher.ComputeHash([IO.File]::ReadAllBytes($archive)))
-$hasher.Dispose()
-if ($actual -cne 'sha512-xCVbrA8A/qQTAdBIKyhK5tx3/mcq18yF82Mi8phry0MJb2631nnnpxF9m6FFfWAVHyer4qFGrO7hbWXesHQ1Gg==') { throw 'Artifact integrity mismatch' }
-tar -xf $archive -C $trial
-$env:MBUS_TEST_OPENCODE_EXE = Join-Path $trial 'package/bin/opencode.exe'
-$env:MBUS_TEST_LMSTUDIO_URL = 'http://127.0.0.1:1234/v1'
-# Set this to the actual eagerly loaded instance ID from /v1/models; no model auto-load is performed.
-$env:MBUS_TEST_LMSTUDIO_MODEL = 'REPLACE_WITH_LOADED_API_ID'
-$env:MBUS_TEST_OPENCODE_EVIDENCE = Join-Path $trial 'evidence'
-dotnet build MessageBus.Client.slnx -m:1 --disable-build-servers
-dotnet test --solution MessageBus.Client.slnx --no-build
-python eng/check-public-contracts.py
-git diff --check
-```
+The opt-in `OpenCodeRuntimeProofTests` fixture executes the real package with separate local and
+fake-cloud HTTP endpoints. It requires hostile global/home/project/auth/account/plugin positive
+controls, all seven expected agents, explicit summary/subtask/compaction calls, observed API model
+IDs, and no cloud requests on primary failure or unknown model. Its confined commands reuse the
+production `AgentProcessLaunch` and `RunIsolation` result. A compiled fixture is not runtime proof;
+the coordinator must execute it outside a task with permission and verify it did not skip.
 
-`OpenCodeLocalHostTests.Pinned_package_effective_config_and_loaded_local_inference` is opt-in through those
-variables and always skips inside a task. It constructs the production adapter launch environment, uses actual
-LM Studio readiness, checks the real package version, calls `debug config`, requires `models` to expose exactly
-`mbus-local/selected`, and executes the real `run --format json` invocation. It injects cloud small/compaction
-settings and repository JSON/file agents and checks that they disappear from effective config. It requires token
-usage, a `LOCAL_OK` response, and known-zero inference cost. Its evidence files contain the effective config,
-available models and JSONL run output, with no user credentials. This authless trial does not touch personal config.
+`OpenCodeLocalHostTests` remains a separate opt-in loaded-LM-Studio smoke. It now requires the
+verified binary digest, all seven expected agents and saves command output even on failure.
+It is not the fake-cloud counter proof, the two-model suitability trial, or the production enrolled
+runner handoff. Capture actual LM Studio inference logs independently before claiming local inference.
 
-While it runs, capture LM Studio's request log showing actual inference on that host, including auxiliary calls.
-Archive that evidence with the package SRI and test results. Repeat on macOS with its exact registry platform
-package and SRI, then perform both already-downloaded model trials with identical repo/prompt/context/time bounds.
-Windows/macOS three-family handoff and two-model tester trials remain separate #332 acceptance requirements.
-Native package/schema incompatibility or runtime trial failures must be fixed before release; the worker's successful
-compile is not a substitute for these results. Remove trial environment variables and the owned trial folder after
-preserving the evidence, according to the coordinator's cleanup rules.
+The packet keeps the authorized Mac execution context, actual Qwen/Gemma inventory IDs, four
+180-second coding trials and Windows/macOS three-family demo explicitly pending. No worker may
+clear InsideRun, execute test DLLs, change role permissions, install globally, alter personal
+configuration/services or enroll/rekey a machine to bypass that gate.

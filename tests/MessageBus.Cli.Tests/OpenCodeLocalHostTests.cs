@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using System.Security.Cryptography;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using MessageBus.Cli.Agents;
 using MessageBus.Cli.Runner.Agents;
@@ -41,7 +43,8 @@ public sealed class OpenCodeLocalHostTests
         var effectiveText = await Execute(["debug", "config"]);
         var effective = JsonNode.Parse(effectiveText)!;
         Assert.Equal(OpenCodeLocalRuntime.Model, effective["small_model"]!.GetValue<string>());
-        Assert.All(effective["agent"]!.AsObject(), a => Assert.Equal(OpenCodeLocalRuntime.Model, a.Value!["model"]!.GetValue<string>()));
+        foreach (var agent in new[] { "build", "plan", "general", "explore", "title", "summary", "compaction" })
+            Assert.Equal(OpenCodeLocalRuntime.Model, effective["agent"]![agent]!["model"]!.GetValue<string>());
         Assert.DoesNotContain("cloud/paid", effectiveText);
         var models = await Execute(["models"]);
         Assert.Equal(OpenCodeLocalRuntime.Model, models.Trim());
@@ -63,16 +66,28 @@ public sealed class OpenCodeLocalHostTests
 
         async Task<string> Execute(IReadOnlyList<string> arguments)
         {
+            Assert.Equal(Environment.GetEnvironmentVariable("MBUS_TEST_OPENCODE_SHA256")?.ToUpperInvariant(),
+                Convert.ToHexString(SHA256.HashData(await File.ReadAllBytesAsync(executable!, TestContext.Current.CancellationToken))));
             var start = new ProcessStartInfo(executable!) { WorkingDirectory = repo, RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
             foreach (var argument in arguments) start.ArgumentList.Add(argument);
             foreach (var (key, value) in launch.Environment) start.Environment[key] = value;
             using var process = Process.Start(start)!;
             using var deadline = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
             deadline.CancelAfter(TimeSpan.FromMinutes(2));
-            var stdout = process.StandardOutput.ReadToEndAsync(deadline.Token);
-            var stderr = process.StandardError.ReadToEndAsync(deadline.Token);
-            try { await process.WaitForExitAsync(deadline.Token); }
-            finally { if (!process.HasExited) { process.Kill(entireProcessTree: true); await process.WaitForExitAsync(TestContext.Current.CancellationToken); } }
+            var stdout = OpenCodeRuntimeProofTests.Capture(process.StandardOutput, deadline.Token);
+            var stderr = OpenCodeRuntimeProofTests.Capture(process.StandardError, deadline.Token);
+            try { await Task.WhenAll(process.WaitForExitAsync(deadline.Token), stdout, stderr); }
+            finally
+            {
+                if (!process.HasExited) { process.Kill(entireProcessTree: true); await process.WaitForExitAsync(CancellationToken.None); }
+                if (Environment.GetEnvironmentVariable("MBUS_TEST_OPENCODE_EVIDENCE") is { Length: > 0 } directory)
+                {
+                    Directory.CreateDirectory(directory);
+                    await File.WriteAllTextAsync(Path.Combine(directory, "loaded-model-" + Guid.NewGuid().ToString("N") + ".json"),
+                        JsonSerializer.Serialize(new { arguments, stdout = await stdout, stderr = await stderr, exit = process.ExitCode }), CancellationToken.None);
+                }
+            }
+            Assert.False(deadline.IsCancellationRequested, "Loaded model command exceeded two minutes");
             Assert.True(process.ExitCode == 0, await stderr);
             return await stdout;
         }
