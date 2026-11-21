@@ -48,41 +48,42 @@ internal sealed class AuthenticatingHandler : DelegatingHandler
             request.Headers.TryAddWithoutValidation(MbusHeaders.Workspace, _workspaceId);
         }
 
-        if (_apiKey is not null)
+        // Buffer before taking the consumption lock, for keys as well as machine signatures. No
+        // asynchronous content work may leave a legacy authorization queued after the final floor read.
+        byte[] body = [];
+        if (request.Content is { } content)
         {
-            prepared.Consume(uri);
-            request.Headers.Authorization = new AuthenticationHeaderValue(AuthSchemes.ApiKey, _apiKey);
+            body = await content.ReadAsByteArrayAsync(cancellationToken).ConfigureAwait(false);
+            var copy = new ByteArrayContent(body);
+            foreach (var header in content.Headers)
+                copy.Headers.TryAddWithoutValidation(header.Key, header.Value);
+            request.Content = copy;
         }
-        else if (_signer is not null)
+        return await prepared.ConsumeAsync(request.RequestUri!, async authorization =>
         {
-            // The signature covers the exact body bytes, so read them once and send those same bytes.
-            byte[] body = [];
-            if (request.Content is { } content)
+            if (_apiKey is not null)
             {
-                body = await content.ReadAsByteArrayAsync(cancellationToken).ConfigureAwait(false);
-                var copy = new ByteArrayContent(body);
-                foreach (var header in content.Headers)
+                request.Headers.Authorization = new AuthenticationHeaderValue(AuthSchemes.ApiKey, _apiKey);
+            }
+            else if (_signer is not null)
+            {
+                // Version comes only from current discovery, never the caller's version header.
+                request.Headers.Remove(MbusHeaders.SignatureVersion);
+                foreach (var (name, value) in _signer.CreateHeaders(authorization, request, body))
                 {
-                    copy.Headers.TryAddWithoutValidation(header.Key, header.Value);
+                    request.Headers.Remove(name);
+                    request.Headers.TryAddWithoutValidation(name, value);
                 }
-                request.Content = copy;
             }
-            // Version is selected only by current prepared discovery, never a caller-supplied version header.
-            request.Headers.Remove(MbusHeaders.SignatureVersion);
-            foreach (var (name, value) in _signer.CreateHeaders(prepared, request, body))
-            {
-                request.Headers.Remove(name);
-                request.Headers.TryAddWithoutValidation(name, value);
-            }
-        }
 
-        var response = await base.SendAsync(request, cancellationToken).ConfigureAwait(false);
-        if ((int)response.StatusCode is >= 300 and <= 399)
-        {
-            response.Dispose();
-            throw new ServerBindingException("Authenticated redirects are refused; no credentials were replayed.");
-        }
-        return response;
+            var response = await base.SendAsync(request, cancellationToken).ConfigureAwait(false);
+            if ((int)response.StatusCode is >= 300 and <= 399)
+            {
+                response.Dispose();
+                throw new ServerBindingException("Authenticated redirects are refused; no credentials were replayed.");
+            }
+            return response;
+        }, cancellationToken).ConfigureAwait(false);
     }
 
     protected override void Dispose(bool disposing)

@@ -25,6 +25,7 @@ public sealed partial class ConfigStore
         private readonly object _operation = new();
         private bool _active = true;
         private bool _busy;
+        private TaskCompletionSource? _asyncOperation;
         internal ProfileSecurityTransaction(ConfigStore store) => _store = store;
 
         private T Execute<T>(Func<T> body)
@@ -42,7 +43,37 @@ public sealed partial class ConfigStore
             finally { Monitor.Exit(_operation); }
         }
 
-        internal void Complete() { lock (_operation) _active = false; }
+        internal async Task CompleteAsync()
+        {
+            Task? pending;
+            lock (_operation) { _active = false; pending = _asyncOperation?.Task; }
+            if (pending is not null) await pending.ConfigureAwait(false);
+        }
+
+        // Keep the explicit transaction reserved across the actual send. A sibling operation must not
+        // strengthen the floor between its reread and transmission, even on this same transaction.
+        internal async Task<T> WithSendAsync<T>(ConfigStore store, Func<ServerBindingFloor, Task<T>> send)
+        {
+            if (!Monitor.TryEnter(_operation))
+                throw new InvalidOperationException("Concurrent profile transaction operations are not supported.");
+            TaskCompletionSource completion;
+            try
+            {
+                if (!_active) throw new InvalidOperationException("The profile security transaction is no longer held.");
+                if (_busy) throw new InvalidOperationException("Concurrent profile transaction operations are not supported.");
+                if (!ReferenceEquals(store, _store))
+                    throw new InvalidOperationException("The transaction belongs to a different profile store.");
+                _busy = true;
+                completion = _asyncOperation = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            }
+            finally { Monitor.Exit(_operation); }
+            try { return await send(_store.ReadBindingState().Floor).ConfigureAwait(false); }
+            finally
+            {
+                lock (_operation) { _busy = false; _asyncOperation = null; }
+                completion.TrySetResult();
+            }
+        }
         internal void DemandStore(ConfigStore store) => Execute(() => ReferenceEquals(store, _store)
             ? true : throw new InvalidOperationException("The transaction belongs to a different profile store."));
 

@@ -66,15 +66,15 @@ public sealed class MachineRequestSigner(MachineKey key, string machineId, TimeP
     public string MachineId { get; } = machineId;
 
     /// <summary>
-    /// Consumes a prepared actual-send gate and signs the final escaped URI, exact body bytes and actual workspace header.
+    /// Signs inside a lock-held actual-send callback using the final escaped URI, exact body bytes and actual workspace header.
     /// Uses authority-bound v2 only for a durable isolated binding; affirmative never-pinned legacy retains exact v1.
     /// </summary>
-    public IReadOnlyList<KeyValuePair<string, string>> CreateHeaders(PreparedServerSend prepared,
+    public IReadOnlyList<KeyValuePair<string, string>> CreateHeaders(ServerSendAuthorization authorization,
         HttpRequestMessage request, ReadOnlySpan<byte> body)
     {
         var destination = request.RequestUri ?? throw new ServerBindingException("Missing final request destination.");
-        prepared.Consume(destination);
-        if (prepared.Binding is not { } snapshot) return CreateHeaders(request.Method.Method, destination.PathAndQuery, body);
+        authorization.DemandSigning(destination);
+        if (authorization.Binding is not { } snapshot) return CreateHeaders(request.Method.Method, destination.PathAndQuery, body);
         string? workspace = null;
         if (request.Headers.TryGetValues(MbusHeaders.Workspace, out var values))
         {

@@ -206,13 +206,35 @@ exists. Discovery failure, redirect, downgrade and persistence failure produce t
 
 The returned `PreparedServerSend` carries the selected endpoint, strictly parsed current `Discovery` (for
 approval/destination checks), and optional durably prepared snapshot. It is
-single-use: `Consume(finalUri)` refuses another endpoint, reuse and contexts invalidated by a failed preparation
-in any gate for the same profile/origin in this process. Consume immediately before transmission; never retain it across operations. Already
-sent bytes cannot be recalled and server enforcement remains necessary. A snapshot alone never grants a send.
-The additive `MachineRequestSigner.CreateHeaders(prepared, actualRequest, bodyBytes)` consumes the context and
-uses its canonical issuer/stamp plus the actual single workspace header and final escaped URI. Legacy results
-delegate to the unchanged v1 signer. The normal handler buffers and transmits the same body bytes, removes any
-caller version header and sets v2 only from the prepared binding. API-key sends consume the same gate.
+single-use: `ConsumeAsync(finalUri, sendCallback, cancellationToken, optionalLockHeldTransaction)` reacquires the
+profile lock and rereads the ledger and every surviving snapshot immediately before consumption. It evaluates
+the prepared discovery against that current floor and requires an isolated snapshot to retain its durable pin.
+Thus a pin published by another process also blocks a queued legacy send, without any shared generation counter.
+Successful isolated preparation invalidates outstanding legacy contexts in this process; failed preparation
+invalidates all outstanding contexts for that profile/origin. These counters only refuse; they never grant sends.
+
+The consumption callback receives a scoped `ServerSendAuthorization`. The additive
+`MachineRequestSigner.CreateHeaders(authorization, actualRequest, bodyBytes)` signs only once inside that callback,
+checking its lifetime, current generation and final destination. It uses the canonical issuer/stamp plus the
+actual single workspace header and final escaped URI. Legacy results delegate to the unchanged three-argument
+v1 signer. This replaces the earlier checkpoint's standalone `Consume` and prepared-context signer overload:
+headers must not escape the lock scope for a later send. A snapshot alone never grants a send.
+
+Buffer content before consumption. The normal handler buffers machine and API-key request bodies outside the
+lock, then attaches credentials/signatures and awaits the actual transport send inside the callback. The process
+semaphore and exclusive profile file lock remain held until the transport returns response headers or fails.
+Consequently a competing durable pin either commits before the final floor read (legacy refuses), or waits
+until that send finishes. Response-body reading occurs after the scope. This serializes sends per profile and
+can delay other profile operations by the request timeout; callbacks must not acquire another profile lock or
+call ordinary store methods. The dedicated anonymous discovery transport never enters this callback.
+
+Callers already holding a session/profile transaction pass that explicit same-store context to preparation and
+consumption. Omitting or substituting the preparation transaction refuses instead of trying to reacquire it.
+No ambient ownership is inferred. The transaction reserves its operation guard across the callback, rejects
+overlapping reads/writes/pins, and outer completion waits for any already-running send before releasing the lock.
+An authorization expires when its callback ends. Request version headers remain selected solely by discovery.
+Bytes already sent cannot be recalled; remote configuration can change independently of the local lock, and
+server enforcement remains necessary. This does not authorize cached discovery or later reuse of signed headers.
 
 `ServerConnection.CreateAuthenticatedClient` rejects reuse of a stored machine/workspace at another selected
 endpoint/base before loading the machine key or reading its workspace for headers. `CreateSigner` enforces

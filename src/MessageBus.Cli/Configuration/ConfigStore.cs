@@ -490,7 +490,7 @@ public sealed partial class ConfigStore
             using var file = await AcquireLockFileAsync(lockPath, ct).ConfigureAwait(false);
             var context = new ProfileSecurityTransaction(this);
             try { return await body(context).ConfigureAwait(false); }
-            finally { context.Complete(); }
+            finally { await context.CompleteAsync().ConfigureAwait(false); }
         }
         finally
         {

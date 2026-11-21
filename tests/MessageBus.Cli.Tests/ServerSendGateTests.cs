@@ -32,7 +32,9 @@ public sealed class ServerSendGateTests
         fixture.OnAuthenticated = _ =>
         {
             Assert.True(File.Exists(fixture.Store.ServerBindingsPath));
-            Assert.Equal(Origin + "/gateway/", fixture.Store.Load().ServerBinding!.SelectedEndpoint);
+            // Transport runs under the profile lock. Read fixture bytes rather than reacquiring it.
+            using var config = System.Text.Json.JsonDocument.Parse(File.ReadAllText(fixture.Store.ConfigPath));
+            Assert.Equal(Origin + "/gateway/", config.RootElement.GetProperty("serverBinding").GetProperty("selectedEndpoint").GetString());
             return new(HttpStatusCode.OK);
         };
         using var client = fixture.Client();
@@ -81,7 +83,9 @@ public sealed class ServerSendGateTests
             var prepared = await gate.PrepareSendAsync(target, TestContext.Current.CancellationToken, transaction);
             Assert.NotNull(prepared.Binding);
             Assert.NotNull(transaction.Load().ServerBinding);
-            prepared.Consume(target);
+            await Assert.ThrowsAsync<InvalidOperationException>(() => prepared.ConsumeAsync(target,
+                _ => Task.FromResult(true), TestContext.Current.CancellationToken));
+            await prepared.ConsumeAsync(target, _ => Task.FromResult(true), TestContext.Current.CancellationToken, transaction);
             return true;
         }, TestContext.Current.CancellationToken);
         Assert.Single(fixture.Anonymous);
@@ -181,11 +185,120 @@ public sealed class ServerSendGateTests
         var prepared = await gate.PrepareSendAsync(target, TestContext.Current.CancellationToken);
         fixture.DiscoveryStatus = HttpStatusCode.ServiceUnavailable;
         await Assert.ThrowsAsync<ServerBindingException>(() => secondGate.PrepareSendAsync(new Uri(Origin + "/other-base/api/items"), TestContext.Current.CancellationToken));
-        Assert.Throws<ServerBindingException>(() => prepared.Consume(target));
+        await Assert.ThrowsAsync<ServerBindingException>(() => prepared.ConsumeAsync(target,
+            _ => Task.FromResult(true), TestContext.Current.CancellationToken));
         fixture.DiscoveryStatus = HttpStatusCode.OK;
         prepared = await gate.PrepareSendAsync(target, TestContext.Current.CancellationToken);
-        prepared.Consume(target);
-        Assert.Throws<ServerBindingException>(() => prepared.Consume(target));
+        await prepared.ConsumeAsync(target, _ => Task.FromResult(true), TestContext.Current.CancellationToken);
+        await Assert.ThrowsAsync<ServerBindingException>(() => prepared.ConsumeAsync(target,
+            _ => Task.FromResult(true), TestContext.Current.CancellationToken));
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task Buffered_legacy_send_refuses_after_successful_pin_in_gate_or_separate_store(bool apiKey, bool pinThroughGate)
+    {
+        using var fixture = new Fixture();
+        using var client = fixture.Client(apiKey);
+        using var content = new BufferedBarrierContent(TestContext.Current.CancellationToken);
+        using var request = new HttpRequestMessage(HttpMethod.Post, "api/items") { Content = content };
+        var sending = client.SendAsync(request, TestContext.Current.CancellationToken);
+        try
+        {
+            await content.Entered.Task.WaitAsync(TestContext.Current.CancellationToken);
+            Assert.Single(fixture.Anonymous); // A has prepared legacy and is held in body buffering.
+            fixture.Discovery = Isolated;
+            if (pinThroughGate)
+            {
+                using var gateB = new ServerSendGate(fixture.Host(), fixture.Store, new Uri(Origin + "/gateway"));
+                await gateB.PrepareSendAsync(new Uri(Origin + "/gateway/api/other"), TestContext.Current.CancellationToken);
+            }
+            else
+            {
+                // No ServerSendGate participates, so no in-process generation can change. This is
+                // the durable publication another process using this profile would perform.
+                var otherStore = new ConfigStore(fixture.Store.Directory, "file");
+                await otherStore.WithProfileSecurityLockAsync(tx => Task.FromResult(tx.PrepareBinding(
+                    ServerEndpoint.Parse(Origin + "/gateway"), ServerDiscoveryParser.Parse(Isolated))),
+                    TestContext.Current.CancellationToken);
+            }
+            Assert.True(File.Exists(fixture.Store.ServerBindingsPath));
+        }
+        finally { content.Release.TrySetResult(); }
+        await Assert.ThrowsAsync<ServerBindingException>(() => sending);
+        Assert.Empty(fixture.Authenticated);
+        Assert.Null(request.Headers.Authorization);
+        Assert.False(request.Headers.Contains(MbusHeaders.Signature));
+    }
+
+    [Fact]
+    public async Task Consumption_orders_actual_send_before_competing_durable_pin_and_rejects_escaped_signing()
+    {
+        using var fixture = new Fixture();
+        using var gate = new ServerSendGate(fixture.Host(), fixture.Store, new Uri(Origin + "/gateway"));
+        var target = new Uri(Origin + "/gateway/api/items");
+        var prepared = await gate.PrepareSendAsync(target, TestContext.Current.CancellationToken);
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        ServerSendAuthorization? escaped = null;
+        var sending = prepared.ConsumeAsync(target, async authorization =>
+        {
+            escaped = authorization;
+            entered.SetResult();
+            await release.Task.WaitAsync(TestContext.Current.CancellationToken);
+            using var request = new HttpRequestMessage(HttpMethod.Get, target);
+            return new MachineRequestSigner(fixture.Key, Machine, TimeProvider.System).CreateHeaders(authorization, request, []);
+        }, TestContext.Current.CancellationToken);
+        await entered.Task.WaitAsync(TestContext.Current.CancellationToken);
+        var otherStore = new ConfigStore(fixture.Store.Directory, "file");
+        var pin = otherStore.WithProfileSecurityLockAsync(tx => Task.FromResult(tx.PrepareBinding(
+            ServerEndpoint.Parse(Origin + "/gateway"), ServerDiscoveryParser.Parse(Isolated))), TestContext.Current.CancellationToken);
+        try { Assert.False(pin.IsCompleted); }
+        finally { release.TrySetResult(); }
+        var headers = await sending;
+        Assert.DoesNotContain(headers, h => h.Key == MbusHeaders.SignatureVersion);
+        await pin;
+        using var later = new HttpRequestMessage(HttpMethod.Get, target);
+        Assert.Throws<ServerBindingException>(() => new MachineRequestSigner(fixture.Key, Machine, TimeProvider.System)
+            .CreateHeaders(escaped!, later, []));
+    }
+
+    [Fact]
+    public async Task Explicit_consumption_reserves_transaction_against_concurrent_pin_and_waits_before_lock_release()
+    {
+        using var fixture = new Fixture();
+        using var gate = new ServerSendGate(fixture.Host(), fixture.Store, new Uri(Origin + "/gateway"));
+        var target = new Uri(Origin + "/gateway/api/items");
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var checkedOperations = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        Task<bool>? sending = null;
+        var outer = fixture.Store.WithSessionLockAsync(async transaction =>
+        {
+            var prepared = await gate.PrepareSendAsync(target, TestContext.Current.CancellationToken, transaction);
+            sending = prepared.ConsumeAsync(target, async _ =>
+            {
+                entered.SetResult();
+                await release.Task.WaitAsync(TestContext.Current.CancellationToken);
+                return true;
+            }, TestContext.Current.CancellationToken, transaction);
+            await entered.Task.WaitAsync(TestContext.Current.CancellationToken);
+            Assert.Throws<InvalidOperationException>(() => transaction.PrepareBinding(
+                ServerEndpoint.Parse(Origin + "/gateway"), ServerDiscoveryParser.Parse(Isolated)));
+            Assert.Throws<InvalidOperationException>(() => transaction.LoadBindingFloor());
+            checkedOperations.SetResult();
+            // Even an accidentally unawaited send cannot let outer completion release its lock early.
+            return true;
+        }, TestContext.Current.CancellationToken);
+        await checkedOperations.Task.WaitAsync(TestContext.Current.CancellationToken);
+        try { Assert.False(outer.IsCompleted); }
+        finally { release.TrySetResult(); }
+        await outer;
+        Assert.True(await sending!);
+        Assert.Null(fixture.Store.Load().ServerBinding);
     }
 
     [Theory]
@@ -327,6 +440,19 @@ public sealed class ServerSendGateTests
                 request.Content is null ? [] : await request.Content.ReadAsByteArrayAsync(cancellationToken));
             records.Add(recorded);
             return answer(recorded);
+        }
+    }
+
+    private sealed class BufferedBarrierContent(CancellationToken ct) : HttpContent
+    {
+        internal TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        protected override bool TryComputeLength(out long length) { length = 0; return false; }
+        protected override async Task SerializeToStreamAsync(Stream stream, TransportContext? context)
+        {
+            Entered.TrySetResult();
+            await Release.Task.WaitAsync(ct);
+            await stream.WriteAsync("fixture body"u8.ToArray(), ct);
         }
     }
 }
