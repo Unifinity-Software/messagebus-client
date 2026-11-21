@@ -208,13 +208,13 @@ internal static class LoginCommand
         using var gate = new ServerSendGate(context.Host, context.Store, context.Settings.Server!);
         var prepared = await gate.PrepareSendAsync(new Uri(CliSettings.BaseAddress(context.Settings.Server!), "api/machines/enroll"), ct);
         var request = await body();
-        var response = await session.SendAsync(() => ServerConnection.EnrollRequest(request), ct);
+        var response = await session.SendEnrollmentAsync(() => ServerConnection.EnrollRequest(request), ct);
         if (response is null)
         {
             // The saved sign-in had ended (expired, or signed out from My account): sign in again.
             context.Console.MarkupLine("[yellow]Your saved sign-in has ended.[/]");
             await BrowserSignIn.SignInAsync(context, session, info, machineName, location, openBrowser, ct);
-            response = await session.SendAsync(() => ServerConnection.EnrollRequest(request), ct)
+            response = await session.SendEnrollmentAsync(() => ServerConnection.EnrollRequest(request), ct)
                 ?? throw new CliException("The server didn't accept the new sign-in. Run mbus login again.");
         }
 

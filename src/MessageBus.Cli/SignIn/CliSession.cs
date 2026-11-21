@@ -198,18 +198,28 @@ public sealed class CliSession(CliHost host, ConfigStore store, Uri server)
     /// </summary>
     /// <param name="build">Makes the request (called again for the retry).</param>
     /// <param name="ct">Cancels.</param>
-    public async Task<HttpResponseMessage?> SendAsync(Func<HttpRequestMessage> build, CancellationToken ct)
+    public Task<HttpResponseMessage?> SendAsync(Func<HttpRequestMessage> build, CancellationToken ct)
+        => SendCoreAsync(build, ct, requireEnrollmentTrust: false);
+
+    // Enrollment keeps its final trust check with each actual send, including token-refresh retries.
+    internal Task<HttpResponseMessage?> SendEnrollmentAsync(Func<HttpRequestMessage> build, CancellationToken ct)
+        => SendCoreAsync(build, ct, requireEnrollmentTrust: true);
+
+    private async Task<HttpResponseMessage?> SendCoreAsync(Func<HttpRequestMessage> build, CancellationToken ct,
+        bool requireEnrollmentTrust)
     {
         using var request = build();
         ResolveDestination(request); // Reject caller destinations before even refreshing a credential.
         if (await AccessTokenAsync(null, ct) is not { } token) return null;
-        var response = (await SendGatedAsync(request, ct, accessToken: token)).Response;
+        var response = (await SendGatedAsync(request, ct, accessToken: token,
+            requireEnrollmentTrust: requireEnrollmentTrust)).Response;
         if (response.StatusCode != HttpStatusCode.Unauthorized) return response;
         response.Dispose();
         using var retry = build();
         ResolveDestination(retry);
         if (await AccessTokenAsync(token, ct) is not { } refreshed) return null;
-        return (await SendGatedAsync(retry, ct, accessToken: refreshed)).Response;
+        return (await SendGatedAsync(retry, ct, accessToken: refreshed,
+            requireEnrollmentTrust: requireEnrollmentTrust)).Response;
     }
 
     /// <summary>
@@ -285,7 +295,7 @@ public sealed class CliSession(CliHost host, ConfigStore store, Uri server)
 
     private async Task<(HttpResponseMessage Response, ServerBindingSnapshot? Binding)> SendGatedAsync(
         HttpRequestMessage request, CancellationToken ct, ConfigStore.ProfileSecurityTransaction? transaction = null,
-        Action<PreparedServerSend>? validate = null, string? accessToken = null)
+        Action<PreparedServerSend>? validate = null, string? accessToken = null, bool requireEnrollmentTrust = false)
     {
         using (request)
         try
@@ -302,7 +312,15 @@ public sealed class CliSession(CliHost host, ConfigStore store, Uri server)
                 request.Content = copy;
                 content.Dispose();
             }
-            var response = await prepared.ConsumeAsync(request.RequestUri!, async _ =>
+            // Discovery and content buffering must finish before the reserved operation rereads trust.
+            var response = requireEnrollmentTrust
+                ? transaction is null
+                    ? await store.WithProfileSecurityLockAsync(tx => prepared.ConsumeEnrollmentAsync(request.RequestUri!, Send, ct, tx), ct)
+                    : await prepared.ConsumeEnrollmentAsync(request.RequestUri!, Send, ct, transaction)
+                : await prepared.ConsumeAsync(request.RequestUri!, Send, ct, transaction);
+            return (response, prepared.Binding);
+
+            async Task<HttpResponseMessage> Send(ServerSendAuthorization _)
             {
                 if (accessToken is not null)
                     request.Headers.Authorization = new AuthenticationHeaderValue(AuthSchemes.Cli, accessToken);
@@ -317,8 +335,7 @@ public sealed class CliSession(CliHost host, ConfigStore store, Uri server)
                     return result;
                 }
                 finally { if (accessToken is not null) request.Headers.Authorization = null; }
-            }, ct, transaction);
-            return (response, prepared.Binding);
+            }
         }
         catch (HttpRequestException ex)
         {

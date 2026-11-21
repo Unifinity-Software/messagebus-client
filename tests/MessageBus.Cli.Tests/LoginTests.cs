@@ -227,6 +227,119 @@ public sealed class LoginTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
+    public async Task Saved_session_enrollment_checks_trust_at_the_actual_post_including_renewed_sign_in(bool renew)
+    {
+        await CheckSavedSessionEnrollmentAsync(renew, damageTrust: true);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Legacy_server_saved_session_enrolls_and_retains_the_current_account(bool renew)
+    {
+        await CheckSavedSessionEnrollmentAsync(renew, damageTrust: false);
+    }
+
+    private static async Task CheckSavedSessionEnrollmentAsync(bool renew, bool damageTrust)
+    {
+        using var machine = new TestMachine();
+        machine.Env[ConfigStore.KeyStoreVariable] = "file";
+        var store = new ConfigStore(machine.MbusFolder, "file");
+        using var key = MessageBus.Cli.Security.MachineKey.Create();
+        store.Save(new CliConfig { Server = FakeServer.Url, MachineId = "mch_previous", WorkspaceId = "w101",
+            KeyFingerprint = key.Fingerprint, KeyStore = "file" });
+        store.SaveKeyPem(key.ExportPrivateKeyPem());
+        store.SaveSession(new CliSessionFile
+        {
+            Server = FakeServer.Url, AccessToken = "fixture-saved-access", RefreshToken = "fixture-saved-refresh",
+            AccessExpiresAt = machine.Time.GetUtcNow().AddHours(renew ? -1 : 1), AccountName = "Previous account",
+        });
+        KeyTrust.Save(machine.MbusFolder, "w101", new TrustedWorkspace(), FakeServer.Url);
+        var configBytes = File.ReadAllBytes(store.ConfigPath);
+        var keyBytes = File.ReadAllBytes(store.KeyPath);
+        var trustPath = Path.Combine(machine.MbusFolder, KeyTrust.FileName);
+        var trustBytes = File.ReadAllBytes(trustPath);
+        var damaged = Encoding.UTF8.GetBytes("""{"servers":{"http://127.0.0.1:5200":{"w101":{"keys":null,"signers":{}}}}}""");
+        var discoveries = 0;
+        var approved = false;
+        var afterApproval = 0;
+        var boundaryReached = false;
+        var requestsBeforeDamage = 0;
+        machine.Server.On(HttpMethod.Get, "/api/server", _ =>
+        {
+            discoveries++;
+            if (approved) afterApproval++;
+            // Fresh: descriptive discovery, captured binding, token validation, then actual POST discovery.
+            // Renewed: after collecting approval, SaveApproved validates once, token validation once,
+            // then the actual POST validates. Corruption must happen after the body's earlier trust check.
+            if ((!renew && discoveries == 4) || (renew && afterApproval == 3))
+            {
+                boundaryReached = true;
+                requestsBeforeDamage = machine.Server.Requests.Count;
+                if (damageTrust) File.WriteAllBytes(trustPath, damaged);
+            }
+            // Raw old-server discovery: no new binding descriptors or capabilities required.
+            return Text("""{"product":"messagebus.ai","version":"0.1.0","signIn":{"microsoft":true,"cliApprovalUrl":"http://127.0.0.1:5200/cli-login"}}""");
+        });
+        machine.Server
+            .On(HttpMethod.Post, "/api/cli/auth/refresh", request =>
+            {
+                Assert.True(renew);
+                Assert.False(boundaryReached);
+                Assert.Contains("fixture-saved-refresh", request.BodyText);
+                return new(HttpStatusCode.Unauthorized);
+            })
+            .On(HttpMethod.Post, "/api/cli/auth/start", _ => Text("""{"deviceCode":"fixture-device","userCode":"ABCD-EFGH","expiresIn":600,"interval":5}"""))
+            .On(HttpMethod.Post, "/api/cli/auth/token", _ =>
+            {
+                approved = true;
+                return Text("""{"state":"approved","accessToken":"fixture-renewed-access","refreshToken":"fixture-renewed-refresh","expiresIn":3600,"account":{"name":"Current account"}}""");
+            })
+            .On(HttpMethod.Post, ApiRoutes.MachineEnroll, request => FakeServer.Json(
+                EnrollResponse(MessageBusJson.Deserialize<MachineEnrollRequest>(request.BodyText)!)))
+            .On(HttpMethod.Put, ApiRoutes.MachineInventory, _ => new(HttpStatusCode.NoContent));
+
+        var run = await machine.RunAsync("login", "--server", FakeServer.Url, "--no-browser");
+
+        Assert.True(boundaryReached, "The actual enrollment POST's discovery must be observed.");
+        Assert.Equal(renew, approved);
+        Assert.Equal(renew ? "Current account" : "Previous account", store.LoadSession()!.AccountName);
+        if (damageTrust)
+        {
+            Assert.NotEqual(0, run.ExitCode);
+            Assert.Contains(trustPath, run.Error);
+            Assert.DoesNotContain(machine.Server.Requests, r => r.Uri.AbsolutePath == ApiRoutes.MachineEnroll);
+            Assert.DoesNotContain(machine.Server.Requests, r => r.Uri.AbsolutePath == ApiRoutes.MachineInventory);
+            Assert.All(machine.Server.Requests.Skip(requestsBeforeDamage), r =>
+            {
+                Assert.Null(r.Header("Authorization"));
+                Assert.Null(r.Header(MbusHeaders.Workspace));
+                Assert.Empty(r.Body);
+            });
+            if (!renew) Assert.All(machine.Server.Requests, r => Assert.Null(r.Header("Authorization")));
+            Assert.Equal(configBytes, File.ReadAllBytes(store.ConfigPath));
+            Assert.Equal(keyBytes, File.ReadAllBytes(store.KeyPath));
+            Assert.Equal(damaged, File.ReadAllBytes(trustPath));
+            Assert.DoesNotContain(Directory.EnumerateFiles(store.Directory), file =>
+                Path.GetFileName(file).StartsWith("machine-key.", StringComparison.Ordinal) && file != store.KeyPath);
+        }
+        else
+        {
+            Assert.True(run.ExitCode == 0, run.Error);
+            var enroll = machine.Server.Single(HttpMethod.Post, ApiRoutes.MachineEnroll);
+            Assert.Equal(renew ? "MbusCli fixture-renewed-access" : "MbusCli fixture-saved-access", enroll.Header("Authorization"));
+            var body = MessageBusJson.Deserialize<MachineEnrollRequest>(enroll.BodyText)!;
+            Assert.True(SignatureIsValid(machine.Server.Single(HttpMethod.Put, ApiRoutes.MachineInventory), body.PublicKey));
+            Assert.Equal("mch_test", store.Load().MachineId);
+            Assert.Null(store.LoadSession()!.ServerBinding);
+            Assert.Equal(trustBytes, File.ReadAllBytes(trustPath));
+        }
+        Assert.Empty(machine.Browser.Opened);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     public async Task Current_and_legacy_trust_validate_without_importing_or_rewriting(bool legacy)
     {
         using var machine = new TestMachine();

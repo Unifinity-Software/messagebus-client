@@ -347,7 +347,9 @@ the selected protected vault still verifies. Target readback is rechecked before
 Enrollment validates the complete current or legacy trust structure without writes, rejecting missing/null nested
 maps and records, malformed key/signer values, duplicate fields and ambiguous casing. The actual caller-key probe
 and API-key inventory send revalidate current trust after their own discovery/content awaits, inside the explicit
-reserved profile transaction immediately before attaching credentials. No ambient trust authorization is reused.
+reserved profile transaction immediately before attaching credentials. Browser/saved-session enrollment uses
+the same final check before attaching `MbusCli`, including the renewed-sign-in and 401 refresh retry paths.
+Ordinary public session sends retain their existing semantics. No ambient trust authorization is reused.
 Legacy workspace-only trust is validated before enrollment and imported at its saved source origin during
 identity publication, with rollback on a failed publication. No silent plaintext fallback or permission repair occurs.
 
