@@ -159,6 +159,21 @@ internal static partial class AgentScanner
             return new(new DetectedAgent { Kind = spec.Kind, Found = false, Vendor = spec.Vendor }, null);
         }
 
+        if (host.WindowsService is not null)
+        {
+            var names = Runner.Service.ServiceAgentTokens.For(spec.Kind);
+            if (!names.Any(name => env.Stored.ContainsKey(name)))
+            {
+                var reason = names.Length == 0 ? "This agent has no supported Windows service token configuration."
+                    : "No token is configured. Use mbus runner env --save --service.";
+                return new(new DetectedAgent
+                {
+                    Kind = spec.Kind, Found = true, OnPath = located.OnPath, ExecutablePath = located.Path,
+                    Vendor = spec.Vendor, SignedIn = false, NotReady = reason,
+                }, null);
+            }
+        }
+
         string? version = null;
         if (await CommandRunner.RunAsync(located.Path, ["--version"], cancellationToken).ConfigureAwait(false) is { } run)
         {

@@ -339,7 +339,8 @@ internal sealed class AgentRun
                 var process = AgentProcessLaunch(_adapter, _s.Sandbox, _executable, workspace, _profile,
                     new AgentLaunchContext(prompt, workspace.PromptFile, profile, workspace.WorkTree, McpEnvironment(environment), Resume?.SessionId, Delivery.Model,
                         CodexOnWindows: Delivery.RunEnvironment.CodexOnWindows, KeepAgentTools: Delivery.RunEnvironment.KeepAgentTools ?? []),
-                    AgentEnvironment(environment, _adapter, new SignInEnvironment(_s.Host.GetEnvironmentVariable, _s.Host.AgentEnvironment())), launch =>
+                    AgentEnvironment(environment, _adapter, new SignInEnvironment(_s.Host.GetEnvironmentVariable, _s.Host.AgentEnvironment()),
+                        windowsService: _s.Options.WindowsService), launch =>
                     {
                         cannotStart = launch.CannotStart;
                         sandboxSettleNote = launch.SettleNote;
@@ -850,12 +851,18 @@ internal sealed class AgentRun
     /// setup command and checkout never get them). One the runner's own environment sets is left to it: what the person
     /// started this runner with wins over what an earlier install stored.
     /// </summary>
-    internal static Dictionary<string, string?> AgentEnvironment(Dictionary<string, string?> environment, IAgentAdapter adapter, SignInEnvironment signIns)
+    internal static Dictionary<string, string?> AgentEnvironment(Dictionary<string, string?> environment, IAgentAdapter adapter,
+        SignInEnvironment signIns, bool windowsService = false)
     {
         var merged = new Dictionary<string, string?>(environment, environment.Comparer);
+        var allowed = windowsService ? Service.ServiceAgentTokens.For(adapter.Kind) : null;
+        if (allowed is not null && !allowed.Any(signIns.Stored.ContainsKey))
+            throw new CliException("This agent needs a service token. Use mbus runner env --save --service.");
+
         foreach (var (name, value) in signIns.Added)
         {
-            if (!CodexAuthentication.IsKeyVariable(name)) merged.TryAdd(name, value);
+            if (!CodexAuthentication.IsKeyVariable(name) && (allowed is null || allowed.Contains(name)))
+                merged.TryAdd(name, value);
         }
         if (adapter.Kind == AgentKind.Codex && CodexAuthentication.ReadKey(signIns.Get) is { } key)
         {

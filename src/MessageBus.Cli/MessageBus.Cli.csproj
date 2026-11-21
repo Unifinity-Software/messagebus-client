@@ -15,6 +15,7 @@
   <ItemGroup>
     <Compile Include="..\Shared\CredentialFreeProxy.cs" Link="Http\CredentialFreeProxy.cs" />
     <InternalsVisibleTo Include="MessageBus.Cli.Tests" />
+    <InternalsVisibleTo Include="mbus.ScmFixture" />
   </ItemGroup>
 
   <Target Name="MbusBuildMetadata" BeforeTargets="GetAssemblyAttributes"
@@ -52,6 +53,7 @@
     <PackageReference Include="System.CommandLine" />
     <!-- DPAPI for the machine key on Windows (the original issue). -->
     <PackageReference Include="System.Security.Cryptography.ProtectedData" />
+    <PackageReference Include="System.ServiceProcess.ServiceController" />
   </ItemGroup>
 
   <ItemGroup>

@@ -9,6 +9,8 @@ public sealed record RunnerOptions
     /// <summary>The selected machine key backend.</summary>
     public string? KeyStore { get; init; }
 
+    internal bool WindowsService { get; init; }
+
     /// <summary>
     /// How many tasks run at once when it starts, until the dashboard's setting arrives (the original issue). Only the dashboard
     /// changes it, up to <see cref="SlotAdvice.MostForMachine"/> for this machine (the original issue).

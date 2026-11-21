@@ -13,5 +13,6 @@
     <Project Path="tests/MessageBus.Contracts.Tests/MessageBus.Contracts.Tests.csproj" />
     <Project Path="tests/MessageBus.Cli.Tests/MessageBus.Cli.Tests.csproj" />
     <Project Path="tests/MessageBus.Crypto.Tests/MessageBus.Crypto.Tests.csproj" />
+    <Project Path="tests/WindowsScmFixture/WindowsScmFixture.csproj" />
   </Folder>
 </Solution>

@@ -147,10 +147,20 @@ namespace MessageBus.Cli.Runner
                             : new Output.TimestampedWriter(host.Error, host.Time, timeOnly: false));
                         await RunnerKeyWait.WaitAsync(loaded.Store.LoadKeyPem, loaded.Store.KeyVault.Description, keyLog, host.Time, ct);
                     }
-                    var context = await RunnerKeyEnrollment.EnsureAsync(loaded, () => CommandContext.Load(host, parse, options), log, onlyRunnerKeys: false, ct) ?? loaded;
+                    var service = host.WindowsService;
+                    var enrolled = await RunnerKeyEnrollment.EnsureAsync(loaded, () => CommandContext.Load(host, parse, options), log,
+                        onlyRunnerKeys: service is not null, ct);
+                    var context = enrolled ?? loaded;
+                    if (OperatingSystem.IsWindows() && service?.Enrollment is not null)
+                    {
+                        if (enrolled is null || context.Settings.Stored.MachineId is null || context.Settings.ApiKey is not null)
+                            throw new CliException("The Windows service could not enroll. Supply a runner-scoped API key for its configured server.");
+                        Service.WindowsServiceEnrollment.Clear(service.Settings);
+                        service.Enrollment = null;
+                    }
                     context.Store.RunnerKeyReads = true;
                     context.Store.KeyReadLog = loaded.Store.KeyReadLog;
-                    runnerOptions = runnerOptions with { KeyStore = context.Store.KeyStoreName };
+                    runnerOptions = runnerOptions with { KeyStore = context.Store.KeyStoreName, WindowsService = service is not null };
                     if (context.Settings.Server is null || !context.Settings.CanAuthenticate(context.Store))
                     {
                         throw ServerConnection.NotSignedIn();
@@ -201,7 +211,7 @@ namespace MessageBus.Cli.Runner
                             Updates = updates,
                             KeepUpdateResult = host.ImageManaged ? null : report => lastUpdate.Save(report, log),
                             RunApprovals = runApprovals,
-                            ToolSetup = new ToolSetupRequests(OperatingSystem.IsMacOS() ? new MacGitSetup(host) : new WindowsGitSetup(host), http,
+                            ToolSetup = service is not null ? null : new ToolSetupRequests(OperatingSystem.IsMacOS() ? new MacGitSetup(host) : new WindowsGitSetup(host), http,
                                 () => engine?.TryPauseForToolSetup(), c => engine?.RescanAsync(c) ?? Task.CompletedTask,
                                 context.Store.Directory, runnerHost.ServerUrl, log, host.Time),
                             // the original issue: the name it signed in under goes stale when the workspace is renamed.

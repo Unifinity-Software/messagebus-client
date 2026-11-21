@@ -82,6 +82,8 @@ public sealed class CliHost
     /// <summary>The service manager <c>mbus runner install</c> registers with (the original issue); tests give a fake one.</summary>
     public Func<Runner.Service.ServiceManager> RunnerServices { get; init; } = Runner.Service.ServiceManager.ForThisMachine;
 
+    internal Runner.Service.WindowsRunnerWorker? WindowsService { get; init; }
+
     /// <summary>
     /// The mbus version: a release's exact version, or a development build's with build metadata, e.g.
     /// <c>0.1.0+dev.1a2b3c4</c> (the original issue, the csproj's MbusSourceVersion). Comparisons ignore the metadata (ReleaseVersion).
@@ -104,7 +106,9 @@ public sealed class CliHost
             : Path.Combine(HomeDirectory, ".mbus");
 
     /// <summary>The real machine.</summary>
-    public static CliHost CreateDefault() => new()
+    public static CliHost CreateDefault() => CreateDefault(null);
+
+    internal static CliHost CreateDefault(Runner.Service.WindowsRunnerWorker? worker) => new()
     {
         Out = Console.Out,
         Error = Console.Error,
@@ -113,11 +117,12 @@ public sealed class CliHost
         In = Console.In,
         OpenStandardInput = Console.OpenStandardInput,
         OpenStandardOutput = Console.OpenStandardOutput,
-        GetEnvironmentVariable = Environment.GetEnvironmentVariable,
-        HomeDirectory = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-        MachineName = Environment.MachineName,
+        GetEnvironmentVariable = worker is null ? Environment.GetEnvironmentVariable : worker.GetEnvironmentVariable,
+        HomeDirectory = worker?.Home ?? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+        MachineName = worker is null ? Environment.MachineName : $"{Environment.MachineName} (Windows service)",
         MbusCommand = McpLaunchCommand.ForCurrentProcess(),
-        ExtraAgentDirectories = DefaultExtraAgentDirectories(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)),
+        ExtraAgentDirectories = worker is null ? DefaultExtraAgentDirectories(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)) : [],
+        WindowsService = worker,
         CreateHttpHandler = () => new SocketsHttpHandler { PooledConnectionLifetime = TimeSpan.FromMinutes(5), AllowAutoRedirect = false, UseCookies = false },
         CreateDiscoveryHttpHandler = () => new SocketsHttpHandler { AllowAutoRedirect = false, UseCookies = false, Credentials = null },
         Browser = new SystemBrowser(Environment.GetEnvironmentVariable),

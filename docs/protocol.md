@@ -337,6 +337,11 @@ without provenance are accepted only at their original endpoint under affirmativ
 acquire the verified fields. Isolated checkpoints missing those fields refuse. A surviving checkpoint snapshot
 is independent ever-isolated evidence even if the top-level snapshot was stripped.
 
+An SCM-hosted Windows runner uses the same runner-key enrollment, machine authentication and dotnet-tool
+update exchanges. It reports `isolation.level` as `basic`, with a summary that identifies the dedicated Windows
+service account. The account boundary uses Windows ACLs and runs with the service's identity. The existing
+isolation report and update ability fields retain their wire shapes.
+
 Logout resets the machine identity, runner enrollment provenance, bootstrap fingerprints and both active and
 independently staged runner keys inside one explicit profile transaction. It rereads current state and refuses
 before key deletion if an enrollment, checkpoint or key-store publication changed the identity during remote

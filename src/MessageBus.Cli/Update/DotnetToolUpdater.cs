@@ -15,7 +15,10 @@ public sealed class DotnetToolUpdater(DotnetToolInstall install, string director
     RunnerUpdateRecord record, string currentVersion, TimeProvider time, Func<ProcessTable>? processes = null, string? source = null, string? entryAssembly = null, bool manual = false) : ISessionRunnerUpdater
 {
     public string? CurrentVersion => install.Package?.Version;
+    internal const string NuGetOrg = "https://api.nuget.org/v3/index.json";
     internal const string PrivateCommand = "__runner-update";
+    private const string ServiceExtension = ".service";
+    internal string? MinimumServiceVersion { get; init; }
     private string Root => Path.Combine(directory, "update");
     private ProcessTable Processes => processes?.Invoke() ?? ProcessTable.ForThisMachine();
     public RunnerUpdateReport? LastResult { get; private set; }
@@ -46,9 +49,12 @@ public sealed class DotnetToolUpdater(DotnetToolInstall install, string director
                 return false;
             }
             if (request.Version == RunnerUpdates.Latest)
-                request = request with { Version = await LatestAsync(source ?? Environment.GetEnvironmentVariable("MBUS_UPDATE_NUGET_SOURCE"), request.Channel, cancellationToken) };
+                request = request with { Version = await LatestAsync(MinimumServiceVersion is null
+                    ? source ?? Environment.GetEnvironmentVariable("MBUS_UPDATE_NUGET_SOURCE") : null, request.Channel, cancellationToken) };
             if (!IsReleaseVersion(request.Version))
                 throw new IOException("The update needs an exact, valid package version.");
+            if (MinimumServiceVersion is { } minimum && DotnetToolPackage.Compare(request.Version, minimum) < 0)
+                throw new IOException("That package version predates the installed Windows service host.");
             var comparison = DotnetToolPackage.Compare(package.Version, request.Version);
             if (comparison == 0 || (!request.Pinned && comparison > 0))
                 throw new IOException(comparison == 0 ? "This version is already installed." : "An unpinned update cannot install an older version.");
@@ -63,21 +69,12 @@ public sealed class DotnetToolUpdater(DotnetToolInstall install, string director
             File.Move(savedPackage + ".tmp", savedPackage, overwrite: true);
             foreach (var old in Directory.EnumerateFiles(recovery, "*.nupkg").Where(path => !DotnetToolInstall.SamePath(path, savedPackage)))
                 File.Delete(old);
-            File.WriteAllText(Path.Combine(Root, "NuGet.Config"), NuGetConfig(source ?? Environment.GetEnvironmentVariable("MBUS_UPDATE_NUGET_SOURCE") ?? "https://api.nuget.org/v3/index.json"));
+            var service = MinimumServiceVersion is not null;
+            File.WriteAllText(Path.Combine(Root, "NuGet.Config"), NuGetConfig(service ? NuGetOrg
+                : source ?? Environment.GetEnvironmentVariable("MBUS_UPDATE_NUGET_SOURCE") ?? NuGetOrg, requireSignature: service));
+            // Recovery uses the previously installed package without requiring signing metadata from the network.
             File.WriteAllText(Path.Combine(Root, "Recovery.Config"), NuGetConfig(recovery));
-            // Copy the framework-dependent tool and its dependencies, never run the applier from .store.
-            var copy = Path.Combine(Root, "applier");
-            Directory.CreateDirectory(copy);
-            // Only this private update directory is cleared; never the installed tool.
-            foreach (var old in Directory.EnumerateFiles(copy, "*", SearchOption.AllDirectories)) File.Delete(old);
-            var programDirectory = Path.GetDirectoryName(entry)!;
-            foreach (var file in Directory.EnumerateFiles(programDirectory, "*", SearchOption.AllDirectories))
-            {
-                var target = Path.Combine(copy, Path.GetRelativePath(programDirectory, file));
-                Directory.CreateDirectory(Path.GetDirectoryName(target)!);
-                File.Copy(file, target, true);
-            }
-            var assembly = Path.Combine(copy, Path.GetFileName(entry));
+            var assembly = service ? null : CopyApplier(entry);
             var attempt = new ToolUpdateAttempt(Guid.NewGuid().ToString("N"), package.Version, request.Version, request.Pinned,
                 install.ToolsPath, shim, dotnet, 0, false,
                 Read<ToolUpdateAttempt>(Path.Combine(Root, "attempt.json")) is { } previous && previous.To == request.Version ? previous.Retries : 0);
@@ -87,11 +84,20 @@ public sealed class DotnetToolUpdater(DotnetToolInstall install, string director
             File.Delete(Path.Combine(Root, "result.json"));
             File.Delete(Path.Combine(Root, "last-failure.txt"));
             var windows = OperatingSystem.IsWindows();
-            WriteText(Path.Combine(Root, windows ? "wrapper.cmd" : "wrapper.sh"), Script(windows, dotnet, assembly, Root, "start"));
-            WriteText(Path.Combine(Root, windows ? "pending.cmd" : "pending.sh"), Script(windows, dotnet, assembly, Root, "apply"));
+            var pending = Path.Combine(Root, "pending" + (service ? ServiceExtension : windows ? ".cmd" : ".sh"));
+            if (service)
+            {
+                // SCM's immutable dispatcher owns the applier and runs it after the worker has exited.
+                WriteText(pending, "");
+            }
+            else
+            {
+                WriteText(Path.Combine(Root, windows ? "wrapper.cmd" : "wrapper.sh"), Script(windows, dotnet, assembly!, Root, "start"));
+                WriteText(pending, Script(windows, dotnet, assembly!, Root, "apply"));
+            }
             if (Holders(final: true).Count > 0)
             {
-                File.Delete(Path.Combine(Root, windows ? "pending.cmd" : "pending.sh"));
+                File.Delete(pending);
                 Write(Path.Combine(Root, "attempt.json"), attempt with { RetryPending = true });
                 WaitingAgain = true;
                 KeepWaiting(request);
@@ -110,6 +116,22 @@ public sealed class DotnetToolUpdater(DotnetToolInstall install, string director
             await log.WriteLineAsync("Update not installed: " + LastResult.Reason);
             return false;
         }
+    }
+
+    private string CopyApplier(string entry)
+    {
+        // Copy the framework-dependent tool and its dependencies, never run the applier from .store.
+        var copy = Path.Combine(Root, "applier");
+        Directory.CreateDirectory(copy);
+        foreach (var old in Directory.EnumerateFiles(copy, "*", SearchOption.AllDirectories)) File.Delete(old);
+        var programDirectory = Path.GetDirectoryName(entry)!;
+        foreach (var file in Directory.EnumerateFiles(programDirectory, "*", SearchOption.AllDirectories))
+        {
+            var target = Path.Combine(copy, Path.GetRelativePath(programDirectory, file));
+            Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+            File.Copy(file, target, true);
+        }
+        return Path.Combine(copy, Path.GetFileName(entry));
     }
 
     /// <summary>Consumes only results from this attempt; an update race returns to the ordinary holder wait.</summary>
@@ -237,8 +259,9 @@ public sealed class DotnetToolUpdater(DotnetToolInstall install, string director
     internal static bool IsReleaseVersion(string? version) =>
         ReleaseFeed.IsPinnableVersion(version) && NuGetVersion.TryParse(version, out _);
 
-    internal static string NuGetConfig(string source) => new XDocument(new XElement("configuration", new XElement("packageSources",
-        new XElement("clear"), new XElement("add", new XAttribute("key", "update"), new XAttribute("value", source))))).ToString();
+    internal static string NuGetConfig(string source, bool requireSignature = false) => new XDocument(new XElement("configuration",
+        new XElement("packageSources", new XElement("clear"), new XElement("add", new XAttribute("key", "update"), new XAttribute("value", source))),
+        requireSignature ? new XElement("config", new XElement("add", new XAttribute("key", "signatureValidationMode"), new XAttribute("value", "require"))) : null)).ToString();
 
     internal static void ValidatePaths(bool windows, params string[] paths)
     {
@@ -285,13 +308,58 @@ public sealed class DotnetToolUpdater(DotnetToolInstall install, string director
         && IsReleaseVersion(attempt.To) && (attempt.Pinned || DotnetToolPackage.Compare(attempt.To, attempt.From) >= 0);
 
     /// <summary>Internal service entry point, running entirely outside the tools install.</summary>
-    public static async Task<int> RunApplierAsync(string mode, string root)
+    public static Task<int> RunApplierAsync(string mode, string root) => RunApplierAsync(mode, root, null, null, null, RunCommand);
+
+    internal delegate Task<CommandResult?> ToolCommand(string executable, IReadOnlyList<string> arguments, TimeSpan timeout,
+        IReadOnlyDictionary<string, string>? environment = null);
+
+    internal static Task<int> RunServiceApplierAsync(string root, string tools, string dotnet, Func<ProcessTable>? processes = null, ToolCommand? run = null) =>
+        RunApplierAsync("start", root, tools, dotnet, processes, RestrictServiceSources(root, dotnet, run ?? RunCommand));
+
+    private static ToolCommand RestrictServiceSources(string root, string dotnet, ToolCommand run) =>
+        async (executable, arguments, timeout, environment) =>
+        {
+            if (!DotnetToolInstall.SamePath(executable, dotnet))
+                return await run(executable, arguments, timeout, environment);
+
+            // Update builds the command and selects the config. Keep the verified file open against
+            // writes and replacement while the Windows SDK reads it.
+            if (arguments is not [_, _, _, _, _, _, _, "--configfile", var config, ..])
+                return new CommandResult(1, "", "The Windows service's NuGet command requires an explicit configuration.");
+            var expected = Path.GetFileName(config) == "Recovery.Config"
+                ? NuGetConfig(Path.Combine(root, "recovery"))
+                : NuGetConfig(NuGetOrg, requireSignature: true);
+            try
+            {
+                using var contents = File.OpenRead(config);
+                using var reader = new StreamReader(contents);
+                if (await reader.ReadToEndAsync() == expected)
+                    return await run(executable, arguments, timeout, environment);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                return new CommandResult(1, "", "Could not read the Windows service's NuGet configuration.");
+            }
+            return new CommandResult(1, "", "The Windows service's NuGet configuration did not match its restricted source.");
+        };
+
+    internal static Task<CommandResult?> RunCommand(string executable, IReadOnlyList<string> arguments, TimeSpan timeout,
+        IReadOnlyDictionary<string, string>? environment) =>
+        CommandRunner.RunAsync(executable, arguments, CancellationToken.None, timeout, environment);
+
+    private static async Task<int> RunApplierAsync(string mode, string root, string? serviceTools, string? serviceDotnet,
+        Func<ProcessTable>? processes, ToolCommand run)
     {
         try
         {
             var path = Path.Combine(root, "attempt.json");
             var attempt = Read<ToolUpdateAttempt>(path);
             if (attempt is null || !Valid(attempt)) return 1;
+            if (serviceTools is not null && (attempt.Global || !DotnetToolInstall.SamePath(attempt.Dotnet, serviceDotnet!)
+                || !DotnetToolInstall.SamePath(attempt.Tools, serviceTools)
+                || !(DotnetToolInstall.SamePath(attempt.Shim, Path.Combine(serviceTools, "mbus.exe"))
+                     || DotnetToolInstall.SamePath(attempt.Shim, Path.Combine(serviceTools, "mbus.cmd")))))
+                return 1;
             ValidatePaths(OperatingSystem.IsWindows(), root, attempt.Tools, attempt.Shim, attempt.Dotnet);
             if (mode == "cli" || mode.StartsWith("cli-wait-", StringComparison.Ordinal))
             {
@@ -301,7 +369,7 @@ public sealed class DotnetToolUpdater(DotnetToolInstall install, string director
                     try { using var parent = System.Diagnostics.Process.GetProcessById(pid); await parent.WaitForExitAsync(); }
                     catch (ArgumentException) { } // It already exited before we opened it.
                 }
-                await Apply(root, attempt, printOutput: true);
+                await Apply(root, attempt, run, processes, printOutput: true);
                 var result = Read<ToolUpdateResult>(Path.Combine(root, "result.json"));
                 if (result?.Outcome == RunnerUpdateOutcome.Updated)
                 {
@@ -311,30 +379,31 @@ public sealed class DotnetToolUpdater(DotnetToolInstall install, string director
                 Console.Error.WriteLine("Update not installed: " + result?.Reason);
                 return 1;
             }
-            if (mode == "apply") { await Apply(root, attempt); return 0; }
+            if (mode == "apply") { await Apply(root, attempt, run, processes); return 0; }
             if (mode != "start") return 1;
             // OS file locking releases on a crash, unlike a stale directory lock.
             using var held = new FileStream(Path.Combine(attempt.Tools, ".mbus-update.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
-            var extension = OperatingSystem.IsWindows() ? ".cmd" : ".sh";
+            var extension = serviceTools is not null ? ServiceExtension : OperatingSystem.IsWindows() ? ".cmd" : ".sh";
             var pending = Path.Combine(root, "pending" + extension);
             var applying = Path.Combine(root, "applying." + attempt.Id + extension);
             if (attempt.Terminal || attempt.RetryPending) return 0;
             if (StartDecision(attempt, Read<ToolUpdateResult>(Path.Combine(root, "result.json")), File.Exists(pending), File.Exists(applying)) == ToolStartAction.Apply)
             {
-                File.Move(pending, applying, true); // rename before executing, including on Windows
-                var run = OperatingSystem.IsWindows()
-                    ? await CommandRunner.RunAsync("cmd.exe", [], CancellationToken.None, TimeSpan.FromMinutes(6), commandLine: "/d /s /c \"\"" + applying + "\"\"")
-                    : await CommandRunner.RunAsync("/bin/sh", [applying], CancellationToken.None, TimeSpan.FromMinutes(6));
+                File.Move(pending, applying, true); // rename before applying so interruption can be recovered
+                if (serviceTools is not null) await Apply(root, attempt, run, processes);
+                else if (OperatingSystem.IsWindows())
+                    _ = await CommandRunner.RunAsync("cmd.exe", [], CancellationToken.None, TimeSpan.FromMinutes(6), commandLine: "/d /s /c \"\"" + applying + "\"\"");
+                else _ = await CommandRunner.RunAsync("/bin/sh", [applying], CancellationToken.None, TimeSpan.FromMinutes(6));
                 if (Read<ToolUpdateResult>(Path.Combine(root, "result.json"))?.Id != attempt.Id)
                 {
-                    if (DotnetToolPackage.Compare(await Version(attempt), attempt.To) == 0)
+                    if (DotnetToolPackage.Compare(await Version(attempt, run), attempt.To) == 0)
                         Write(Path.Combine(root, "result.json"), new ToolUpdateResult(attempt.Id, RunnerUpdateOutcome.Updated, null, false));
-                    else await Repair(root, attempt, "The update process did not finish; restoring the previous version.", false);
+                    else await Repair(root, attempt, run, "The update process did not finish; restoring the previous version.", false);
                 }
             }
             else if (StartDecision(attempt, Read<ToolUpdateResult>(Path.Combine(root, "result.json")), false, File.Exists(applying)) == ToolStartAction.CheckInterrupted)
             {
-                var running = await Version(attempt);
+                var running = await Version(attempt, run);
                 if (DotnetToolPackage.Compare(running, attempt.To) == 0)
                     Write(Path.Combine(root, "result.json"), new ToolUpdateResult(attempt.Id, RunnerUpdateOutcome.Updated, null, false));
                 else if (DotnetToolPackage.Compare(running, attempt.From) == 0)
@@ -342,7 +411,7 @@ public sealed class DotnetToolUpdater(DotnetToolInstall install, string director
                     Write(path, attempt with { Terminal = true });
                     Write(Path.Combine(root, "result.json"), new ToolUpdateResult(attempt.Id, RunnerUpdateOutcome.NotInstalled, "The interrupted update was not installed.", false));
                 }
-                else await Repair(root, attempt, "The update was interrupted; restoring the previous version.", false);
+                else await Repair(root, attempt, run, "The update was interrupted; restoring the previous version.", false);
             }
             attempt = Read<ToolUpdateAttempt>(path) ?? attempt;
             var startupResult = Read<ToolUpdateResult>(Path.Combine(root, "result.json"));
@@ -350,16 +419,16 @@ public sealed class DotnetToolUpdater(DotnetToolInstall install, string director
             {
                 attempt = attempt with { Starts = attempt.Starts + 1 };
                 Write(path, attempt);
-                if (attempt.Starts >= 3 && DotnetToolPackage.Compare(await Version(attempt), attempt.To) == 0)
-                    await Repair(root, attempt, "The updated runner did not confirm a connection after three starts.", true);
+                if (attempt.Starts >= 3 && DotnetToolPackage.Compare(await Version(attempt, run), attempt.To) == 0)
+                    await Repair(root, attempt, run, "The updated runner did not confirm a connection after three starts.", true);
             }
             else if (StartDecision(attempt, startupResult, false, false) == ToolStartAction.Recover)
             {
-                var running = await Version(attempt);
+                var running = await Version(attempt, run);
                 switch (RecoveryDecision(attempt, running))
                 {
                     case ToolRecoveryAction.Repair:
-                        await Repair(root, attempt, "Retrying interrupted recovery.", false);
+                        await Repair(root, attempt, run, "Retrying interrupted recovery.", false);
                         break;
                     default:
                         Write(path, attempt with { Terminal = true });
@@ -398,26 +467,26 @@ public sealed class DotnetToolUpdater(DotnetToolInstall install, string director
         return ToolRecoveryAction.Manual;
     }
 
-    private static IReadOnlyList<ToolInstallHolder> ApplierHolders(ToolUpdateAttempt attempt) =>
-        ToolInstallHolders.FinalCheck(new(attempt.Tools, attempt.Global), ProcessTable.ForThisMachine(), Environment.ProcessId,
+    private static IReadOnlyList<ToolInstallHolder> ApplierHolders(ToolUpdateAttempt attempt, Func<ProcessTable>? processes) =>
+        ToolInstallHolders.FinalCheck(new(attempt.Tools, attempt.Global), processes?.Invoke() ?? ProcessTable.ForThisMachine(), Environment.ProcessId,
             new HashSet<int> { Environment.ProcessId });
 
-    private static Task<CommandResult?> CheckShim(ToolUpdateAttempt attempt) =>
-        CommandRunner.RunAsync(attempt.Shim, ["--version"], CancellationToken.None, TimeSpan.FromSeconds(30));
+    private static Task<CommandResult?> CheckShim(ToolUpdateAttempt attempt, ToolCommand run) =>
+        run(attempt.Shim, ["--version"], TimeSpan.FromSeconds(30));
 
     private static string? InstalledVersion(ToolUpdateAttempt attempt) => DotnetToolPackage.InstalledVersion(attempt.Tools, attempt.PackageId);
 
-    private static async Task<string?> Version(ToolUpdateAttempt attempt)
+    private static async Task<string?> Version(ToolUpdateAttempt attempt, ToolCommand run)
     {
-        var result = await CheckShim(attempt);
+        var result = await CheckShim(attempt, run);
         return result?.ExitCode == 0 ? InstalledVersion(attempt) : null;
     }
-    private static async Task<CommandResult?> Update(string root, ToolUpdateAttempt attempt, bool recovery)
+    private static async Task<CommandResult?> Update(string root, ToolUpdateAttempt attempt, ToolCommand run, bool recovery)
     {
         List<string> args = ["tool", "update", .. attempt.Global ? new[] { "-g" } : new[] { "--tool-path", attempt.Tools }, attempt.PackageId, "--version", recovery ? attempt.From : attempt.To,
             "--configfile", Path.Combine(root, recovery ? "Recovery.Config" : "NuGet.Config")];
         if (recovery || attempt.Pinned) args.Add("--allow-downgrade");
-        return await CommandRunner.RunAsync(attempt.Dotnet, args, CancellationToken.None, TimeSpan.FromMinutes(2),
+        return await run(attempt.Dotnet, args, TimeSpan.FromMinutes(2),
             new Dictionary<string, string> { ["DOTNET_NOLOGO"] = "1", ["DOTNET_CLI_TELEMETRY_OPTOUT"] = "1" });
     }
 
@@ -438,10 +507,10 @@ public sealed class DotnetToolUpdater(DotnetToolInstall install, string director
         }
     }
 
-    private static async Task Apply(string root, ToolUpdateAttempt attempt, bool printOutput = false)
+    private static async Task Apply(string root, ToolUpdateAttempt attempt, ToolCommand run, Func<ProcessTable>? processes, bool printOutput = false)
     {
         using var held = new FileStream(Path.Combine(attempt.Tools, ".mbus-applier.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
-        if (ApplierHolders(attempt).Count > 0)
+        if (ApplierHolders(attempt, processes).Count > 0)
         {
             Write(Path.Combine(root, "result.json"), new ToolUpdateResult(attempt.Id, RunnerUpdateOutcome.NotInstalled, "Processes are using this install.", true));
             return;
@@ -459,9 +528,9 @@ public sealed class DotnetToolUpdater(DotnetToolInstall install, string director
                 Diagnostic(recoveryFailure + " Prepare the update again to stage a verified recovery package."), false));
             return;
         }
-        var update = await Update(root, attempt, false);
+        var update = await Update(root, attempt, run, false);
         if (printOutput && update is not null) Console.WriteLine(update.AllOutput);
-        var check = await CheckShim(attempt);
+        var check = await CheckShim(attempt, run);
         current = InstalledVersion(attempt);
         var running = check?.ExitCode == 0 ? current : null;
         // SDKs can report failure after replacement. Check the installed entry and that mbus starts.
@@ -474,7 +543,7 @@ public sealed class DotnetToolUpdater(DotnetToolInstall install, string director
         if (check?.ExitCode != 0) reason += " New tool failed its start check: " + (check?.AllOutput ?? "The tool did not start or did not finish within 30 seconds.");
         else if (running is null) reason += " " + DotnetToolPackage.IdentityUnknown;
         var fileInUse = reason.Contains("denied", StringComparison.OrdinalIgnoreCase) || reason.Contains("used by another process", StringComparison.OrdinalIgnoreCase)
-            || reason.Contains("in use", StringComparison.OrdinalIgnoreCase) || ApplierHolders(attempt).Count > 0;
+            || reason.Contains("in use", StringComparison.OrdinalIgnoreCase) || ApplierHolders(attempt, processes).Count > 0;
         // A failed start check only counts as a rollback if the new version actually installed.
         var installed = DotnetToolPackage.Compare(current, attempt.To) == 0;
         if (DotnetToolPackage.Compare(running, attempt.From) == 0)
@@ -482,9 +551,9 @@ public sealed class DotnetToolUpdater(DotnetToolInstall install, string director
             Write(Path.Combine(root, "attempt.json"), attempt with { Terminal = !fileInUse });
             Write(Path.Combine(root, "result.json"), new ToolUpdateResult(attempt.Id, RunnerUpdateOutcome.NotInstalled, Diagnostic(reason), fileInUse));
         }
-        else await Repair(root, attempt, reason, installed, fileInUse, alreadyLocked: true);
+        else await Repair(root, attempt, run, reason, installed, fileInUse, alreadyLocked: true);
     }
-    private static async Task Repair(string root, ToolUpdateAttempt attempt, string reason, bool installed, bool fileInUse = false, bool alreadyLocked = false)
+    private static async Task Repair(string root, ToolUpdateAttempt attempt, ToolCommand run, string reason, bool installed, bool fileInUse = false, bool alreadyLocked = false)
     {
         using var held = alreadyLocked ? null : new FileStream(Path.Combine(attempt.Tools, ".mbus-applier.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
         if (CheckSavedRecovery(root, attempt) is { } recoveryFailure)
@@ -497,8 +566,8 @@ public sealed class DotnetToolUpdater(DotnetToolInstall install, string director
         }
         attempt = attempt with { RecoveryTries = attempt.RecoveryTries + 1, RecoveryInstalled = attempt.RecoveryInstalled || installed };
         Write(Path.Combine(root, "attempt.json"), attempt);
-        var repair = await Update(root, attempt, true);
-        var recovered = DotnetToolPackage.Compare(await Version(attempt), attempt.From) == 0;
+        var repair = await Update(root, attempt, run, true);
+        var recovered = DotnetToolPackage.Compare(await Version(attempt, run), attempt.From) == 0;
         if (!recovered)
         {
             var location = attempt.Global ? "-g" : $"--tool-path \"{attempt.Tools}\"";
