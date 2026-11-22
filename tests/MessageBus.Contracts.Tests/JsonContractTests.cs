@@ -9,6 +9,7 @@ using MessageBus.Contracts.Machines;
 using MessageBus.Contracts.Mcp;
 using MessageBus.Contracts.Messaging;
 using MessageBus.Contracts.Roles;
+using MessageBus.Contracts.Runner;
 
 namespace MessageBus.Contracts.Tests;
 
@@ -45,6 +46,41 @@ public class JsonContractTests
         var back = JsonSerializer.Deserialize(json, info);
         Assert.IsType(type, back);
         Assert.Equal(json, JsonSerializer.Serialize(back, info));
+    }
+
+    [Fact]
+    public void Older_heartbeat_ack_does_not_enable_resource_samples()
+    {
+        var ack = MessageBusJson.Deserialize<HeartbeatAck>("""{"leases":[],"runnerConnected":true}""")!;
+        Assert.False(ack.SupportsResourceSamples);
+        Assert.DoesNotContain("supportsResourceSamples", MessageBusJson.Serialize(ack));
+    }
+
+    [Fact]
+    public void Heartbeat_distinguishes_missing_metrics_from_measured_zero()
+    {
+        var heartbeat = MessageBusJson.Deserialize<RunnerHeartbeat>("""
+            {
+              "slots": 2,
+              "slotsBusy": 0,
+              "resources": {
+                "schemaVersion": 1,
+                "sequence": 3,
+                "sampledAt": "2026-01-01T00:00:00Z",
+                "status": "partial",
+                "cpu": { "utilizationPercent": null },
+                "memory": { "availableBytes": 0 }
+              }
+            }
+            """)!;
+        var resources = Assert.IsType<RunnerResourceSample>(heartbeat.Resources);
+        Assert.Null(resources.Cpu?.UtilizationPercent);
+        Assert.Null(resources.WindowMs);
+        Assert.Equal(0L, resources.Memory?.AvailableBytes);
+
+        var root = JsonNode.Parse(MessageBusJson.Serialize(heartbeat))!["resources"]!;
+        Assert.False(root["cpu"]!.AsObject().ContainsKey("utilizationPercent"));
+        Assert.Equal(0L, root["memory"]!["availableBytes"]!.GetValue<long>());
     }
 
     [Fact]

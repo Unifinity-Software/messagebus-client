@@ -128,9 +128,12 @@ public sealed class AgentProcess : IDisposable
     /// outlived the tree and still holds the output open doesn't keep the run waiting.
     /// </summary>
     /// <returns>The exit code.</returns>
-    public async Task<int> WaitForExitAsync()
+    public Task<int> WaitForExitAsync() => WaitForExitAsync(onExit: null);
+
+    internal async Task<int> WaitForExitAsync(Action? onExit)
     {
         await _process.WaitForExitAsync(CancellationToken.None).ConfigureAwait(false);
+        onExit?.Invoke();
         try
         {
             await _readers.WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false);

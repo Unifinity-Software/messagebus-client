@@ -76,6 +76,27 @@ internal sealed class AgentRun
     private readonly string? _alreadyHandled;
     private SettleInput? _verifiedAgentSettle;
     private VerificationResult? _verification;
+    private int _resourceRoot;
+
+    // Zero means no live process; -1 means the protected task root is outside the runner's view.
+    internal int ResourceRoot => Volatile.Read(ref _resourceRoot);
+
+    private async Task<int> WaitForOwnedProcessAsync(RunWorkspace workspace, AgentProcess process)
+    {
+        Volatile.Write(ref _resourceRoot, _s.Sandbox.UsesPrivateHome ? -1 : process.Id);
+        try
+        {
+            _s.Sandbox.Started(workspace, process.Id);
+            using var stop = _stop.Token.Register(process.Kill);
+            return await process.WaitForExitAsync(ClearResourceRoot).ConfigureAwait(false);
+        }
+        finally
+        {
+            ClearResourceRoot();
+        }
+    }
+
+    private void ClearResourceRoot() => Volatile.Write(ref _resourceRoot, 0);
 
     /// <param name="services">What the engine gives every run.</param>
     /// <param name="delivery">The task.</param>
@@ -319,14 +340,10 @@ internal sealed class AgentRun
             {
                 Note("Running the setup command");
                 using var shell = AgentProcess.Start(Sandboxed(AgentProcess.Shell(setup, workspace.WorkTree, environment)), tailLines: 20);
-                _s.Sandbox.Started(workspace, shell.Id);
-                using (_stop.Token.Register(shell.Kill))
+                var setupExit = await WaitForOwnedProcessAsync(workspace, shell).ConfigureAwait(false);
+                if (setupExit != 0 && !_stop.IsCancellationRequested)
                 {
-                    var setupExit = await shell.WaitForExitAsync().ConfigureAwait(false);
-                    if (setupExit != 0 && !_stop.IsCancellationRequested)
-                    {
-                        failure = (SettleStatus.Failed, $"The setup command failed (exit {setupExit}): {string.Join(" ", shell.Tail().TakeLast(5)).Trim()}");
-                    }
+                    failure = (SettleStatus.Failed, $"The setup command failed (exit {setupExit}): {string.Join(" ", shell.Tail().TakeLast(5)).Trim()}");
                 }
             }
 
@@ -359,7 +376,11 @@ internal sealed class AgentRun
                 if (process.StandardInput is { } launchPrompt && launchPrompt != prompt)
                     await File.WriteAllTextAsync(workspace.PromptFile, launchPrompt).ConfigureAwait(false);
 
-                var parser = _adapter.CreateParser(Delivery.Model);
+                var parser = _adapter.Kind == AgentKind.ClaudeCode && Resume?.SessionId is { } sessionId
+                    ? await ClaudeOutputParser.ForResumeAsync(MessageBus.Mcp.SessionUsage.ClaudeHome(name =>
+                        process.Environment.TryGetValue(name, out var value) ? value : _s.Host.GetEnvironmentVariable(name)),
+                        workspace.WorkTree, sessionId, _stop.Token).ConfigureAwait(false)
+                    : _adapter.CreateParser(Delivery.Model);
                 Note($"Started {AgentKinds.DisplayName(_adapter.Kind)}"
                     + (Delivery.Model is not { } model ? ""
                         : Delivery.EconomyModel ? $" with {model}, the role's cheaper model (its daily budget is used)"
@@ -376,11 +397,7 @@ internal sealed class AgentRun
                 var filterOutput = _adapter.Kind == AgentKind.Codex
                     ? CodexAuthentication.RedactOutput(process.Environment.GetValueOrDefault(CodexAuthentication.CodexKey)) : null;
                 using var agent = AgentProcess.Start(process, line => OnOutput(parser, line), _s.Options.LogTailLines, filterOutput);
-                _s.Sandbox.Started(workspace, agent.Id);
-                using (_stop.Token.Register(agent.Kill))
-                {
-                    exitCode = await agent.WaitForExitAsync().ConfigureAwait(false);
-                }
+                exitCode = await WaitForOwnedProcessAsync(workspace, agent).ConfigureAwait(false);
                 lock (_parserGate)
                 {
                     outcome = parser.Complete();

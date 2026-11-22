@@ -15,22 +15,7 @@ namespace MessageBus.Cli.Tests.Infrastructure;
 /// </summary>
 public sealed class TestMachine : IDisposable
 {
-    private readonly string _root = Path.Combine(CanonicalTempDirectory(), "mbus-tests", Guid.NewGuid().ToString("N"));
-
-    private static string CanonicalTempDirectory()
-    {
-        // Profiles reject directory aliases. In particular macOS's system temp path may use /var -> /private/var.
-        // Resolve existing temp ancestors before creating any test-owned directory.
-        var path = Path.GetFullPath(Path.GetTempPath());
-        var root = Path.GetPathRoot(path)!;
-        var current = root;
-        foreach (var part in path[root.Length..].Split(Path.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries))
-        {
-            var directory = new DirectoryInfo(Path.Combine(current, part));
-            current = directory.ResolveLinkTarget(returnFinalTarget: true)?.FullName ?? directory.FullName;
-        }
-        return current;
-    }
+    private readonly string _root = Path.Combine(TestTempDirectory.PhysicalDirectory(Path.GetTempPath()), "mbus-tests", Guid.NewGuid().ToString("N"));
 
     public TestMachine()
     {

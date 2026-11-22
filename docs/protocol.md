@@ -750,6 +750,42 @@ Timing and close codes come from the public `Groundhog.Protocol` package: the se
 | 4426 | This `mbus` is older than the service accepts | Self-updating runners update and reconnect. Image-managed runners require redeployment. |
 | 4403 | The machine waits for an admin's approval | Reconnects later with a long backoff |
 
+### Optional runner resource telemetry
+
+The heartbeat response can advertise `supportsResourceSamples: true` for the current runner
+connection session. An omitted or false flag means the runner omits `resources` from heartbeats.
+Once negotiated, sample collection and reporting run every 15 seconds with at least one busy slot
+and every 60 seconds when idle. The runner keeps any faster active lease heartbeat interval.
+Every reconnect requires a new acknowledgement, including when the transport reuses the session
+ID. Faster heartbeats can repeat the cached sample with its original sequence, timestamp and
+window. Local runner `/status` can expose the latest sample as `resources` independently of
+service support.
+
+A `RunnerResourceSample` has `schemaVersion: 1`, a `sequence` that strictly increases for new
+observations within the connection session, a UTC `sampledAt`, and `windowMs` for the
+monotonic measurement window when known. `status` describes collection (`ok`, `partial`, `unsupported`, or `error`).
+`reason` is an optional short code. Missing or null metrics represent unknown values.
+A zero metric represents a measured zero.
+
+| Optional field | Members |
+|---|---|
+| `cpu` | `utilizationPercent` (0 through 100 percent of effective capacity), `effectiveCpus` (may be fractional), `hostLogicalCpus`, `limitSource` |
+| `memory` | `totalBytes` (effective capacity), `availableBytes` (within that capacity), `hostTotalBytes`, `limitSource` |
+| `runner` | `cpuPercent` (of effective CPU capacity), `residentBytes`, `processCount`, `reason` (short code for partial or unavailable data). Covers the runner tree with owned task trees excluded. |
+| `tasks` | Same fields as `runner`. Covers the union of the owned task trees, with each process counted once. |
+
+`limitSource` is `host`, `cgroup-v1`, `cgroup-v2`, or `job-object` when known. Telemetry
+contains only aggregate process usage. It carries no per-run identifiers, PIDs, commands or paths.
+Reason codes carry no free-form diagnostics.
+
+`MachineInfo` and `AgentInfo` may each carry a machine-level `resources` view under existing
+discovery permissions. Its optional `sample` is the latest runner observation. `receivedAt` is
+the service receipt time in UTC and `ageSeconds` is the age computed by the service. Both may
+be absent or null. `state` is the service's placement classification (`healthy`, `elevated`,
+`critical`, `stale`, `unknown`, `unsupported`, or `offline`). `reasons` contains classification
+codes and defaults to an empty list. `slotsTotal` and `slotsBusy` describe slot counts when known.
+Collection status is reported in `sample.status`.
+
 ## End-to-end encryption
 
 Message bodies and attachments are encrypted on the sending machine and opened on the receiving one; the service
@@ -948,3 +984,16 @@ differs from the approved base. Process output does not appear in these fields.
 The service exposes this result as optional `verification` on full thread summaries and compact
 status tasks. Omission represents legacy work. Optional `currentFrictionKinds` is authoritative
 when present, including an empty array. Existing `frictionKinds` continues to represent history.
+
+### Delivery usage on resumed sessions
+
+A delivery's settlement usage covers only that delivery. Claude Code v2.1.277 and later
+restore cumulative cost and per-model tokens on resume. Before starting the resumed process,
+the runner snapshots the transcript's last `cost-state` in a cancellable, bounded tail read and subtracts it from result totals,
+including error results and the final result after background turns. Duration remains local
+to the process. A CLI whose totals restart below the saved baseline is counted from zero.
+If the saved baseline is missing, malformed or unreadable, only the current process's observed
+assistant calls supply token counts; total and per-model cost stay unknown. Transcript access
+failures do not prevent the agent from running, and cancellation still stops the run.
+Codex `turn.completed` usage is already per turn and is summed only within the current process.
+This normalization changes no wire fields and requires no server feature negotiation.

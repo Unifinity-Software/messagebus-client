@@ -364,10 +364,12 @@ public sealed class RunNetworkTests
     [Fact]
     public async Task A_run_cannot_reach_a_host_outside_its_allow_list()
     {
-        // The runner's one proxy (Windows): the fake agent's HttpClient sends the run's credential from its proxy address.
+        // Exercise the shared Windows-style proxy on every host, independently of a host OS sandbox.
+        // The fake agent's HttpClient must reach that proxy and receive its actual allow-list refusal.
         using var shared = RunNetworkProxy.Start(0, TextWriter.Null);
         await using var h = new RunnerHarness(sandbox: root => RunIsolation.Create(new RunIsolationOptions
         {
+            Requested = IsolationLevel.Basic,
             WorkRoot = root,
             HomeDirectory = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
             MachineName = "test-machine",
