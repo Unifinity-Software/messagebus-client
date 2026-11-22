@@ -103,13 +103,11 @@ internal sealed class MacResourceSampler : ISystemResourceSampler
             AddTree(runnerRoot, children, runner, tasks, cancellationToken);
         }
 
-        var nsPerTick = mach_timebase_info(out var timebase) == 0 && timebase.Denominator != 0
-            ? (double)timebase.Numerator / timebase.Denominator
-            : 0;
-        var cpuBudget = elapsed.TotalSeconds * 1_000_000_000 * (cpuCount ?? 0);
-        var runnerSample = SummarizeTree(runner, previousRunner, hasWindow, cpuBudget, nsPerTick,
+        var ticksPerSecond = ReadProcessTickFrequency();
+        var cpuBudgetSeconds = elapsed.TotalSeconds * (cpuCount ?? 0);
+        var runnerSample = SummarizeTree(runner, previousRunner, hasWindow, cpuBudgetSeconds, ticksPerSecond,
             incomplete || tasksIncomplete, runnerFound);
-        var tasksSample = SummarizeTree(tasks, previousTasks, hasWindow, cpuBudget, nsPerTick,
+        var tasksSample = SummarizeTree(tasks, previousTasks, hasWindow, cpuBudgetSeconds, ticksPerSecond,
             context.OwnedRunRootProcessIds.Count > 0 && (incomplete || tasksIncomplete),
             tasks.Count > 0 || context.OwnedRunRootProcessIds.Count == 0);
 
@@ -144,6 +142,14 @@ internal sealed class MacResourceSampler : ISystemResourceSampler
         nuint length = sizeof(long);
         return sysctlbyname("hw.memsize", out long bytes, ref length, 0, 0) == 0 &&
             length == sizeof(long) && bytes > 0 ? bytes : null;
+    }
+
+    private static long? ReadProcessTickFrequency()
+    {
+        // proc_taskinfo stays in native ticks under Rosetta, unlike mach_timebase_info's translated 1/1 result.
+        nuint length = sizeof(long);
+        return sysctlbyname("hw.tbfrequency", out long ticks, ref length, 0, 0) == 0 &&
+            length == sizeof(long) && ticks > 0 ? ticks : null;
     }
 
     private static uint[]? ReadCpuTicks(uint host)
@@ -307,7 +313,7 @@ internal sealed class MacResourceSampler : ISystemResourceSampler
     }
 
     internal static RunnerProcessTreeSample SummarizeTree(Dictionary<int, ProcessObservation> tree,
-        Dictionary<int, ProcessObservation> previous, bool hasWindow, double cpuBudget, double nsPerTick,
+        Dictionary<int, ProcessObservation> previous, bool hasWindow, double cpuBudgetSeconds, long? ticksPerSecond,
         bool incomplete, bool rootAvailable)
     {
         if (!rootAvailable)
@@ -317,7 +323,7 @@ internal sealed class MacResourceSampler : ISystemResourceSampler
 
         long? resident = tree.Count == 0 ? 0 : null;
         double? delta = tree.Count == 0 && previous.Count == 0 && !incomplete ? 0 : null;
-        var canMeasureCpu = hasWindow && cpuBudget > 0 && nsPerTick > 0;
+        var canMeasureCpu = hasWindow && double.IsFinite(cpuBudgetSeconds) && cpuBudgetSeconds > 0 && ticksPerSecond is > 0;
         incomplete |= hasWindow && (!canMeasureCpu || previous.Count != tree.Count);
         foreach (var (pid, process) in tree)
         {
@@ -348,20 +354,13 @@ internal sealed class MacResourceSampler : ISystemResourceSampler
         {
             ProcessCount = tree.Count,
             ResidentBytes = resident,
-            CpuPercent = canMeasureCpu && delta.HasValue ? Math.Min(100, delta.Value * nsPerTick / cpuBudget * 100) : null,
+            CpuPercent = canMeasureCpu && delta.HasValue ? Math.Min(100, delta.Value / ticksPerSecond!.Value / cpuBudgetSeconds * 100) : null,
             Reason = incomplete ? "process-tree-partial" : null,
         };
     }
 
     internal readonly record struct ProcessStart(ulong Seconds, ulong Microseconds);
     internal readonly record struct ProcessObservation(int Pid, int ParentPid, ProcessStart Start, long? ResidentBytes, ulong? CpuTicks);
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct TimebaseInfo
-    {
-        public uint Numerator;
-        public uint Denominator;
-    }
 
     [DllImport(SystemLibrary)]
     private static extern uint mach_host_self();
@@ -373,9 +372,6 @@ internal sealed class MacResourceSampler : ISystemResourceSampler
 
     [DllImport(SystemLibrary)]
     private static extern int mach_port_deallocate(uint task, uint name);
-
-    [DllImport(SystemLibrary)]
-    private static extern int mach_timebase_info(out TimebaseInfo info);
 
     [DllImport(SystemLibrary)]
     private static extern int getpagesize();

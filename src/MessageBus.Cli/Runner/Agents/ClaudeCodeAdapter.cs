@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -377,36 +378,98 @@ public sealed class ClaudeCodeAdapter(Mcp.McpLaunchCommand? mbus = null, string?
 public sealed class ClaudeOutputParser(TimeProvider? time = null) : IAgentOutputParser
 {
     private Usage? _baseline;
+    private bool _resumeBaselineUnavailable;
+    private const int MaxBaselineTailBytes = 4 * 1024 * 1024;
+    private const int MaxBaselineLineBytes = 128 * 1024;
 
     // Read the same cost-state that the CLI restores, before launching the resumed process.
-    // Assistant messages alone omit helper calls and have partial output counts.
-    internal static ClaudeOutputParser ForResume(string home, string folder, string session)
+    // A missing baseline never turns old session totals into this delivery's usage.
+    internal static async ValueTask<ClaudeOutputParser> ForResumeAsync(string home, string folder, string session,
+        CancellationToken cancellationToken, Func<string, Stream>? openRead = null)
     {
-        var parser = new ClaudeOutputParser();
+        cancellationToken.ThrowIfCancellationRequested();
+        var parser = new ClaudeOutputParser { _resumeBaselineUnavailable = true };
+        // Session identities are a file name, never a relative or absolute path.
+        if (session.Length is 0 or > 128 || session.Any(c => !char.IsAsciiLetterOrDigit(c) && c is not '-' and not '_'))
+            return parser;
         var directory = MessageBus.Mcp.SessionUsage.ClaudeFolder(home, folder);
         var path = directory is null ? null : Path.Combine(directory.FullName, session + ".jsonl");
-        if (path is null || !File.Exists(path)) return parser; // Older CLIs did not restore totals.
-        using var reader = new StreamReader(new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete));
-        while (reader.ReadLine() is { } line)
+        if (path is null) return parser;
+        try
         {
-            if (!line.Contains("cost-state", StringComparison.Ordinal)) continue;
+            await using var stream = openRead?.Invoke(path) ?? new FileStream(path, FileMode.Open, FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete, 4096, FileOptions.Asynchronous | FileOptions.RandomAccess);
+            if (!stream.CanRead || !stream.CanSeek) return parser;
+            var length = stream.Length;
+            var start = Math.Max(0, length - MaxBaselineTailBytes);
+            // One preceding byte tells us whether the bounded tail starts at a complete line.
+            var offset = start > 0 ? 1 : 0;
+            var wanted = (int)(length - start) + offset;
+            if (wanted == 0) return parser;
+            stream.Seek(start - offset, SeekOrigin.Begin);
+            var buffer = ArrayPool<byte>.Shared.Rent(wanted);
             try
             {
-                using var doc = JsonDocument.Parse(line);
-                var root = doc.RootElement;
-                if (Str(root, "type") != "cost-state") continue;
-                var result = new JsonObject
+                var read = 0;
+                while (read < wanted)
                 {
-                    ["modelUsage"] = root.TryGetProperty("modelUsage", out var models) ? JsonNode.Parse(models.GetRawText()) : null,
-                    ["total_cost_usd"] = Dec(root, "totalCostUSD"),
-                };
-                using var baseline = JsonDocument.Parse(result.ToJsonString());
-                parser._baseline = parser.ReadResult(baseline.RootElement).Usage;
+                    var count = await stream.ReadAsync(buffer.AsMemory(read, wanted - read), cancellationToken).ConfigureAwait(false);
+                    if (count == 0) break; // A concurrently truncated file may now be shorter.
+                    read += count;
+                }
+                var skipLeading = offset != 0 && buffer[0] != (byte)'\n';
+                while (offset < read)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var end = buffer.AsSpan(offset, read - offset).IndexOf((byte)'\n');
+                    var size = end < 0 ? read - offset : end;
+                    if (!skipLeading && size is > 0 and <= MaxBaselineLineBytes)
+                        parser.ReadBaseline(buffer.AsMemory(offset, size));
+                    skipLeading = false;
+                    offset += size + 1;
+                }
             }
-            catch (JsonException) { } // Ignore an incomplete final transcript line.
+            finally { ArrayPool<byte>.Shared.Return(buffer); }
         }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            parser._baseline = null;
+        }
+        cancellationToken.ThrowIfCancellationRequested();
+        parser._resumeBaselineUnavailable = parser._baseline is null;
         return parser;
     }
+
+    private void ReadBaseline(ReadOnlyMemory<byte> line)
+    {
+        if (line.Span.IndexOf("cost-state"u8) < 0) return;
+        try
+        {
+            using var doc = JsonDocument.Parse(line);
+            var root = doc.RootElement;
+            if (Str(root, "type") != "cost-state" || Dec(root, "totalCostUSD") is not { } cost || cost < 0
+                || !root.TryGetProperty("modelUsage", out var models) || models.ValueKind != JsonValueKind.Object)
+                return;
+            foreach (var model in models.EnumerateObject())
+            {
+                if (model.Value.ValueKind != JsonValueKind.Object || Dec(model.Value, "costUSD") is not >= 0
+                    || !ValidBaselineCounter(model.Value, "inputTokens", required: true)
+                    || !ValidBaselineCounter(model.Value, "outputTokens", required: true)
+                    || !ValidBaselineCounter(model.Value, "cacheReadInputTokens")
+                    || !ValidBaselineCounter(model.Value, "cacheCreationInputTokens"))
+                    return;
+            }
+            var usage = ReadResult(root).Usage!;
+            if (usage.TokensIn >= 0 && usage.TokensOut >= 0 && usage.CachedTokensIn >= 0 && usage.CacheWriteTokensIn >= 0)
+                _baseline = usage with { EstimatedCostUsd = cost };
+        }
+        catch (JsonException) { } // The last transcript line may still be being written.
+    }
+
+    private static bool ValidBaselineCounter(JsonElement model, string name, bool required = false) =>
+        model.TryGetProperty(name, out var counter)
+            ? counter.ValueKind == JsonValueKind.Number && counter.TryGetInt64(out var value) && value >= 0
+            : !required;
     private readonly CapacityReadings _capacity = new("claude-code", time ?? TimeProvider.System);
     /// <inheritdoc />
     public MessageBus.Contracts.Runner.AgentCapacityReport? Capacity => _capacity.Report;
@@ -487,7 +550,18 @@ public sealed class ClaudeOutputParser(TimeProvider? time = null) : IAgentOutput
                 _durationMs += Long(root, "duration_ms");
                 _result = ReadResult(root);
                 if (_result.Usage is { } total && _baseline is { } baseline)
-                    _result = _result with { Usage = Incremental(total, baseline) };
+                {
+                    if (TotalsReset(total, baseline)) _baseline = null;
+                    else _result = _result with { Usage = Incremental(total, baseline) };
+                }
+                else if (_resumeBaselineUnavailable && _result.Usage is { } cumulative)
+                {
+                    var observed = ObservedUsage(includeModels: true) ?? new Usage
+                    {
+                        AgentKind = AgentKind.ClaudeCode, Vendor = "anthropic", Model = _initModel ?? cumulative.Model,
+                    };
+                    _result = _result with { Usage = observed with { ActiveSeconds = cumulative.ActiveSeconds } };
+                }
                 return null;
             default:
                 return null;
@@ -497,23 +571,34 @@ public sealed class ClaudeOutputParser(TimeProvider? time = null) : IAgentOutput
     /// <inheritdoc />
     public Usage? UsageSoFar
     {
-        get
+        get => ObservedUsage();
+    }
+
+    private Usage? ObservedUsage(bool includeModels = false)
+    {
+        // The model calls as they ended; the final result's totals come from Complete().
+        if (_calls.Count == 0) return null;
+        // Priced as the model that wrote the most; small helper calls are a small share of a run.
+        var model = _calls.Values.GroupBy(c => c.Model).MaxBy(g => g.Sum(c => c.Out))?.Key ?? _initModel;
+        var usage = new Usage
         {
-            // The model calls as they ended; the final result's totals come from Complete().
-            if (_calls.Count == 0) return null;
-            // Priced as the model that wrote the most; small helper calls are a small share of a run.
-            var model = _calls.Values.GroupBy(c => c.Model).MaxBy(g => g.Sum(c => c.Out))?.Key ?? _initModel;
-            return new Usage
+            AgentKind = AgentKind.ClaudeCode,
+            Vendor = "anthropic",
+            Model = model,
+            TokensIn = _calls.Values.Sum(c => c.In + c.CachedIn + c.Writes),
+            CachedTokensIn = _calls.Values.Sum(c => c.CachedIn),
+            CacheWriteTokensIn = _calls.Values.Sum(c => c.Writes),
+            TokensOut = _calls.Values.Sum(c => c.Out),
+        };
+        return !includeModels ? usage : usage with
+        {
+            Models = _calls.Values.GroupBy(c => c.Model).Select(g => new Usage
             {
-                AgentKind = AgentKind.ClaudeCode,
-                Vendor = "anthropic",
-                Model = model,
-                TokensIn = _calls.Values.Sum(c => c.In + c.CachedIn + c.Writes),
-                CachedTokensIn = _calls.Values.Sum(c => c.CachedIn),
-                CacheWriteTokensIn = _calls.Values.Sum(c => c.Writes),
-                TokensOut = _calls.Values.Sum(c => c.Out),
-            };
-        }
+                Model = g.Key, TokensIn = g.Sum(c => c.In + c.CachedIn + c.Writes),
+                CachedTokensIn = g.Sum(c => c.CachedIn), CacheWriteTokensIn = g.Sum(c => c.Writes),
+                TokensOut = g.Sum(c => c.Out),
+            }).ToList(),
+        };
     }
 
     private void CountCall(JsonElement message)
@@ -632,9 +717,7 @@ public sealed class ClaudeOutputParser(TimeProvider? time = null) : IAgentOutput
     private static Usage Incremental(Usage total, Usage baseline)
     {
         // A CLI that starts from zero (or a conversation reset) restores no earlier spend.
-        if (total.TokensIn < baseline.TokensIn || total.TokensOut < baseline.TokensOut
-            || total.CachedTokensIn < baseline.CachedTokensIn || total.CacheWriteTokensIn < baseline.CacheWriteTokensIn
-            || total.EstimatedCostUsd < baseline.EstimatedCostUsd) return total;
+        if (TotalsReset(total, baseline)) return total;
         var models = total.Models?.Select(model => Incremental(model,
             baseline.Models?.FirstOrDefault(old => old.Model == model.Model) ?? new Usage())).ToList();
         return total with
@@ -649,6 +732,11 @@ public sealed class ClaudeOutputParser(TimeProvider? time = null) : IAgentOutput
             Model = models is { Count: > 0 } ? models.MaxBy(m => m.EstimatedCostUsd ?? m.TokensIn + m.TokensOut)!.Model : total.Model,
         };
     }
+
+    private static bool TotalsReset(Usage total, Usage baseline) =>
+        total.TokensIn < baseline.TokensIn || total.TokensOut < baseline.TokensOut
+        || total.CachedTokensIn < baseline.CachedTokensIn || total.CacheWriteTokensIn < baseline.CacheWriteTokensIn
+        || total.EstimatedCostUsd < baseline.EstimatedCostUsd;
 
     private static bool TryParse(string text, out JsonDocument doc)
     {

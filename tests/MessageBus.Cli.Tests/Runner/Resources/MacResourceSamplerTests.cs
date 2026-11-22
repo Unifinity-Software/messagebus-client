@@ -65,15 +65,16 @@ public sealed class MacResourceSamplerTests
     }
 
     [Fact]
-    public void ProcessCpuUsesMachTimebaseAndIgnoresReusedPid()
+    public void ProcessCpuUsesNativeFrequencyUnderRosettaAndIgnoresReusedPid()
     {
         var stable = new ProcessObservation(1, 0, new ProcessStart(1, 0), 100, 5_000_000);
         var reused = new ProcessObservation(2, 1, new ProcessStart(4, 0), 200, 500_000_000);
         var sample = MacResourceSampler.SummarizeTree(
             new() { [1] = stable, [2] = reused },
             new() { [1] = stable with { CpuTicks = 1_000_000 }, [2] = reused with { Start = new ProcessStart(2, 0) } },
-            true, 2_000_000_000, 125.0 / 3, false, true);
+            true, 2, 24_000_000, false, true);
 
+        // Native proc_taskinfo counters still run at 24 MHz when Rosetta's mach_timebase_info says 1/1.
         Assert.Equal(8.333333333, Assert.IsType<double>(sample.CpuPercent), 8);
         Assert.Equal(300, sample.ResidentBytes);
         Assert.Equal("process-tree-partial", sample.Reason);
@@ -83,6 +84,20 @@ public sealed class MacResourceSamplerTests
         Assert.Null(unavailable.ResidentBytes);
         Assert.Null(unavailable.CpuPercent);
         Assert.Equal("process-tree-unavailable", unavailable.Reason);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData(0L)]
+    [InlineData(-1L)]
+    public void MissingOrInvalidProcessFrequencyReportsUnknownCpu(long? ticksPerSecond)
+    {
+        var process = new ProcessObservation(1, 0, new ProcessStart(1, 0), 100, 48_000_000);
+        var sample = MacResourceSampler.SummarizeTree(new() { [1] = process },
+            new() { [1] = process with { CpuTicks = 24_000_000 } }, true, 1, ticksPerSecond, false, true);
+        Assert.Null(sample.CpuPercent);
+        Assert.Equal(100, sample.ResidentBytes);
+        Assert.Equal("process-tree-partial", sample.Reason);
     }
 
     [Fact]

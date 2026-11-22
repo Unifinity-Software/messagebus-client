@@ -377,9 +377,9 @@ internal sealed class AgentRun
                     await File.WriteAllTextAsync(workspace.PromptFile, launchPrompt).ConfigureAwait(false);
 
                 var parser = _adapter.Kind == AgentKind.ClaudeCode && Resume?.SessionId is { } sessionId
-                    ? ClaudeOutputParser.ForResume(MessageBus.Mcp.SessionUsage.ClaudeHome(name =>
+                    ? await ClaudeOutputParser.ForResumeAsync(MessageBus.Mcp.SessionUsage.ClaudeHome(name =>
                         process.Environment.TryGetValue(name, out var value) ? value : _s.Host.GetEnvironmentVariable(name)),
-                        workspace.WorkTree, sessionId)
+                        workspace.WorkTree, sessionId, _stop.Token).ConfigureAwait(false)
                     : _adapter.CreateParser(Delivery.Model);
                 Note($"Started {AgentKinds.DisplayName(_adapter.Kind)}"
                     + (Delivery.Model is not { } model ? ""

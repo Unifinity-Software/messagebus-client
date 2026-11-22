@@ -989,8 +989,11 @@ when present, including an empty array. Existing `frictionKinds` continues to re
 
 A delivery's settlement usage covers only that delivery. Claude Code v2.1.277 and later
 restore cumulative cost and per-model tokens on resume. Before starting the resumed process,
-the runner snapshots the transcript's last `cost-state` and subtracts it from result totals,
+the runner snapshots the transcript's last `cost-state` in a cancellable, bounded tail read and subtracts it from result totals,
 including error results and the final result after background turns. Duration remains local
 to the process. A CLI whose totals restart below the saved baseline is counted from zero.
+If the saved baseline is missing, malformed or unreadable, only the current process's observed
+assistant calls supply token counts; total and per-model cost stay unknown. Transcript access
+failures do not prevent the agent from running, and cancellation still stops the run.
 Codex `turn.completed` usage is already per turn and is summed only within the current process.
 This normalization changes no wire fields and requires no server feature negotiation.
