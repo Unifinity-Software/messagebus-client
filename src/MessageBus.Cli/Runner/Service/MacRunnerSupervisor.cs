@@ -19,7 +19,7 @@ internal static class MacRunnerSupervisor
         // The actual mbus command is passed as positional arguments, never evaluated as shell source.
         // Run children in the background so wait is interruptible and TERM reaches the active child.
         // This includes the updater and retry delay, so bootout cannot leave a supervisor restarting work.
-        // Traps record intent: a child can run before child=$! publishes its PID. Stop and wait from normal flow.
+        // Traps record intent and signal a tracked child; waiting and exit stay in normal flow.
         return $$"""
             child=
             stopping=
@@ -31,7 +31,13 @@ internal static class MacRunnerSupervisor
                 fi
                 exit 0
             }
-            trap 'stopping=1' TERM INT
+            request_stop() {
+                stopping=1
+                if [ -n "$child" ]; then
+                    kill -TERM "$child" 2>/dev/null || :
+                fi
+            }
+            trap request_stop TERM INT
             run_child() {
                 [ -n "$stopping" ] && stop_supervisor
                 "$@" &
