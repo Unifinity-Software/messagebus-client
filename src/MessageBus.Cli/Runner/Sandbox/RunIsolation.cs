@@ -251,6 +251,9 @@ public sealed class RunIsolation : IRunSandbox
 
     bool IRunSandbox.UsesPrivateHome => _options.RequireAciSandbox;
 
+    bool IRunSandbox.EnforcesAgentFilePolicy(RunWorkspace workspace, PermissionProfile profile) =>
+        workspace.SessionFolder is null && _aci?.EnforcesFilePolicy(workspace.Root) == true;
+
     string? IRunSandbox.AgentRefusal(AgentKind kind) => _aciProblem ?? _aci?.AgentProblem(kind);
 
     internal string? AciProblem => _aciProblem;
@@ -475,6 +478,7 @@ public sealed class RunIsolation : IRunSandbox
         {
             if (network is not null) network.LocalModelEndpoint = workspace.LocalModelEndpoint;
             _runs[workspace.Root] = NewState(workspace, repository, credential, profile.CanPush, network, telemetry, ownerGit);
+            _aci?.Prepare(workspace.Root);
         }
         catch
         {
@@ -495,7 +499,7 @@ public sealed class RunIsolation : IRunSandbox
         var wrapped = launch with { Environment = environment };
         if (_aci is not null && workspace.PrivateSocketDirectory is { } sockets)
         {
-            return _aci.Wrap(wrapped, workspace.Root, sockets);
+            return _aci.Wrap(wrapped, workspace.Root, sockets, profile.CanEditFiles);
         }
         if (_options.RequireAciSandbox) throw new IOException("The protected ACI task has no network socket.");
         if (_mac is not null && (_mac.NestingAllowed || !MacSandbox.StartsItsOwnSandbox(launch)))
@@ -560,6 +564,25 @@ public sealed class RunIsolation : IRunSandbox
         DeletePrivateSocketDirectory(workspace);
         RunGitConfig.Withdraw(workspace.Root);
         RunWorkspace.TryDelete(state.TempDirectory);
+    }
+
+    /// <inheritdoc />
+    public async Task EndedAsync(RunWorkspace workspace)
+    {
+        try
+        {
+            if (_aci is not null) await _aci.EndAsync(workspace.Root).ConfigureAwait(false);
+        }
+        catch
+        {
+            workspace.SandboxCleanupIncomplete = true;
+            // Stop credentials and egress even when an owned runtime cannot yet
+            // be proven dead. Preserve its sockets, mount sources and journal.
+            if (_runs.TryRemove(workspace.Root, out var state)) state.Network?.Dispose();
+            RunGitConfig.Withdraw(workspace.Root);
+            throw;
+        }
+        Ended(workspace);
     }
 
     private static void DeletePrivateSocketDirectory(RunWorkspace workspace)

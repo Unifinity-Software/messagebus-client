@@ -24,11 +24,18 @@ internal sealed class AciSandbox
     private readonly Dictionary<string, string?> _agents = new(StringComparer.Ordinal);
     private readonly AciEgress _egress;
     private bool _mountProc = true;
+    private AciUserspaceSandbox? _userspace;
 
     private AciSandbox(string identityHost) => _egress = new(identityHost);
 
-    internal string? AgentProblem(AgentKind kind) => _agents.TryGetValue(AgentKinds.Command(kind), out var problem)
-        ? problem : "The harness has not passed the protected ACI launch check. Restart the runner after installing it.";
+    internal string? AgentProblem(AgentKind kind) => _userspace?.Problem ?? (_agents.TryGetValue(AgentKinds.Command(kind), out var problem)
+        ? problem : "The harness has not passed the protected ACI launch check. Restart the runner after installing it.");
+
+    internal bool EnforcesFilePolicy(string run) => _userspace?.EnforcesFilePolicy(run) == true;
+
+    internal void Prepare(string run) => _userspace?.Prepare(run);
+
+    internal Task EndAsync(string run) => _userspace?.EndAsync(run) ?? Task.CompletedTask;
 
     internal static AciSandbox? TryCreate(RunIsolationOptions options, out string problem, IProbeRunner? probeRunner = null)
     {
@@ -89,7 +96,7 @@ internal sealed class AciSandbox
     internal RunNetwork StartNetwork(string directory, HostAllowList allow, TextWriter log, string runName) =>
         RunNetwork.StartAci(Path.Combine(directory, SocketName), allow, log, runName, _egress.ConnectAsync);
 
-    internal ProcessLaunch Wrap(ProcessLaunch launch, string run, string sockets)
+    internal ProcessLaunch Wrap(ProcessLaunch launch, string run, string sockets, bool canEditFiles = true)
     {
         var home = Path.Combine(run, "home");
         var environment = new Dictionary<string, string?>(launch.Environment, StringComparer.Ordinal)
@@ -103,6 +110,8 @@ internal sealed class AciSandbox
             ["XDG_STATE_HOME"] = null,
             ["XDG_RUNTIME_DIR"] = null,
         };
+        if (_userspace is not null)
+            return _userspace.Wrap(launch with { Environment = environment }, run, sockets, Path.Combine(run, "work"), canEditFiles);
         return launch with
         {
             FileName = Bwrap,
@@ -200,7 +209,17 @@ internal sealed class AciSandbox
                 // Some ACI hosts allow namespaces but deny a fresh procfs mount.
                 // Keep all namespaces and give the task a private, empty /proc.
                 _mountProc = false;
-                check = CheckWithOutsideProcess(pid => Check("", "", pid));
+                if (File.Exists("/usr/local/lib/mbus/gvisor/runsc"))
+                {
+                    _userspace = AciUserspaceSandbox.TryCreate(options, out var runtimeProblem);
+                    if (_userspace is null) return runtimeProblem;
+                    check = CheckWithOutsideProcess(marker =>
+                    {
+                        environment["MBUS_ACI_PROBE_MARKER"] = marker;
+                        return Check("userspace", "", "");
+                    }, namedMarker: true);
+                }
+                else check = CheckWithOutsideProcess(pid => Check("", "", pid));
             }
             if (check.ExitCode != 0 || !check.Output.Contains("aci-fixture-ok", StringComparison.Ordinal))
                 return "The protected ACI file, process and network launch check failed. Task execution requires non-root namespace support.";
@@ -210,7 +229,19 @@ internal sealed class AciSandbox
                 string? reason = Run(agent.Executable, "--version").ExitCode == 0 ? null : "The harness did not start inside the protected ACI sandbox.";
                 if (reason is null && !_mountProc && Run(agent.Executable, "--help").ExitCode != 0)
                     reason = "The harness did not start with an empty /proc inside the protected ACI sandbox.";
-                if (reason is null && agent.Name == "codex"
+                if (reason is null && _userspace is not null && agent.Name == "codex")
+                {
+                    File.WriteAllText(Path.Combine(run, "work", "aci-probe-source"), "original");
+                    foreach (var canEdit in new[] { true, false })
+                    {
+                        var launch = new ProcessLaunch { FileName = Node, Arguments = ["/usr/local/lib/mbus/aci-codex-probe.mjs", agent.Executable, run, canEdit ? "write" : "read"],
+                            WorkingDirectory = Path.Combine(run, "work"), Environment = environment };
+                        var outcome = runner.Run(new ProbeCommand("protected Codex command", Wrap(launch, run, sockets, canEdit), launch, Sandboxed: true));
+                        if (outcome.ExitCode != 0 || !outcome.Output.Contains("aci-codex-ok", StringComparison.Ordinal))
+                            reason = "Codex did not complete the protected offline command check for both file profiles.";
+                    }
+                }
+                else if (reason is null && agent.Name == "codex"
                     && Run(agent.Executable, "sandbox", "--", "/bin/true").ExitCode != 0
                     && Run(agent.Executable, "sandbox", "linux", "--", "/bin/true").ExitCode != 0)
                     reason = "Codex could not start its command sandbox inside the protected ACI sandbox.";
@@ -220,6 +251,12 @@ internal sealed class AciSandbox
         }
         finally
         {
+            Exception? cleanupFailure = null;
+            if (_userspace is not null)
+            {
+                try { _userspace.EndAsync(Path.Combine(root, "run")).GetAwaiter().GetResult(); }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { cleanupFailure = ex; }
+            }
             stop.Cancel();
             outside.Stop();
             if (response is not null)
@@ -227,26 +264,39 @@ internal sealed class AciSandbox
                 try { response.GetAwaiter().GetResult(); }
                 catch (Exception ex) when (ex is OperationCanceledException or IOException or SocketException) { }
             }
-            RunWorkspace.TryDelete(root);
-            if (sockets is not null) RunWorkspace.TryDelete(sockets);
+            if (cleanupFailure is null)
+            {
+                RunWorkspace.TryDelete(root);
+                if (sockets is not null) RunWorkspace.TryDelete(sockets);
+            }
             if (privateFixture is not null) RunWorkspace.TryDelete(privateFixture);
+            if (cleanupFailure is not null) throw new IOException("Protected ACI startup cleanup is quarantined; its runtime journal and mount sources are preserved.", cleanupFailure);
         }
     }
 
-    private static ProbeOutcome CheckWithOutsideProcess(Func<string, ProbeOutcome> check)
+    private static ProbeOutcome CheckWithOutsideProcess(Func<string, ProbeOutcome> check, bool namedMarker = false)
     {
         // Only the dummy subprocess is used to check PID visibility. Its input
         // pipe keeps it alive until the check returns.
-        var start = new ProcessStartInfo("/usr/bin/cat")
+        var markerName = "aci-" + Guid.NewGuid().ToString("N")[..10];
+        var start = new ProcessStartInfo(namedMarker ? Node : "/usr/bin/cat")
         {
             UseShellExecute = false,
             RedirectStandardInput = true,
+            RedirectStandardOutput = namedMarker,
         };
+        if (namedMarker)
+        {
+            start.ArgumentList.Add("-e");
+            start.ArgumentList.Add("process.title=process.argv[1];console.log('ready');process.stdin.resume();");
+            start.ArgumentList.Add(markerName);
+        }
         start.Environment.Clear();
         using var marker = Process.Start(start) ?? throw new IOException("Could not start the protected ACI fixture process.");
         try
         {
-            var result = check(marker.Id.ToString(CultureInfo.InvariantCulture));
+            if (namedMarker && marker.StandardOutput.ReadLine() != "ready") return new(1, "The outside marker did not start.");
+            var result = check(namedMarker ? markerName : marker.Id.ToString(CultureInfo.InvariantCulture));
             return marker.HasExited ? new ProbeOutcome(1, "The outside fixture process stopped.") : result;
         }
         finally
@@ -271,6 +321,13 @@ internal sealed class AciSandbox
         const { get } = require('node:http');
         const [key, other, pidNs, netNs, markerPid, outside, proxy, host] = process.argv.slice(1);
         function outsideProcessIsHidden() {
+          if (pidNs === 'userspace') {
+            const marker = process.env.MBUS_ACI_PROBE_MARKER;
+            if (!marker) return false;
+            return fs.readdirSync('/proc').filter(p => /^\d+$/.test(p)).every(p => {
+              try { return !fs.readFileSync('/proc/' + p + '/cmdline', 'utf8').includes(marker); } catch { return true; }
+            });
+          }
           if (!markerPid) {
             return fs.readlinkSync('/proc/self/ns/pid') !== pidNs && fs.readlinkSync('/proc/self/ns/net') !== netNs;
           }

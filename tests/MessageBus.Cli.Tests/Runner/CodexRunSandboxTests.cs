@@ -33,6 +33,19 @@ public sealed class CodexRunSandboxTests : IDisposable
 
     private static string After(IReadOnlyList<string> args, string flag) => args[args.ToList().IndexOf(flag) + 1];
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Only_a_verified_external_file_profile_replaces_the_fresh_codex_sandbox(bool writable)
+    {
+        var context = Context(Developer with { CanEditFiles = writable }, runnerSandboxed: false);
+        var adapter = new CodexAdapter("gpt-5", codexHome: Path.Combine(_run, ".codex"), getEnvironmentVariable: _ => null);
+        Assert.Equal(writable ? "workspace-write" : "read-only", After(adapter.BuildLaunch(context, windows: false).Arguments, "--sandbox"));
+        Assert.Equal("danger-full-access", After(adapter.BuildLaunch(context with { ExternalFilePolicyEnforced = true }, windows: false).Arguments, "--sandbox"));
+        var resumed = adapter.BuildLaunch(context with { ExternalFilePolicyEnforced = true, ResumeSessionId = "fixture" }, windows: false);
+        Assert.Contains($"sandbox_mode=\"{(writable ? "workspace-write" : "read-only")}\"", resumed.Arguments);
+    }
+
     [Fact]
     public void Machine_options_accept_both_overrides_and_command_line_wins()
     {

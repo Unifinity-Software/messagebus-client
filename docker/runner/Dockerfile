@@ -43,6 +43,7 @@ RUN rm -f skills/global.json \
 
 # ── runtime: Node (the agent CLIs are npm packages) plus mbus ─────────────────
 FROM node:${NODE_VERSION}-trixie-slim
+ARG TARGETARCH
 
 # Keep the release harness versions exact. Custom builds can override them.
 ARG CLAUDE_CODE_VERSION=2.1.330
@@ -57,6 +58,13 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates git openssh-client libicu76 tini bubblewrap netcat-openbsd \
  && rm -rf /var/lib/apt/lists/*
 
+# ACI hosts may deny private kernel procfs. The amd64 userspace kernel keeps
+# dynamic procfs private without exposing the enclosing container's processes.
+# The installer verifies the exact official release checksum before extraction.
+COPY docker/runner/install-gvisor.mjs /tmp/mbus-install-gvisor.mjs
+RUN node /tmp/mbus-install-gvisor.mjs "${TARGETARCH:-amd64}" && rm /tmp/mbus-install-gvisor.mjs
+COPY docker/runner/gvisor-LICENSE /usr/local/lib/mbus/gvisor-LICENSE
+
 # Allow the two install scripts that fetch each CLI's native binary.
 RUN npm install -g --no-fund --no-audit --ignore-scripts "npm@${NPM_VERSION}" \
  && npm install -g --no-fund --no-audit --allow-scripts=@anthropic-ai/claude-code,opencode-ai \
@@ -69,6 +77,8 @@ RUN npm install -g --no-fund --no-audit --ignore-scripts "npm@${NPM_VERSION}" \
 COPY --from=build /out/mbus /usr/local/bin/mbus
 COPY docker/runner/entrypoint.sh /usr/local/bin/mbus-entrypoint
 COPY docker/runner/aci-bootstrap.mjs /usr/local/lib/mbus/aci-bootstrap.mjs
+COPY docker/runner/aci-sandbox.mjs /usr/local/lib/mbus/aci-sandbox.mjs
+COPY docker/runner/aci-codex-probe.mjs /usr/local/lib/mbus/aci-codex-probe.mjs
 # Strip CRs in case the script was checked out with Windows line endings.
 RUN sed -i 's/\r$//' /usr/local/bin/mbus-entrypoint && chmod 755 /usr/local/bin/mbus-entrypoint /usr/local/bin/mbus
 

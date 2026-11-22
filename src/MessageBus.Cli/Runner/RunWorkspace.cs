@@ -58,6 +58,8 @@ public sealed partial class RunWorkspace : IDisposable
     internal Uri? LocalModelEndpoint { get; set; }
     internal string? PrivateSocketDirectory { get; set; }
 
+    internal bool SandboxCleanupIncomplete { get; set; }
+
     private RunWorkspace(string root, string? sessionFolder = null)
     {
         Root = Path.GetFullPath(root);
@@ -546,6 +548,7 @@ public sealed partial class RunWorkspace : IDisposable
         using var process = AgentProcess.Start(wrap(new ProcessLaunch
         {
             FileName = git,
+            TrustedCheckout = true,
             // Inherited post-checkout hooks/fsmonitor can start git children that outlive checkout.
             Arguments = RunnerGit.Arguments(args),
             WorkingDirectory = Root,

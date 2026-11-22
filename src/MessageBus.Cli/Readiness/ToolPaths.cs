@@ -127,6 +127,9 @@ public sealed class ToolPathSandbox(IRunSandbox inner, IReadOnlyDictionary<strin
 
     bool IRunSandbox.UsesPrivateHome => inner.UsesPrivateHome;
 
+    bool IRunSandbox.EnforcesAgentFilePolicy(RunWorkspace workspace, Contracts.Roles.PermissionProfile profile) =>
+        inner.EnforcesAgentFilePolicy(workspace, profile);
+
     /// <inheritdoc />
     public ProcessLaunch Wrap(ProcessLaunch launch, RunWorkspace workspace, Contracts.Roles.PermissionProfile profile)
     {
@@ -153,6 +156,9 @@ public sealed class ToolPathSandbox(IRunSandbox inner, IReadOnlyDictionary<strin
 
     /// <inheritdoc />
     public void Ended(RunWorkspace workspace) => inner.Ended(workspace);
+
+    /// <inheritdoc />
+    public Task EndedAsync(RunWorkspace workspace) => inner.EndedAsync(workspace);
 
     /// <inheritdoc />
     public Contracts.Machines.RunIsolationReport? Report => inner.Report;

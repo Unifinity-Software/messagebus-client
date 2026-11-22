@@ -25,6 +25,10 @@ public sealed record ProcessLaunch
 
     /// <summary>Written to stdin, which is then closed; null closes stdin at once.</summary>
     public string? StandardInput { get; init; }
+
+    // Set only by the runner's checkout implementation. Delivery setup and agent
+    // commands must retain their role's file restrictions.
+    internal bool TrustedCheckout { get; init; }
 }
 
 /// <summary>

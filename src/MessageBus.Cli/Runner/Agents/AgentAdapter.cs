@@ -91,6 +91,8 @@ public sealed record AgentLaunchContext(string Prompt, string PromptFile, Permis
     public IReadOnlyList<string> KeepAgentTools { get; init; } = KeepAgentTools ?? [];
 
     internal bool UsesCodexEnvironmentKey { get; init; }
+
+    internal bool ExternalFilePolicyEnforced { get; init; }
 }
 
 /// <summary>An agent command line.</summary>

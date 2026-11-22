@@ -252,6 +252,8 @@ internal sealed class AgentRun
         {
             await EndToolsAndSandboxAsync(workspace).ConfigureAwait(false);
         }
+        if (workspace?.SandboxCleanupIncomplete == true)
+            failure = (SettleStatus.Abandoned, "Protected sandbox cleanup could not be verified. This runner is quarantined; the run's files are preserved.");
         if (verifier is not null)
             agentSettle = Volatile.Read(ref _verifiedAgentSettle);
 
@@ -569,6 +571,15 @@ internal sealed class AgentRun
     {
         try
         {
+            if (workspace.SandboxCleanupIncomplete)
+            {
+                // A runtime may still hold these files. Do not hand them to the
+                // ordinary timed housekeeper while ownership is unresolved.
+                workspace.Hold(DateTimeOffset.MaxValue);
+                workspace.Dispose();
+                await _s.Log.WriteLineAsync($"{DeliveryId}: sandbox cleanup is quarantined; the run's files are preserved in {workspace.Root}.").ConfigureAwait(false);
+                return;
+            }
             if (_s.Options.KeepRunFolders)
             {
                 workspace.Dispose();
@@ -613,7 +624,7 @@ internal sealed class AgentRun
             // Before the settle: what the run left running is ended and its credential withdrawn.
             try
             {
-                _s.Sandbox.Ended(workspace);
+                await _s.Sandbox.EndedAsync(workspace).ConfigureAwait(false);
             }
             catch (Exception ex)
             {
@@ -903,6 +914,7 @@ internal sealed class AgentRun
         var launch = adapter.BuildLaunch(context with
         {
             RunnerSandboxed = sandbox.ConfinesAgents, RunnerIsolationEnabled = sandbox.IsolationEnabled, RunDirectory = workspace.Root,
+            ExternalFilePolicyEnforced = context.ResumeSessionId is null && sandbox.EnforcesAgentFilePolicy(workspace, runProfile),
             UsesCodexEnvironmentKey = environment.ContainsKey(CodexAuthentication.CodexKey),
         });
         onLaunch?.Invoke(launch);
