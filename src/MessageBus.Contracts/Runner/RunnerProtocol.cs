@@ -558,6 +558,9 @@ public sealed record UpdateRequest
 /// <summary>What the runner is doing (<see cref="RunnerRoutes.Status"/>).</summary>
 public sealed record RunnerStatus
 {
+    /// <summary>Latest local resource sample, when available.</summary>
+    public RunnerResourceSample? Resources { get; init; }
+
     /// <summary>Whether this runner supports reversible drains identified by ManagedDrainId. Absent means false.</summary>
     public bool SupportsManagedDrain { get; init; }
 
@@ -589,6 +592,9 @@ public sealed record RunnerStatus
 /// <summary>Keep leases alive (<see cref="ServiceRoutes.Heartbeat"/>).</summary>
 public sealed record RunnerHeartbeat
 {
+    /// <summary>Latest resource sample, sent only after the service advertises support for this session.</summary>
+    public RunnerResourceSample? Resources { get; init; }
+
     /// <summary>Deliveries running now.</summary>
     public IReadOnlyList<string> ActiveDeliveryIds { get; set; } = [];
 
@@ -624,6 +630,10 @@ public sealed record WorkspaceSuspensionStatus
 /// <summary>The service’s answer to a runner heartbeat.</summary>
 public sealed record HeartbeatAck
 {
+    /// <summary>Whether the service accepts resource samples for this runner session. Absent means false.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool SupportsResourceSamples { get; init; }
+
     /// <summary>Current workspace suspension; null when work can resume.</summary>
     public WorkspaceSuspensionStatus? Suspension { get; init; }
 

@@ -750,6 +750,39 @@ Timing and close codes come from the public `Groundhog.Protocol` package: the se
 | 4426 | This `mbus` is older than the service accepts | Self-updating runners update and reconnect. Image-managed runners require redeployment. |
 | 4403 | The machine waits for an admin's approval | Reconnects later with a long backoff |
 
+### Optional runner resource telemetry
+
+The heartbeat response can advertise `supportsResourceSamples: true` for the current runner
+connection session. An omitted or false flag means the runner omits `resources` from heartbeats.
+Once negotiated, sample collection and reporting run every 15 seconds with at least one busy slot
+and every 60 seconds when idle. Lease heartbeats keep their existing timing. Local runner
+`/status` can expose the latest sample as `resources` independently of service support.
+
+A `RunnerResourceSample` has `schemaVersion: 1`, a strictly increasing `sequence` within the
+connection session, a UTC `sampledAt`, and `windowMs` for the monotonic measurement window when
+known. `status` describes collection (`ok`, `partial`, `unsupported`, or `error`).
+`reason` is an optional short code. Missing or null metrics represent unknown values.
+A zero metric represents a measured zero.
+
+| Optional field | Members |
+|---|---|
+| `cpu` | `utilizationPercent` (0 through 100 percent of effective capacity), `effectiveCpus` (may be fractional), `hostLogicalCpus`, `limitSource` |
+| `memory` | `totalBytes` (effective capacity), `availableBytes` (within that capacity), `hostTotalBytes`, `limitSource` |
+| `runner` | `cpuPercent` (of effective CPU capacity), `residentBytes`, `processCount`, `reason` (short code for partial or unavailable data). Covers the runner tree with owned task trees excluded. |
+| `tasks` | Same fields as `runner`. Covers the union of the owned task trees, with each process counted once. |
+
+`limitSource` is `host`, `cgroup-v1`, `cgroup-v2`, or `job-object` when known. Telemetry
+contains only aggregate process usage. It carries no per-run identifiers, PIDs, commands or paths.
+Reason codes carry no free-form diagnostics.
+
+`MachineInfo` and `AgentInfo` may each carry a machine-level `resources` view under existing
+discovery permissions. Its optional `sample` is the latest runner observation. `receivedAt` is
+the service receipt time in UTC and `ageSeconds` is the age computed by the service. Both may
+be absent or null. `state` is the service's placement classification (`healthy`, `elevated`,
+`critical`, `stale`, `unknown`, `unsupported`, or `offline`). `reasons` contains classification
+codes and defaults to an empty list. `slotsTotal` and `slotsBusy` describe slot counts when known.
+Collection status is reported in `sample.status`.
+
 ## End-to-end encryption
 
 Message bodies and attachments are encrypted on the sending machine and opened on the receiving one; the service
