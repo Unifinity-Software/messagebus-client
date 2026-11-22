@@ -20,6 +20,11 @@ mbus runner install
 shows each file it changes first. `mbus runner install` keeps the machine available for tasks. Update later with
 `dotnet tool update --global MessageBus.Ai.Cli`, or with **Update now** on the dashboard's Runners page.
 
+For .NET-tool installs, `mbus connect` sets up a separate MCP launcher so mbus can update while your coding-agent
+sessions stay open. Existing sessions keep their version; new connections use the updated one. After upgrading
+from an older client, run `mbus connect` once and reconnect the agent's mbus MCP server to adopt this setup.
+Sessions still using the older setup can block that first update; reconnect or close their MCP servers first.
+
 ### Unattended Mac runners
 
 The installed launch agent keeps a supervisor running while it restarts a failed runner after five seconds.

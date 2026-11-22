@@ -17,6 +17,7 @@ using MessageBus.Cli.Runner.Service;
 using MessageBus.Cli.Tests.Infrastructure;
 using MessageBus.Cli.Tests.Runner;
 using MessageBus.Contracts.Json;
+using MessageBus.Tests.Shared;
 using Xunit;
 
 namespace MessageBus.Cli.Tests.Update;
@@ -33,6 +34,84 @@ public sealed class RealDotnetUpdateTests(ITestOutputHelper output)
         && !new[] { "CI", "GITHUB_ACTIONS", "TF_BUILD", "GITLAB_CI", "JENKINS_URL", "TEAMCITY_VERSION", "BUILDKITE", "CIRCLECI" }.Any(name =>
             Environment.GetEnvironmentVariable(name) is { Length: > 0 } value
             && !value.Equals("false", StringComparison.OrdinalIgnoreCase) && value != "0");
+
+    [Fact]
+    public async Task Connected_mcp_survives_manual_and_service_updates_and_new_sessions_use_the_new_package()
+    {
+        Assert.SkipWhen(InsideRun.Now, InsideRun.MbusReason);
+        using var machine = new TestMachine();
+        await using var endpoint = new ProbeEndpoint();
+        _probeHome = machine.MbusFolder;
+        _mcpEndpoint = endpoint.Url;
+        _cliHome = Path.Combine(machine.Home, "dotnet-home");
+        var root = FindRoot();
+        var feed = Directory.CreateDirectory(Path.Combine(machine.Home, "feed")).FullName;
+        var tools = Path.Combine(machine.Home, "tools & ' (MCP)");
+        var packages = Path.Combine(machine.Home, "packages");
+        var config = Path.Combine(machine.Home, "NuGet.Config");
+        File.WriteAllText(config, DotnetToolUpdater.NuGetConfig(feed));
+        const string older = "1.0.0-mcp.1", newer = "1.0.0-mcp.2";
+        foreach (var version in new[] { older, newer })
+            await Run("dotnet", ["pack", Path.Combine(root, "src/MessageBus.Cli.Tool"), "-c", "Release", "-o", feed,
+                "-m:1", "-p:Version=" + version, "-p:MbusReleaseBuild=true"]);
+        await Run("dotnet", ["tool", "install", DotnetToolInstall.PackageId, "--tool-path", tools,
+            "--version", older, "--configfile", config], packages);
+        string Entry(string version) => Directory.GetFiles(Path.Combine(tools, ".store", "messagebus.ai.cli", version),
+            "mbus.dll", SearchOption.AllDirectories).Single();
+        var dotnet = CommandLocator.Find("dotnet", Environment.GetEnvironmentVariable, [])!;
+        var connection = DotnetMcpLauncher.ForConnection(DotnetToolInstall.Find(Entry(older))!, Entry(older), dotnet);
+        connection.Install();
+        using var mcp = Start(connection.Launch.Command, connection.Launch.Args, packages);
+        var errors = mcp.StandardError.ReadToEndAsync(TestContext.Current.CancellationToken);
+        try
+        {
+            var initialized = await Request(mcp, 1, "initialize", new { protocolVersion = "2024-11-05", capabilities = new { }, clientInfo = new { name = "update-probe", version = "1" } });
+            Assert.Equal(older, initialized.GetProperty("result").GetProperty("serverInfo").GetProperty("version").GetString());
+            await mcp.StandardInput.WriteLineAsync("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}");
+            await Request(mcp, 2, "tools/list", new { });
+
+            // Run the real CLI applier and real holder scan with the original MCP connection still alive.
+            _updateSource = feed;
+            await Run(Path.Combine(tools, OperatingSystem.IsWindows() ? "mbus.exe" : "mbus"), ["update", "--version", newer, "--yes"], packages);
+            Assert.False(Directory.Exists(Path.Combine(tools, ".store", "messagebus.ai.cli", older)));
+            await Request(mcp, 3, "tools/list", new { });
+            await Request(mcp, 4, "tools/call", new { name = "fetch_attachment", arguments = new { threadId = "probe", attachmentId = "probe", path = Path.Combine(machine.Home, "attachment") } });
+
+            // The unchanged agent configuration now launches the new version, while the old session keeps answering.
+            using var fresh = Start(connection.Launch.Command, connection.Launch.Args, packages);
+            var freshErrors = fresh.StandardError.ReadToEndAsync(TestContext.Current.CancellationToken);
+            try
+            {
+                var hello = await Request(fresh, 1, "initialize", new { protocolVersion = "2024-11-05", capabilities = new { }, clientInfo = new { name = "fresh-probe", version = "1" } });
+                Assert.Equal(newer, hello.GetProperty("result").GetProperty("serverInfo").GetProperty("version").GetString());
+                await Request(mcp, 5, "tools/list", new { });
+
+                // The service path uses the same holder protection; neither live session holds the tool store.
+                var updater = new DotnetToolUpdater(DotnetToolInstall.Find(Entry(newer))!, machine.MbusFolder, dotnet,
+                    TextWriter.Null, RunnerUpdateRecord.In(machine.MbusFolder), newer, machine.Time, source: feed, entryAssembly: Entry(newer));
+                Assert.Empty(updater.Holders(final: true));
+                Assert.True(await updater.InstallAsync(new() { Version = older, Pinned = true }, TestContext.Current.CancellationToken), updater.LastResult?.Reason);
+                Assert.Equal(0, await DotnetToolUpdater.RunApplierAsync("apply", Path.Combine(machine.MbusFolder, "update")));
+                await Run(Path.Combine(tools, OperatingSystem.IsWindows() ? "mbus.exe" : "mbus"), ["--version"], packages, expectedOutput: older);
+                await Request(mcp, 6, "tools/list", new { });
+                await Request(fresh, 2, "tools/list", new { });
+            }
+            finally
+            {
+                fresh.StandardInput.Close();
+                await fresh.WaitForExitAsync(TestContext.Current.CancellationToken);
+                Assert.Equal(0, fresh.ExitCode);
+                Assert.DoesNotContain("Could not load file or assembly", await freshErrors);
+            }
+        }
+        finally
+        {
+            mcp.StandardInput.Close();
+            await mcp.WaitForExitAsync(TestContext.Current.CancellationToken);
+            Assert.Equal(0, mcp.ExitCode);
+            Assert.DoesNotContain("Could not load file or assembly", await errors);
+        }
+    }
 
     [Theory]
     [InlineData(false)]
@@ -88,7 +167,7 @@ public sealed class RealDotnetUpdateTests(ITestOutputHelper output)
         var record = RunnerUpdateRecord.In(settings);
         DotnetToolUpdater Updater(string path) => new(DotnetToolInstall.Find(path)!, settings, dotnet, TextWriter.Null,
             record, assemblyVersion, machine.Time, () => ProcessTable.Empty, source: feed, entryAssembly: path)
-            { MinimumServiceVersion = scm ? older : null };
+        { MinimumServiceVersion = scm ? older : null };
         var updater = Updater(entry);
         await using var runner = new RunnerHarness(extensions: e => e with { SessionUpdater = updater });
         var ct = TestContext.Current.CancellationToken;
@@ -457,7 +536,7 @@ public sealed class RealDotnetUpdateTests(ITestOutputHelper output)
         Assert.Equal("applied", (await File.ReadAllTextAsync(marker, TestContext.Current.CancellationToken)).Trim());
     }
 
-    private async Task Request(Process process, int id, string method, object parameters)
+    private async Task<JsonElement> Request(Process process, int id, string method, object parameters)
     {
         await process.StandardInput.WriteLineAsync(JsonSerializer.Serialize(new { jsonrpc = "2.0", id, method, @params = parameters }));
         await process.StandardInput.FlushAsync();
@@ -470,9 +549,10 @@ public sealed class RealDotnetUpdateTests(ITestOutputHelper output)
             output.WriteLine("MCP " + method + ": " + (method == "tools/list" && json.RootElement.TryGetProperty("result", out _)
                 ? json.RootElement.GetProperty("result").GetProperty("tools").GetArrayLength() + " tools"
                 : line));
-            if (json.RootElement.TryGetProperty("id", out var responseId) && responseId.ValueKind == JsonValueKind.Number && responseId.GetInt32() == id) return;
+            if (json.RootElement.TryGetProperty("id", out var responseId) && responseId.ValueKind == JsonValueKind.Number && responseId.GetInt32() == id) return json.RootElement.Clone();
         }
         Assert.Fail("MCP exited before replying to " + method);
+        return default;
     }
 
     private Process Start(string file, IEnumerable<string> args, string? packages = null, string? commandLine = null)

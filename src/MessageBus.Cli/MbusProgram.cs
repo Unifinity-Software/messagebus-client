@@ -6,6 +6,9 @@ public static class MbusProgram
     /// <summary>Runs mbus with the default host and returns its process exit code.</summary>
     public static async Task<int> RunAsync(string[] args)
     {
+        using var runtime = Update.DotnetMcpLauncher.LeaseCurrentRuntime();
+        if (args is [Update.DotnetMcpLauncher.Command, var tools, "mcp"])
+            return await Update.DotnetMcpLauncher.RunAsync(tools);
         var imageManaged = Hosting.CliHost.IsRunnerImage;
         if (!imageManaged && OperatingSystem.IsWindows() && args is [var serviceCommand]
             && serviceCommand is Runner.Service.WindowsRunnerService.HostCommand or Runner.Service.WindowsRunnerService.WorkerCommand or Runner.Service.WindowsRunnerService.ApplyCommand)

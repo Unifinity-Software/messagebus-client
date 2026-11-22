@@ -25,9 +25,12 @@ internal static class AgentConnector
     public static IReadOnlyList<PlannedChange> Plan(CliHost host, AgentKind agent)
     {
         var locations = new AgentLocations(host);
-        var command = host.MbusCommand;
+        var launcher = Update.DotnetMcpLauncher.ForConnection(host);
+        var command = launcher?.Launch ?? host.MbusCommand;
         var skill = host.Skills.GetFiles();
         var changes = new List<PlannedChange>();
+        if (launcher is not null)
+            changes.Add(new(agent, launcher.Directory, "install the mbus MCP launcher so updates can run during a session", launcher.Install));
         switch (agent)
         {
             case AgentKind.ClaudeCode:
