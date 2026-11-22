@@ -42,15 +42,8 @@ RUN rm -f skills/global.json \
       -p:PublishSingleFile=true -p:DebugType=none -p:MbusImageManaged=true "$@" -o /out
 
 # ── runtime: Node (the agent CLIs are npm packages) plus mbus ─────────────────
-FROM node:${NODE_VERSION}-trixie-slim
+FROM node:${NODE_VERSION}-trixie-slim AS protected-runtime
 ARG TARGETARCH
-
-# Keep the release harness versions exact. Custom builds can override them.
-ARG CLAUDE_CODE_VERSION=2.1.330
-ARG CODEX_VERSION=0.171.0
-ARG OPENCODE_VERSION=1.19.6
-ARG COPILOT_VERSION=1.0.114
-ARG NPM_VERSION=12.2.3
 
 # git and ssh for the code the agents work on, ICU for .NET, tini to pass signals to mbus.
 RUN apt-get update \
@@ -64,6 +57,17 @@ RUN apt-get update \
 COPY docker/runner/install-gvisor.mjs /tmp/mbus-install-gvisor.mjs
 RUN node /tmp/mbus-install-gvisor.mjs "${TARGETARCH:-amd64}" && rm /tmp/mbus-install-gvisor.mjs
 COPY docker/runner/gvisor-LICENSE /usr/local/lib/mbus/gvisor-LICENSE
+COPY docker/runner/aci-sandbox.mjs /usr/local/lib/mbus/aci-sandbox.mjs
+COPY docker/runner/aci-codex-probe.mjs /usr/local/lib/mbus/aci-codex-probe.mjs
+
+FROM protected-runtime
+
+# Keep the release harness versions exact. Custom builds can override them.
+ARG CLAUDE_CODE_VERSION=2.1.330
+ARG CODEX_VERSION=0.171.0
+ARG OPENCODE_VERSION=1.19.6
+ARG COPILOT_VERSION=1.0.114
+ARG NPM_VERSION=12.2.3
 
 # Allow the two install scripts that fetch each CLI's native binary.
 RUN npm install -g --no-fund --no-audit --ignore-scripts "npm@${NPM_VERSION}" \
@@ -77,8 +81,6 @@ RUN npm install -g --no-fund --no-audit --ignore-scripts "npm@${NPM_VERSION}" \
 COPY --from=build /out/mbus /usr/local/bin/mbus
 COPY docker/runner/entrypoint.sh /usr/local/bin/mbus-entrypoint
 COPY docker/runner/aci-bootstrap.mjs /usr/local/lib/mbus/aci-bootstrap.mjs
-COPY docker/runner/aci-sandbox.mjs /usr/local/lib/mbus/aci-sandbox.mjs
-COPY docker/runner/aci-codex-probe.mjs /usr/local/lib/mbus/aci-codex-probe.mjs
 # Strip CRs in case the script was checked out with Windows line endings.
 RUN sed -i 's/\r$//' /usr/local/bin/mbus-entrypoint && chmod 755 /usr/local/bin/mbus-entrypoint /usr/local/bin/mbus
 

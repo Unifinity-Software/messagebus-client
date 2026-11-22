@@ -322,6 +322,10 @@ internal sealed class AciSandbox
         const [key, other, pidNs, netNs, markerPid, outside, proxy, host] = process.argv.slice(1);
         function outsideProcessIsHidden() {
           if (pidNs === 'userspace') {
+            const status = fs.readFileSync('/proc/self/status', 'utf8');
+            if (!['CapEff', 'CapPrm', 'CapInh', 'CapAmb', 'CapBnd'].every(name => new RegExp(name + ':\\s+0+\\n').test(status))) return false;
+            try { fs.renameSync(process.cwd() + '/work', process.cwd() + '/replaced-work'); return false; }
+            catch (error) { if (error.code !== 'EBUSY') return false; }
             const marker = process.env.MBUS_ACI_PROBE_MARKER;
             if (!marker) return false;
             return fs.readdirSync('/proc').filter(p => /^\d+$/.test(p)).every(p => {

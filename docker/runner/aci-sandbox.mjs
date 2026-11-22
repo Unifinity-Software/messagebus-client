@@ -97,12 +97,14 @@ function finishControlCleanup() {
     if (!journal.control) return;
     if (!/^\/tmp\/mbus-gate-[A-Za-z0-9]+$/.test(journal.control)) throw Error('Invalid owned gate directory.');
     if (fs.existsSync(journal.control)) {
+        if (journal.controlCreated !== true) throw Error('Gate ownership was not fully recorded.');
         const control = fs.realpathSync(journal.control);
         if (control !== journal.control) throw Error('Invalid owned gate directory.');
         fs.rmSync(control, { recursive: true });
     }
     if (fs.existsSync(journal.control)) throw Error('Owned gate directory remains.');
     delete journal.control;
+    delete journal.controlCreated;
     save();
 }
 const bind = (source, destination, readonly = true) => ({ source, destination, type: 'bind', options: ['rbind', readonly ? 'ro' : 'rw', 'nosuid', 'nodev'] });
@@ -142,8 +144,12 @@ if (mode === 'cleanup') {
     if (!plan.cwd.startsWith(run + '/') && plan.cwd !== run) throw Error('Invalid protected working directory.');
     fs.mkdirSync(root + '/bundle/rootfs', { recursive: true, mode: 0o700 });
     fs.mkdirSync(root + '/state', { mode: 0o700 });
-    journal.control = fs.mkdtempSync('/tmp/mbus-gate-');
-    fs.chmodSync(journal.control, 0o700);
+    // Record the exact prospective path before creating it. A crash cannot
+    // leave an undiscoverable randomly named gate directory behind.
+    journal.control = '/tmp/mbus-gate-' + id.slice(7);
+    save();
+    fs.mkdirSync(journal.control, { mode: 0o700 });
+    journal.controlCreated = true;
     save();
     const control = '/run/mbus-control';
     const spec = {

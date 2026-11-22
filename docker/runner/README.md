@@ -232,6 +232,9 @@ or additional host capabilities. Its Apache 2.0 license ships in the image.
   Custom images without the bundled runtime retain the protected empty-proc
   profile and cannot offer harnesses that need dynamic procfs. Resumed harness
   sessions aren't supported in this mode.
+  Existing ACI deployments need the new released runner image: updating only
+  the `mbus` binary inside an older image does not install the runtime and helper.
+  Keep the existing runner name and identity storage when replacing its image.
 - **Cleanup.** Private runtime journals remain outside guest mounts. Before a
   run releases capacity, the runner ends its exact owned sandbox IDs and verifies
   their recorded Gofer and Sentry process identities have exited. Uncertain
