@@ -9,6 +9,7 @@ using MessageBus.Contracts.Http;
 using MessageBus.Contracts.Json;
 using MessageBus.Contracts.Messaging;
 using MessageBus.Contracts.Mcp;
+using MessageBus.Contracts.Runner;
 using MessageBus.Contracts.Security;
 using MessageBus.Crypto;
 using MessageBus.Mcp;
@@ -228,7 +229,20 @@ public sealed class VerificationSendTests
             Assert.Empty(requests);
         }
         var directory = McpToolCatalog.ReadResult<DirectoryResult>(result);
-        Assert.Equal("developer", Assert.Single(directory.Roles).Name);
+        var role = Assert.Single(directory.Roles);
+        Assert.Equal("developer", role.Name);
+        var resources = Assert.IsType<MachineResourceView>(Assert.Single(role.Agents).Resources);
+        Assert.Equal(MachineResourceState.Elevated, resources.State);
+        Assert.Equal(4, resources.SlotsTotal);
+        Assert.Equal(2, resources.SlotsBusy);
+        Assert.Equal(7L, resources.AgeSeconds);
+        Assert.Equal(["memory-pressure"], resources.Reasons);
+        var sample = Assert.IsType<RunnerResourceSample>(resources.Sample);
+        Assert.Equal(12L, sample.Sequence);
+        Assert.Equal(ResourceSampleStatus.Partial, sample.Status);
+        Assert.Equal(23.5, sample.Cpu?.UtilizationPercent);
+        Assert.Equal(8589934592L, sample.Memory?.TotalBytes);
+        Assert.Null(sample.Memory?.AvailableBytes);
         if (supported is null)
         {
             Assert.Null(directory.Verification);
@@ -377,7 +391,33 @@ public sealed class VerificationSendTests
             else if ((string?)message["params"]!["name"] == McpToolNames.Directory)
             {
                 response["result"] = JsonNode.Parse("""
-                    {"structuredContent":{"roles":[{"name":"developer","displayName":"Developer","delivery":{}}]},"content":[]}
+                    {
+                      "structuredContent": {
+                        "roles": [{
+                          "name": "developer",
+                          "displayName": "Developer",
+                          "delivery": {},
+                          "agents": [{
+                            "agentId": "agt_fixture",
+                            "machineId": "mch_fixture",
+                            "ownerSubjectId": "microsoft:fixture",
+                            "kind": "codex",
+                            "displayName": "Fixture agent",
+                            "presence": "online",
+                            "resources": {
+                              "state": "elevated", "ageSeconds": 7, "slotsTotal": 4, "slotsBusy": 2,
+                              "reasons": ["memory-pressure"],
+                              "sample": {
+                                "schemaVersion": 1, "sequence": 12, "sampledAt": "2026-01-01T00:00:00Z",
+                                "status": "partial", "cpu": { "utilizationPercent": 23.5 },
+                                "memory": { "totalBytes": 8589934592 }
+                              }
+                            }
+                          }]
+                        }]
+                      },
+                      "content": []
+                    }
                     """);
             }
             else if (state == "handler-refusal")

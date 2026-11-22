@@ -1,5 +1,6 @@
 using MessageBus.Cli.Update;
 using MessageBus.Cli.Runner.Agents;
+using MessageBus.Cli.Runner.Resources;
 using MessageBus.Contracts.Machines;
 using MessageBus.Contracts.Messaging;
 using MessageBus.Contracts.Roles;
@@ -12,6 +13,8 @@ public sealed record RunnerExtensions
 {
     /// <summary>Gets decrypted git bundles (the original issue, the original issue).</summary>
     public IBundleSource? Bundles { get; init; }
+
+    internal ISystemResourceSampler? ResourceSampler { get; init; }
 
     internal NodeVerification? Verification { get; init; }
     internal INodeVerificationReadiness? VerificationReadiness { get; init; }
@@ -110,8 +113,14 @@ public sealed class RunnerEngine : IAsyncDisposable
     private Task _updateReports = Task.CompletedTask;
     private TaskCompletionSource<UpdateRequest> _updateReady = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly CancellationTokenSource _stopping = new();
-    private ITimer? _heartbeat;
-    private TimeSpan _heartbeatPeriod;
+    private readonly ResourceMonitor _resources;
+    private readonly ITimer _heartbeat;
+    private long _heartbeatScheduledAt;
+    private TimeSpan _heartbeatDue;
+    private string? _sessionId;
+    private long _connectionGeneration;
+    private bool _resourceConnectionAvailable = true;
+    private bool _supportsResourceSamples;
     private ITimer? _drainTimer;
     private int _beating;
     private bool _draining;
@@ -151,12 +160,11 @@ public sealed class RunnerEngine : IAsyncDisposable
         _acceptance = new WorkAcceptance(host.Policy);
         _services = new RunServices(options, host, _service, time, _log, _ext.Sandbox, _ext.Bundles, _stopping.Token, _ext.Tools, _ext.RunApprovals, _ext.SendKeptAnswer, _ext.ReturnCommits, _ext.Verification);
         Directory.CreateDirectory(options.WorkRoot);
-        // Heartbeats start now, not with the first task: an idle runner's beats keep its agents online and
-        // its free slots current on the service (a delivery can only shorten the interval).
-        lock (_gate)
-        {
-            EnsureHeartbeat(options.DefaultHeartbeat);
-        }
+        _resources = new ResourceMonitor(_ext.ResourceSampler, time,
+            ResourceRoots, _stopping.Token);
+        // Start idle lease heartbeats even when no deliveries arrive.
+        _heartbeat = _time.CreateTimer(_ => HeartbeatTick(), null, Timeout.InfiniteTimeSpan, options.DefaultHeartbeat);
+        lock (_gate) ScheduleHeartbeat(HeartbeatInterval());
     }
 
     /// <summary>Completes once an update was requested and every run has finished: time to exit and update.</summary>
@@ -172,7 +180,31 @@ public sealed class RunnerEngine : IAsyncDisposable
     }
 
     /// <summary>The runner connection's session (<c>X-Mbus-Session</c>), sent with heartbeats so the service can say whether it holds that connection.</summary>
-    public string? SessionId { get; set; }
+    public string? SessionId
+    {
+        get { lock (_gate) return _sessionId; }
+        set
+        {
+            lock (_gate)
+            {
+                if (_sessionId == value) return;
+                _sessionId = value;
+                _connectionGeneration++;
+                _supportsResourceSamples = false;
+            }
+        }
+    }
+
+    internal void SetResourceConnectionAvailable(bool available)
+    {
+        lock (_gate)
+        {
+            if (_resourceConnectionAvailable == available) return;
+            _resourceConnectionAvailable = available;
+            _connectionGeneration++;
+            _supportsResourceSamples = false;
+        }
+    }
 
     /// <summary>
     /// A heartbeat's answer said the service doesn't hold this runner's connection (the original issue); the value is when that
@@ -259,7 +291,8 @@ public sealed class RunnerEngine : IAsyncDisposable
                     ? MessageBus.Mcp.ProposalAuthority.ResumedCoordinator : MessageBus.Mcp.ProposalAuthority.Worker);
             _runs[delivery.DeliveryId] = run;
             _ext.WorkActivityChanged?.Invoke(true);
-            EnsureHeartbeat(TimeSpan.FromSeconds(Math.Max(1, delivery.HeartbeatSeconds)));
+            if (_runs.Count == 1) _resources.SetBusy(true);
+            ShortenHeartbeat();
             run.Start();
             // the original issue: a line when a task starts, as there is when it finishes.
             _log.WriteLine($"{delivery.DeliveryId}: started{(delivery.Role is { Length: > 0 } role ? $" for {role}" : "")} with {AgentKinds.DisplayName(agent.Adapter.Kind)}"
@@ -671,6 +704,7 @@ public sealed class RunnerEngine : IAsyncDisposable
             return new RunnerStatus
             {
                 Version = RunnerEnvironment.Version,
+                Resources = _resources.Latest,
                 Slots = _slots,
                 ActiveDeliveryIds = [.. _runs.Keys],
                 Draining = IsDraining || _settingUp || _ext.ToolSetup?.BlocksWork == true,
@@ -704,7 +738,8 @@ public sealed class RunnerEngine : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         await StopAsync().ConfigureAwait(false);
-        _heartbeat?.Dispose();
+        _heartbeat.Dispose();
+        _resources.Dispose();
         _drainTimer?.Dispose();
         _sessionTimer?.Dispose();
     }
@@ -799,18 +834,61 @@ public sealed class RunnerEngine : IAsyncDisposable
         return (profile, false);
     }
 
-    private void EnsureHeartbeat(TimeSpan period)
+    internal Task CurrentResourceCollection => _resources.CurrentCollection;
+
+    private (int[] Roots, bool HasUnknownRoots) ResourceRoots()
     {
-        if (_heartbeat is null)
+        lock (_gate)
         {
-            _heartbeatPeriod = period;
-            _heartbeat = _time.CreateTimer(_ => Heartbeat(), null, period, period);
+            var roots = _runs.Values.Select(run => run.ResourceRoot).ToArray();
+            return ([.. roots.Where(root => root > 0)], roots.Contains(-1));
         }
-        else if (period < _heartbeatPeriod)
+    }
+
+    // Called under _gate. Resource reporting may shorten the active lease interval.
+    private TimeSpan HeartbeatInterval()
+    {
+        var interval = _options.DefaultHeartbeat;
+        foreach (var run in _runs.Values)
         {
-            _heartbeatPeriod = period;
-            _heartbeat.Change(period, period);
+            var lease = TimeSpan.FromSeconds(Math.Max(1, run.Delivery.HeartbeatSeconds));
+            if (lease < interval) interval = lease;
         }
+        if (_supportsResourceSamples)
+        {
+            var resource = _runs.Count == 0 ? RunnerResourceProtocol.IdleInterval : RunnerResourceProtocol.BusyInterval;
+            if (resource < interval) interval = resource;
+        }
+        return interval;
+    }
+
+    private void ScheduleHeartbeat(TimeSpan due)
+    {
+        _heartbeatScheduledAt = _time.GetTimestamp();
+        _heartbeatDue = due;
+        _heartbeat.Change(due, Timeout.InfiniteTimeSpan);
+    }
+
+    private void ShortenHeartbeat()
+    {
+        var interval = HeartbeatInterval();
+        if (interval < _heartbeatDue - _time.GetElapsedTime(_heartbeatScheduledAt))
+            ScheduleHeartbeat(interval);
+    }
+
+    private void HeartbeatTick()
+    {
+        lock (_gate)
+        {
+            var remaining = _heartbeatDue - _time.GetElapsedTime(_heartbeatScheduledAt);
+            if (remaining > TimeSpan.Zero)
+            {
+                _heartbeat.Change(TimeSpan.FromMilliseconds(Math.Ceiling(remaining.TotalMilliseconds)), Timeout.InfiniteTimeSpan);
+                return;
+            }
+            ScheduleHeartbeat(HeartbeatInterval());
+        }
+        _ = Task.Run(HeartbeatAsync);
     }
 
     private string? _suspensionReference;
@@ -836,8 +914,6 @@ public sealed class RunnerEngine : IAsyncDisposable
         });
     }
 
-    private void Heartbeat() => _ = Task.Run(HeartbeatAsync);
-
     internal async Task HeartbeatAsync()
     {
         if (Interlocked.Exchange(ref _beating, 1) == 1)
@@ -847,10 +923,12 @@ public sealed class RunnerEngine : IAsyncDisposable
         try
         {
             RunnerHeartbeat beat;
+            long generation;
             lock (_gate)
             {
                 // A local acknowledgement may have cleared a persistent setup pause while idle.
                 CheckUpdateReady();
+                generation = _connectionGeneration;
                 // Sent when idle too (no deliveries, no busy slots).
                 beat = new RunnerHeartbeat
                 {
@@ -858,11 +936,20 @@ public sealed class RunnerEngine : IAsyncDisposable
                     Slots = _slots,
                     SlotsBusy = _runs.Count,
                     Draining = IsDraining || _settingUp || _ext.ToolSetup?.BlocksWork == true,
-                    SessionId = SessionId,
+                    SessionId = _sessionId,
+                    Resources = _supportsResourceSamples ? _resources.Latest : null,
                 };
             }
             var sentAt = _time.GetUtcNow();
             var ack = await _service.HeartbeatAsync(beat, CancellationToken.None).ConfigureAwait(false);
+            lock (_gate)
+            {
+                if (generation == _connectionGeneration && _resourceConnectionAvailable && !_stopping.IsCancellationRequested)
+                {
+                    _supportsResourceSamples = ack.RunnerConnected != false && ack.SupportsResourceSamples;
+                    ShortenHeartbeat();
+                }
+            }
             if (ack.Suspension?.Reference != _suspensionReference)
             {
                 await _log.WriteLineAsync(ack.Suspension is { } suspended
@@ -954,6 +1041,7 @@ public sealed class RunnerEngine : IAsyncDisposable
         lock (_gate)
         {
             _runs.Remove(run.DeliveryId);
+            if (_runs.Count == 0) _resources.SetBusy(false);
             _ext.WorkActivityChanged?.Invoke(_runs.Count > 0);
             CheckUpdateReady();
         }

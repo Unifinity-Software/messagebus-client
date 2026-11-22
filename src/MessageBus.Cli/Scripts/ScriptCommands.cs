@@ -1,4 +1,5 @@
 using System.CommandLine;
+using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using MessageBus.Attachments.Client;
@@ -465,7 +466,11 @@ internal static class ScriptCommands
                     script.Line($"{Script.Text(r, "name"),-20} {Script.Number(r, "agentsOnline")} online, {Script.Number(r, "agentsFree")} free, {Script.Number(r, "queueDepth")} waiting" +
                                 (Script.Text(r, "description") is { Length: > 0 } d ? " - " + d : ""));
                     foreach (var agent in Script.Items(r, "agents"))
+                    {
                         script.Line($"    {Script.Text(agent, "agentId")}  {Script.Text(agent, "kind")} on {Script.Text(agent, "machineName") ?? Script.Text(agent, "machineId")}");
+                        if (Script.Child(agent, "resources") is { } resources && FormatResources(resources) is { } text)
+                            script.Line($"      {text}");
+                    }
                 }
             });
         }, ct));
@@ -489,6 +494,35 @@ internal static class ScriptCommands
         RoleProposalCommands.AddTo(command, host, options);
         return command;
     }
+
+    private static string? FormatResources(JsonElement resources)
+    {
+        const double bytesPerGiB = 1024d * 1024 * 1024;
+        var parts = new List<string>();
+        if (Script.Text(resources, "state") is { } state) parts.Add(state);
+        if (Script.Child(resources, "sample") is { } sample)
+        {
+            if (Script.Child(sample, "cpu") is { } cpu && ResourceNumber(cpu, "utilizationPercent") is { } utilization)
+                parts.Add(FormattableString.Invariant($"CPU {utilization:0.#}%"));
+            if (Script.Child(sample, "memory") is { } memory)
+            {
+                var available = ResourceNumber(memory, "availableBytes") / bytesPerGiB;
+                var total = ResourceNumber(memory, "totalBytes") / bytesPerGiB;
+                if (available.HasValue || total.HasValue)
+                    parts.Add($"memory {available?.ToString("0.0", CultureInfo.InvariantCulture) ?? "?"}/{total?.ToString("0.0", CultureInfo.InvariantCulture) ?? "?"} GiB available/total");
+            }
+        }
+        if (ResourceNumber(resources, "ageSeconds") is { } age) parts.Add(FormattableString.Invariant($"sample {age:0}s old"));
+        var busy = ResourceNumber(resources, "slotsBusy");
+        var configured = ResourceNumber(resources, "slotsTotal");
+        if (busy.HasValue || configured.HasValue)
+            parts.Add($"slots {busy?.ToString(CultureInfo.InvariantCulture) ?? "?"}/{configured?.ToString(CultureInfo.InvariantCulture) ?? "?"} busy/configured");
+        return parts.Count == 0 ? null : string.Join(", ", parts);
+    }
+
+    private static double? ResourceNumber(JsonElement parent, string name) =>
+        parent.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.Number && value.TryGetDouble(out var number)
+            ? number : null;
 
     // ---- attach ----
 

@@ -145,9 +145,25 @@ internal static class ContractSamples
         Capabilities = ["os:macos", "tool:dotnet"], Agents = [Detected], Isolation = Isolation, LastUpdate = UpdateReportSample, Updates = UpdateAbilitySample, ScannedAt = T,
     };
     public static readonly AcceptsWorkFrom Accepts = new() { Mode = AcceptsWorkFromMode.OwnProjectsAndGroups, GroupIds = ["grp-1"] };
+    private static readonly RunnerCpuSample ResourceCpu = new()
+        { UtilizationPercent = 37.5, EffectiveCpus = 2.5, HostLogicalCpus = 8, LimitSource = ResourceLimitSource.CgroupV2 };
+    private static readonly RunnerMemorySample ResourceMemory = new()
+        { TotalBytes = 4L << 30, AvailableBytes = 1L << 30, HostTotalBytes = 8L << 30, LimitSource = ResourceLimitSource.CgroupV2 };
+    private static readonly RunnerProcessTreeSample ResourceTree = new()
+        { CpuPercent = 10, ResidentBytes = 32L << 20, ProcessCount = 2, Reason = "process-exited" };
+    private static readonly RunnerResourceSample ResourceSample = new()
+    {
+        Sequence = 3, SampledAt = T, WindowMs = 15000, Status = ResourceSampleStatus.Partial, Reason = "process-exited",
+        Cpu = ResourceCpu, Memory = ResourceMemory, Runner = ResourceTree, Tasks = ResourceTree,
+    };
+    private static readonly MachineResourceView Resources = new()
+    {
+        Sample = ResourceSample, ReceivedAt = T.AddSeconds(1), AgeSeconds = 2, State = MachineResourceState.Elevated,
+        Reasons = ["memory-pressure"], SlotsTotal = 2, SlotsBusy = 1,
+    };
     public static readonly MachineInfo Machine = new()
     {
-        MachineId = Mch, WorkspaceId = Ws, OwnerSubjectId = Subject, Kind = MachineKind.Personal, Name = "mac-mini", Location = "Mac mini",
+        Resources = Resources, MachineId = Mch, WorkspaceId = Ws, OwnerSubjectId = Subject, Kind = MachineKind.Personal, Name = "mac-mini", Location = "Mac mini",
         Os = MachineOs.MacOs, Architecture = CpuArchitecture.Arm64, Target = DeploymentTarget.Docker, CliVersion = "0.1.0", Slots = 2, SlotsBusy = 1,
         Deployment = Deployment, SlotSetting = 2, SlotCeiling = 4, SlotMachineMax = 10, CpuCount = 10, MemoryBytes = 16L << 30,
         Capabilities = ["os:macos"], CustomCapabilities = ["tier:gpu"], Agents = [Detected], Isolation = Isolation, LastUpdate = UpdateReportSample, Updates = UpdateAbilitySample, Update = UpdateStatusSample, AcceptsWorkFrom = Accepts, RepoCredentialMode = RepoCredentialMode.KeychainToken,
@@ -163,7 +179,7 @@ internal static class ContractSamples
         AgentId = Agt, MachineId = Mch, OwnerSubjectId = Subject, Kind = AgentKind.ClaudeCode, Version = "2.1.0", Vendor = "anthropic",
         DisplayName = "Mac mini · Claude Code", Location = "Mac mini", Roles = ["developer"], UnreadableRoles = ["developer"], Presence = AgentPresence.Online,
         SlotsFree = 1, LastSeenAt = T, Capabilities = ["agent:claude-code", "os:macos", "tool:dotnet"], NotReady = "git doesn't work.",
-        Capacity = CapacitySample, DefaultModel = "claude-opus-5-5", Models = ["claude-opus-5-5", "claude-fable-5-2"], ModelsPartial = true,
+        Resources = Resources, Capacity = CapacitySample, DefaultModel = "claude-opus-5-5", Models = ["claude-opus-5-5", "claude-fable-5-2"], ModelsPartial = true,
     };
 
     public static readonly ProjectTotals Totals = new()
@@ -443,16 +459,17 @@ internal static class ContractSamples
         UpdateWaitingTaskSample,
         new RunnerUpdateBlockedBy { Count = 3 },
         new RunnerUpdateProgress { BlockedBy = new RunnerUpdateBlockedBy { Count = 3 }, Stage = RunnerUpdateStage.Ended, Version = "0.2.0", Report = UpdateReportSample },
-        new RunnerStatus { Version = "0.1.0", Slots = 2, ActiveDeliveryIds = [Dlv], Draining = true, SlotCeiling = 4, SlotMachineMax = 10, SupportsManagedDrain = true, ManagedDrainId = "aci-operation" },
+        new RunnerStatus { Resources = ResourceSample, Version = "0.1.0", Slots = 2, ActiveDeliveryIds = [Dlv], Draining = true, SlotCeiling = 4, SlotMachineMax = 10, SupportsManagedDrain = true, ManagedDrainId = "aci-operation" },
         new SlotsRequest { Slots = 2 },
         new RunnerWorkPolicy
         {
             OwnerSubjectId = Subject, AcceptsWorkFrom = Accepts, GroupMemberSubjectIds = [Subject], DailySpendCeilingUsd = 10m,
             RepoCredentialMode = RepoCredentialMode.OwnerSession, Releases = ReleasePolicySample, WorkspaceName = "Contoso",
         },
-        new RunnerHeartbeat { ActiveDeliveryIds = [Dlv], Slots = 2, SlotsBusy = 1, Draining = true, SessionId = "3f2a9c" },
-        new HeartbeatAck { Leases = [LeaseSample], RunnerConnected = true, Suspension = SuspensionSample },
+        new RunnerHeartbeat { Resources = ResourceSample, ActiveDeliveryIds = [Dlv], Slots = 2, SlotsBusy = 1, Draining = true, SessionId = "3f2a9c" },
+        new HeartbeatAck { SupportsResourceSamples = true, Leases = [LeaseSample], RunnerConnected = true, Suspension = SuspensionSample },
         SuspensionSample,
+        ResourceSample, ResourceCpu, ResourceMemory, ResourceTree, Resources,
         LeaseSample,
         new RunnerProgress { DeliveryId = Dlv, Progress = Progress },
         new RunnerSettle { Verification = Verification, VerificationAttempt = 2, VerificationDigest = VerificationDefinition.Digest,

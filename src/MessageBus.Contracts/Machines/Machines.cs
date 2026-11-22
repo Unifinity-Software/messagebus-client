@@ -306,6 +306,9 @@ public sealed record RunIsolationReport
 /// <summary>An enrolled machine as the service stores and the Runners page shows it.</summary>
 public sealed record MachineInfo
 {
+    /// <summary>Resource placement view for this machine, when available.</summary>
+    public Runner.MachineResourceView? Resources { get; init; }
+
     /// <summary>Machine id (<c>mch_…</c>).</summary>
     public required string MachineId { get; init; }
 
@@ -468,6 +471,9 @@ public static class SlotAdvice
 /// <summary>One coding agent on one machine, in the agent registry. Agents hold roles.</summary>
 public sealed record AgentInfo
 {
+    /// <summary>Resource placement view for the machine that hosts this agent, when available.</summary>
+    public Runner.MachineResourceView? Resources { get; init; }
+
     /// <summary>Roles whose messages this agent cannot open until a key check succeeds.</summary>
     public IReadOnlyList<string> UnreadableRoles { get; set; } = [];
 
