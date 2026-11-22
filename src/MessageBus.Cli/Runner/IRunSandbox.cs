@@ -21,6 +21,8 @@ public interface IRunSandbox
 
     internal bool UsesPrivateHome => false;
 
+    internal string? QuarantineProblem => null;
+
     // True only for this fresh launch when the external sandbox physically enforces
     // the supplied file policy. This must never be inferred from machine-wide readiness.
     internal bool EnforcesAgentFilePolicy(RunWorkspace workspace, PermissionProfile profile) => false;

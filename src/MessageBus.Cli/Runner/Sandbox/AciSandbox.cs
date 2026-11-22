@@ -25,15 +25,21 @@ internal sealed class AciSandbox
     private readonly AciEgress _egress;
     private bool _mountProc = true;
     private AciUserspaceSandbox? _userspace;
+    private bool _userspaceForCodex;
 
     private AciSandbox(string identityHost) => _egress = new(identityHost);
 
     internal string? AgentProblem(AgentKind kind) => _userspace?.Problem ?? (_agents.TryGetValue(AgentKinds.Command(kind), out var problem)
         ? problem : "The harness has not passed the protected ACI launch check. Restart the runner after installing it.");
 
-    internal bool EnforcesFilePolicy(string run) => _userspace?.EnforcesFilePolicy(run) == true;
+    internal bool EnforcesFilePolicy(string run) => _userspaceForCodex && _userspace?.EnforcesFilePolicy(run) == true;
 
-    internal void Prepare(string run) => _userspace?.Prepare(run);
+    internal string? QuarantineProblem => _userspace?.Problem;
+
+    internal void Prepare(string run, AgentKind? kind)
+    {
+        if (_userspaceForCodex && kind == AgentKind.Codex) _userspace?.Prepare(run);
+    }
 
     internal Task EndAsync(string run) => _userspace?.EndAsync(run) ?? Task.CompletedTask;
 
@@ -96,7 +102,7 @@ internal sealed class AciSandbox
     internal RunNetwork StartNetwork(string directory, HostAllowList allow, TextWriter log, string runName) =>
         RunNetwork.StartAci(Path.Combine(directory, SocketName), allow, log, runName, _egress.ConnectAsync);
 
-    internal ProcessLaunch Wrap(ProcessLaunch launch, string run, string sockets, bool canEditFiles = true)
+    internal ProcessLaunch Wrap(ProcessLaunch launch, string run, string sockets, bool canEditFiles = true, bool useUserspace = false)
     {
         var home = Path.Combine(run, "home");
         var environment = new Dictionary<string, string?>(launch.Environment, StringComparer.Ordinal)
@@ -110,7 +116,7 @@ internal sealed class AciSandbox
             ["XDG_STATE_HOME"] = null,
             ["XDG_RUNTIME_DIR"] = null,
         };
-        if (_userspace is not null)
+        if (useUserspace && _userspaceForCodex && _userspace is not null)
             return _userspace.Wrap(launch with { Environment = environment }, run, sockets, Path.Combine(run, "work"), canEditFiles);
         return launch with
         {
@@ -194,49 +200,62 @@ internal sealed class AciSandbox
 
             var environment = RunEnvironmentScrubber.Build(Environment.GetEnvironmentVariables(), [],
                 new Dictionary<string, string?> { ["PATH"] = "/usr/local/bin:/usr/bin:/bin", ["LC_ALL"] = "C" });
-            ProbeOutcome Run(string file, params string[] args)
+            // Recovery precedes readiness even if this host now supports native
+            // procfs. Backend selection remains a separate per-Codex fallback.
+            if (File.Exists("/usr/local/lib/mbus/gvisor/runsc"))
+            {
+                _userspace = AciUserspaceSandbox.TryCreate(options, out var runtimeProblem);
+                if (_userspace is null) return runtimeProblem;
+            }
+            ProbeOutcome RunUsing(string file, string[] args, bool userspace = false)
             {
                 var launch = new ProcessLaunch { FileName = file, Arguments = args, WorkingDirectory = run, Environment = environment };
-                return runner.Run(new ProbeCommand("protected ACI launch", Wrap(launch, run, sockets), launch, Sandboxed: true));
+                return runner.Run(new ProbeCommand("protected ACI launch", Wrap(launch, run, sockets, useUserspace: userspace), launch, Sandboxed: true));
             }
+            ProbeOutcome Run(string file, params string[] args) => RunUsing(file, args);
+            ProbeOutcome RunAgent(SandboxProbeAgent agent, params string[] args) => RunUsing(agent.Executable, args,
+                userspace: agent.Name == "codex" && _userspaceForCodex);
 
-            ProbeOutcome Check(string pid, string net, string markerPid) =>
-                Run(Node, "-e", Fixture, "--", machineKey, otherFile, pid, net, markerPid,
-                    port.ToString(CultureInfo.InvariantCulture), ProxyPort.ToString(CultureInfo.InvariantCulture), FixtureHost);
+            ProbeOutcome Check(string pid, string net, string markerPid, bool userspace = false) =>
+                RunUsing(Node, ["-e", Fixture, "--", machineKey, otherFile, pid, net, markerPid,
+                    port.ToString(CultureInfo.InvariantCulture), ProxyPort.ToString(CultureInfo.InvariantCulture), FixtureHost], userspace);
             var check = Check(new FileInfo("/proc/self/ns/pid").LinkTarget!, new FileInfo("/proc/self/ns/net").LinkTarget!, "");
             if (check.ExitCode == 1 && check.Output.TrimEnd().Equals(ProcMountDenied, StringComparison.Ordinal))
             {
                 // Some ACI hosts allow namespaces but deny a fresh procfs mount.
                 // Keep all namespaces and give the task a private, empty /proc.
                 _mountProc = false;
-                if (File.Exists("/usr/local/lib/mbus/gvisor/runsc"))
-                {
-                    _userspace = AciUserspaceSandbox.TryCreate(options, out var runtimeProblem);
-                    if (_userspace is null) return runtimeProblem;
-                    check = CheckWithOutsideProcess(marker =>
-                    {
-                        environment["MBUS_ACI_PROBE_MARKER"] = marker;
-                        return Check("userspace", "", "");
-                    }, namedMarker: true);
-                }
-                else check = CheckWithOutsideProcess(pid => Check("", "", pid));
+                _userspaceForCodex = _userspace is not null;
+                check = CheckWithOutsideProcess(pid => Check("", "", pid));
             }
             if (check.ExitCode != 0 || !check.Output.Contains("aci-fixture-ok", StringComparison.Ordinal))
                 return "The protected ACI file, process and network launch check failed. Task execution requires non-root namespace support.";
 
             foreach (var agent in options.ProbeAgents)
             {
-                string? reason = Run(agent.Executable, "--version").ExitCode == 0 ? null : "The harness did not start inside the protected ACI sandbox.";
-                if (reason is null && !_mountProc && Run(agent.Executable, "--help").ExitCode != 0)
+                string? reason = null;
+                if (_userspaceForCodex && agent.Name == "codex")
+                {
+                    var userspaceCheck = CheckWithOutsideProcess(marker =>
+                    {
+                        environment["MBUS_ACI_PROBE_MARKER"] = marker;
+                        return Check("userspace", "", "", userspace: true);
+                    }, namedMarker: true);
+                    if (userspaceCheck.ExitCode != 0 || !userspaceCheck.Output.Contains("aci-fixture-ok", StringComparison.Ordinal))
+                        reason = "Codex did not pass the protected private-procfs boundary check.";
+                }
+                if (reason is null && RunAgent(agent, "--version").ExitCode != 0)
+                    reason = "The harness did not start inside the protected ACI sandbox.";
+                if (reason is null && !_mountProc && RunAgent(agent, "--help").ExitCode != 0)
                     reason = "The harness did not start with an empty /proc inside the protected ACI sandbox.";
-                if (reason is null && _userspace is not null && agent.Name == "codex")
+                if (reason is null && _userspaceForCodex && agent.Name == "codex")
                 {
                     File.WriteAllText(Path.Combine(run, "work", "aci-probe-source"), "original");
                     foreach (var canEdit in new[] { true, false })
                     {
                         var launch = new ProcessLaunch { FileName = Node, Arguments = ["/usr/local/lib/mbus/aci-codex-probe.mjs", agent.Executable, run, canEdit ? "write" : "read"],
                             WorkingDirectory = Path.Combine(run, "work"), Environment = environment };
-                        var outcome = runner.Run(new ProbeCommand("protected Codex command", Wrap(launch, run, sockets, canEdit), launch, Sandboxed: true));
+                        var outcome = runner.Run(new ProbeCommand("protected Codex command", Wrap(launch, run, sockets, canEdit, useUserspace: true), launch, Sandboxed: true));
                         if (outcome.ExitCode != 0 || !outcome.Output.Contains("aci-codex-ok", StringComparison.Ordinal))
                             reason = "Codex did not complete the protected offline command check for both file profiles.";
                     }

@@ -11,6 +11,7 @@ internal sealed class AciUserspaceSandbox
     private const string Helper = "/usr/local/lib/mbus/aci-sandbox.mjs";
     private const string Runtime = "/usr/local/lib/mbus/gvisor/runsc";
     private const string Node = "/usr/local/bin/node";
+    private const string QuarantineMessage = "Protected ACI cleanup is unverified. This runner is quarantined until its owned runtime journal is recovered.";
     private readonly string _root;
     private readonly FileStream _ownerLock;
     private readonly ConcurrentDictionary<string, Run> _runs = new(StringComparer.Ordinal);
@@ -31,6 +32,19 @@ internal sealed class AciUserspaceSandbox
     }
 
     internal string? Problem => Volatile.Read(ref _problem);
+
+    internal static string? PersistedQuarantine(RunIsolationOptions options)
+    {
+        var settings = options.SettingsDirectory ?? Path.Combine(options.HomeDirectory, ".mbus");
+        var root = Path.Combine(settings, "aci-runtime");
+        try
+        {
+            return File.Exists(Path.Combine(root, "quarantined"))
+                || Directory.Exists(root) && Directory.EnumerateDirectories(root, "launch-*").Any()
+                ? QuarantineMessage : null;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return QuarantineMessage; }
+    }
 
     internal static AciUserspaceSandbox? TryCreate(RunIsolationOptions options, out string problem)
     {
@@ -209,7 +223,7 @@ internal sealed class AciUserspaceSandbox
 
     private void Quarantine()
     {
-        Volatile.Write(ref _problem, "Protected ACI cleanup is unverified. This runner is quarantined until its owned runtime journal is recovered.");
+        Volatile.Write(ref _problem, QuarantineMessage);
         File.WriteAllText(Path.Combine(_root, "quarantined"), "cleanup-unverified");
     }
 }

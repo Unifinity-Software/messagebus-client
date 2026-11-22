@@ -164,6 +164,7 @@ public sealed class RunIsolation : IRunSandbox
     private readonly LinuxSandbox? _linux;
     private readonly AciSandbox? _aci;
     private readonly string? _aciProblem;
+    private readonly string? _aciQuarantineProblem;
     private readonly GitIdentity _identity;
     private readonly ConcurrentDictionary<string, RunState> _runs = new(StringComparer.Ordinal);
     private int _jobWarned;
@@ -177,6 +178,7 @@ public sealed class RunIsolation : IRunSandbox
         _linux = os.Linux;
         _aci = aci;
         _aciProblem = aciProblem;
+        _aciQuarantineProblem = options.RequireAciSandbox && aci is null ? AciUserspaceSandbox.PersistedQuarantine(options) : null;
         _identity = identity;
         Level = aci is not null || os.Mac is not null || os.Linux is not null ? IsolationLevel.OsSandbox : IsolationLevel.Basic;
         SandboxName = os.Name;
@@ -251,8 +253,10 @@ public sealed class RunIsolation : IRunSandbox
 
     bool IRunSandbox.UsesPrivateHome => _options.RequireAciSandbox;
 
+    string? IRunSandbox.QuarantineProblem => _aci?.QuarantineProblem ?? _aciQuarantineProblem;
+
     bool IRunSandbox.EnforcesAgentFilePolicy(RunWorkspace workspace, PermissionProfile profile) =>
-        workspace.SessionFolder is null && _aci?.EnforcesFilePolicy(workspace.Root) == true;
+        workspace.SessionFolder is null && workspace.AgentKind == AgentKind.Codex && _aci?.EnforcesFilePolicy(workspace.Root) == true;
 
     string? IRunSandbox.AgentRefusal(AgentKind kind) => _aciProblem ?? _aci?.AgentProblem(kind);
 
@@ -478,7 +482,7 @@ public sealed class RunIsolation : IRunSandbox
         {
             if (network is not null) network.LocalModelEndpoint = workspace.LocalModelEndpoint;
             _runs[workspace.Root] = NewState(workspace, repository, credential, profile.CanPush, network, telemetry, ownerGit);
-            _aci?.Prepare(workspace.Root);
+            _aci?.Prepare(workspace.Root, workspace.AgentKind);
         }
         catch
         {
@@ -499,7 +503,7 @@ public sealed class RunIsolation : IRunSandbox
         var wrapped = launch with { Environment = environment };
         if (_aci is not null && workspace.PrivateSocketDirectory is { } sockets)
         {
-            return _aci.Wrap(wrapped, workspace.Root, sockets, profile.CanEditFiles);
+            return _aci.Wrap(wrapped, workspace.Root, sockets, profile.CanEditFiles, useUserspace: workspace.AgentKind == AgentKind.Codex);
         }
         if (_options.RequireAciSandbox) throw new IOException("The protected ACI task has no network socket.");
         if (_mac is not null && (_mac.NestingAllowed || !MacSandbox.StartsItsOwnSandbox(launch)))

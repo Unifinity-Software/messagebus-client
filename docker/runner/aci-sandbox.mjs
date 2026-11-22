@@ -88,7 +88,10 @@ async function cleanup() {
     const listed = command(['list', '--format=json']);
     let empty = false;
     try { const all = JSON.parse(listed.stdout); empty = listed.status === 0 && (all === null || (Array.isArray(all) && all.length === 0)); } catch { }
-    journal.safe = deleted.status === 0 && empty && !active();
+    // A crash can happen after delete removed the owned record but before safe
+    // was persisted. Complete prior identities + their exit + an empty private
+    // runtime root make that retry safe; empty list alone is never sufficient.
+    journal.safe = empty && !active() && (deleted.status === 0 || !fs.existsSync(stateFile));
     save();
     if (journal.safe) finishControlCleanup();
     return journal.safe;

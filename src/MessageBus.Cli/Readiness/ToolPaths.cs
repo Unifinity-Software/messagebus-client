@@ -127,6 +127,8 @@ public sealed class ToolPathSandbox(IRunSandbox inner, IReadOnlyDictionary<strin
 
     bool IRunSandbox.UsesPrivateHome => inner.UsesPrivateHome;
 
+    string? IRunSandbox.QuarantineProblem => inner.QuarantineProblem;
+
     bool IRunSandbox.EnforcesAgentFilePolicy(RunWorkspace workspace, Contracts.Roles.PermissionProfile profile) =>
         inner.EnforcesAgentFilePolicy(workspace, profile);
 

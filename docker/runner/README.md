@@ -207,15 +207,16 @@ work. If the container denies the required namespace operations, the runner
 stays connected and reports its harnesses as unavailable. It won't run tasks
 with basic isolation. Confirm that the target deployment passes the check
 before assigning roles. When the kernel denies a fresh procfs mount, the official
-amd64 image uses its checksum-pinned gVisor userspace kernel (release-20261116.0,
+amd64 image uses its checksum-pinned gVisor userspace kernel for Codex deliveries (release-20261116.0,
 systrap platform). This provides dynamic, private `/proc` without mounting the
-enclosing container's procfs into a task. Checkout, setup, agents and their tools
-use the same protected launcher. The runtime needs no KVM, privileged container
+enclosing container's procfs into a task. Codex checkout, setup, agent and tools
+use this protected launcher. Other agents keep the existing protected native launcher.
+The runtime needs no KVM, privileged container
 or additional host capabilities. Its Apache 2.0 license ships in the image.
 
 - **Files and processes.** A task gets its own home, worktree, temporary
   directories and PID namespace. The runner's settings, machine key and other
-  worktrees aren't mounted. The image's toolchain is read-only. Read-only roles
+  worktrees aren't mounted. The image's toolchain is read-only. Codex read-only roles
   get a read-only worktree mount, including its Git metadata. Only the runner's
   initial checkout has a separate, trusted write phase.
 - **Network.** A task has a separate network namespace. Its proxy allows

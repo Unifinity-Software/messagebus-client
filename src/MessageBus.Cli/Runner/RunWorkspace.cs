@@ -60,6 +60,9 @@ public sealed partial class RunWorkspace : IDisposable
 
     internal bool SandboxCleanupIncomplete { get; set; }
 
+    // Chosen from the trusted adapter, before checkout, never from task content.
+    internal Contracts.Machines.AgentKind? AgentKind { get; set; }
+
     private RunWorkspace(string root, string? sessionFolder = null)
     {
         Root = Path.GetFullPath(root);

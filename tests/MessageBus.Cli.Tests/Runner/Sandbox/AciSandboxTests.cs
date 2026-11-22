@@ -1,5 +1,6 @@
 using System.Net;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using MessageBus.Cli.Runner;
 using MessageBus.Cli.Runner.Sandbox;
 using MessageBus.Contracts.Machines;
@@ -27,6 +28,20 @@ public sealed class AciSandboxTests
         {
             folder.Delete(recursive: true);
         }
+    }
+
+    [Fact]
+    public void An_unrecovered_owned_journal_keeps_quarantine_visible_when_startup_is_refused()
+    {
+        var folder = Directory.CreateTempSubdirectory("mbus-aci-quarantine-");
+        try
+        {
+            var root = Directory.CreateDirectory(Path.Combine(folder.FullName, ".mbus", "aci-runtime")).FullName;
+            Directory.CreateDirectory(Path.Combine(root, "launch-" + Guid.NewGuid().ToString("N")));
+            IRunSandbox sandbox = RunIsolation.Create(Options(folder.FullName) with { Requested = IsolationLevel.Off }, TextWriter.Null);
+            Assert.Contains("quarantined", sandbox.QuarantineProblem);
+        }
+        finally { folder.Delete(recursive: true); }
     }
 
     [Theory]
@@ -67,9 +82,19 @@ public sealed class AciSandboxTests
                 Assert.True(sandbox!.AgentProblem(AgentKind.Codex) is null, sandbox.AgentProblem(AgentKind.Codex) + "\n" + probe.Failures);
             sockets = AciSandbox.CreateSocketDirectory();
             run = Directory.CreateDirectory(Path.Combine(options.WorkRoot, "task")).FullName;
-            var launch = sandbox!.Wrap(new ProcessLaunch { FileName = "/bin/true", WorkingDirectory = run }, run, sockets);
+            var launch = sandbox!.Wrap(new ProcessLaunch { FileName = "/bin/true", WorkingDirectory = run }, run, sockets,
+                useUserspace: kernelDeniesProcMount);
             var result = new ProcessProbeRunner().Run(new("protected command", launch, launch, Sandboxed: true));
             Assert.True(result.ExitCode == 0, result.Output);
+            if (kernelDeniesProcMount)
+            {
+                // Other agents keep the existing empty-proc protected launcher,
+                // even when the same runner can offer userspace Codex launches.
+                var native = sandbox.Wrap(new ProcessLaunch { FileName = "/usr/local/bin/node", WorkingDirectory = run,
+                    Arguments = ["-e", "process.exit(require('node:fs').readdirSync('/proc').length===0?0:1)"] }, run, sockets);
+                var nativeResult = new ProcessProbeRunner().Run(new("native agent profile", native, native, Sandboxed: true));
+                Assert.True(nativeResult.ExitCode == 0, nativeResult.Output);
+            }
         }
         finally
         {
@@ -84,6 +109,7 @@ public sealed class AciSandboxTests
     {
         Assert.SkipUnless(Environment.GetEnvironmentVariable("MBUS_TEST_ACI_SANDBOX") == "1"
             && File.Exists("/usr/local/lib/mbus/gvisor/runsc"), "Requires the protected amd64 runner image.");
+        if (!OperatingSystem.IsLinux()) throw new PlatformNotSupportedException();
         var folder = Directory.CreateTempSubdirectory("mbus-aci-lifecycle-");
         var roots = new List<string>();
         var sockets = AciSandbox.CreateSocketDirectory();
@@ -101,7 +127,7 @@ public sealed class AciSandboxTests
                 return run;
             }
             var prepared = Run("prepared");
-            var neverStarted = sandbox!.Wrap(new ProcessLaunch { FileName = "/bin/true", WorkingDirectory = prepared }, prepared, sockets);
+            var neverStarted = sandbox!.Wrap(new ProcessLaunch { FileName = "/bin/true", WorkingDirectory = prepared }, prepared, sockets, useUserspace: true);
             await sandbox.EndAsync(prepared);
             // A delayed start cannot race recovery: cleanup claimed the prepared marker.
             using (var late = AgentProcess.Start(neverStarted)) Assert.NotEqual(0, await late.WaitForExitAsync());
@@ -112,7 +138,7 @@ public sealed class AciSandboxTests
             using var process = AgentProcess.Start(sandbox.Wrap(new ProcessLaunch
             {
                 FileName = "/usr/local/bin/node", Arguments = ["-e", "console.log('holding');setInterval(()=>{},1000)"], WorkingDirectory = active,
-            }, active, sockets), line => { if (line == "holding") ready.TrySetResult(); });
+            }, active, sockets, useUserspace: true), line => { if (line == "holding") ready.TrySetResult(); });
             await ready.Task.WaitAsync(TimeSpan.FromSeconds(15), TestContext.Current.CancellationToken);
             var runtimeRoot = Path.Combine(folder.FullName, ".mbus", "aci-runtime");
             var owned = Assert.Single(Directory.GetDirectories(runtimeRoot, "launch-*"));
@@ -123,6 +149,28 @@ public sealed class AciSandboxTests
             Assert.Equal(2, peers.Length);
             process.Kill();
             await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(15), TestContext.Current.CancellationToken);
+            using (var firstCleanup = AgentProcess.Start(new ProcessLaunch
+            {
+                FileName = "/usr/local/bin/node", Arguments = ["/usr/local/lib/mbus/aci-sandbox.mjs", "cleanup", owned], WorkingDirectory = active,
+            })) Assert.Equal(0, await firstCleanup.WaitForExitAsync());
+            // Recover the other crash boundary: safe was persisted, but the
+            // already-owned gate directory had not yet been removed.
+            Directory.CreateDirectory(control, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            File.WriteAllText(Path.Combine(control, "owned-gate-fixture"), "fixture");
+            var gateRetry = JsonNode.Parse(File.ReadAllText(Path.Combine(owned, "journal.json")))!;
+            gateRetry["control"] = control;
+            gateRetry["controlCreated"] = true;
+            File.WriteAllText(Path.Combine(owned, "journal.json"), gateRetry.ToJsonString());
+            using (var retry = AgentProcess.Start(new ProcessLaunch
+            {
+                FileName = "/usr/local/bin/node", Arguments = ["/usr/local/lib/mbus/aci-sandbox.mjs", "cleanup", owned], WorkingDirectory = active,
+            })) Assert.Equal(0, await retry.WaitForExitAsync());
+            Assert.False(Directory.Exists(control));
+            // Reproduce a crash after official delete but before the successful
+            // cleanup result was persisted. The owned peers are genuinely gone.
+            var persisted = JsonNode.Parse(File.ReadAllText(Path.Combine(owned, "journal.json")))!;
+            persisted["safe"] = false;
+            File.WriteAllText(Path.Combine(owned, "journal.json"), persisted.ToJsonString());
             await sandbox.EndAsync(active);
             foreach (var peer in peers)
             {
