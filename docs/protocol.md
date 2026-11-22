@@ -7,6 +7,11 @@ that keep old and new versions working together.
 
 ## Compatibility rules
 
+`AgentKind` includes `antigravity` (`AgentKind.Antigravity`, command `agy`) for Google Antigravity CLI, reported with
+capability `agent:antigravity` and vendor `google`. To stay compatible with services deployed before `AgentKind.Antigravity`
+existed, if an inventory or enrollment request containing `antigravity` is rejected with HTTP 400 (other than
+`workspace-required`), the client retries once without the `antigravity` agent entry and `agent:antigravity` capability.
+
 For Codex, `signedIn` describes local credential configuration. The existing `agent:codex` capability permits
 dispatch before a model request has verified access. A provider refusal before model use can clear that capability
 and populate `notReady` using the existing machine-not-ready handling.

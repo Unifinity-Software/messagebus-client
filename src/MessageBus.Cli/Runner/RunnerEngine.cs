@@ -732,6 +732,7 @@ public sealed class RunnerEngine : IAsyncDisposable
         AgentKind.Copilot => new CopilotAdapter(copilotHome: EnvOr("COPILOT_HOME", Path.Combine(_host.HomeDirectory, ".copilot"))),
         AgentKind.OpenCode => OpenCodeAdapter.ForRunner(_agentVersions.GetValueOrDefault(AgentKind.OpenCode), _host.GetEnvironmentVariable, _host.HomeDirectory,
             storedEnvironment: _host.AgentEnvironment),
+        AgentKind.Antigravity => new AntigravityAdapter(),
         _ => null,
     };
 

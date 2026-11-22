@@ -43,7 +43,10 @@ internal static class JsonConfigFile
         JsonObject root;
         if (File.Exists(path))
         {
-            root = TryRead(path) ?? throw new CliException($"{path} isn't valid JSON, so mbus left it alone. Fix it and run mbus connect again.");
+            var raw = File.ReadAllText(path);
+            root = string.IsNullOrWhiteSpace(raw)
+                ? []
+                : TryRead(path) ?? throw new CliException($"{path} isn't valid JSON, so mbus left it alone. Fix it and run mbus connect again.");
         }
         else
         {

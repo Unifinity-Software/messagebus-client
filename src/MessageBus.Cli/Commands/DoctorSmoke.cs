@@ -60,7 +60,7 @@ internal static class DoctorSmoke
         var agents = Agents(scan, options, host, only);
         if (agents.Count == 0)
         {
-            console.MarkupLine("[red]not ready[/]  agents: no coding agent is installed. Fix: install Claude Code, Codex, GitHub Copilot CLI or OpenCode, then mbus connect.");
+            console.MarkupLine("[red]not ready[/]  agents: no coding agent is installed. Fix: install Claude Code, Codex, GitHub Copilot CLI, OpenCode or Antigravity CLI, then mbus connect.");
             return 1;
         }
 
@@ -155,6 +155,7 @@ internal static class DoctorSmoke
                 AgentKind.Copilot => new CopilotAdapter(copilotHome: host.GetEnvironmentVariable("COPILOT_HOME") is { Length: > 0 } h ? h : Path.Combine(host.HomeDirectory, ".copilot")),
                 AgentKind.OpenCode => OpenCodeAdapter.ForRunner(found.Version, host.GetEnvironmentVariable, host.HomeDirectory, host.CreateLocalModelHttpHandler,
                     () => Runner.Service.AgentEnvironmentStore.ReadFrom(host.ConfigDirectory)),
+                AgentKind.Antigravity => new AntigravityAdapter(),
                 _ => new ClaudeCodeAdapter(),
             };
             list.Add(new SmokeAgent(kind, adapter, executable));

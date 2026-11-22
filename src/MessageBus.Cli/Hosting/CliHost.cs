@@ -143,15 +143,23 @@ public sealed class CliHost
             Path.Combine(home, ".npm-global", "bin"),
             Path.Combine(home, ".bun", "bin"),
             Path.Combine(home, ".opencode", "bin"),
+            Path.Combine(home, ".agy", "bin"),
         };
         if (OperatingSystem.IsMacOS())
         {
             dirs.Add("/opt/homebrew/bin");
             dirs.Add("/usr/local/bin");
         }
-        else if (OperatingSystem.IsWindows() && Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData) is { Length: > 0 } appData)
+        else if (OperatingSystem.IsWindows())
         {
-            dirs.Add(Path.Combine(appData, "npm"));
+            if (Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData) is { Length: > 0 } appData)
+            {
+                dirs.Add(Path.Combine(appData, "npm"));
+            }
+            if (Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData) is { Length: > 0 } localAppData)
+            {
+                dirs.Add(Path.Combine(localAppData, "agy", "bin"));
+            }
         }
         return [.. dirs];
     }

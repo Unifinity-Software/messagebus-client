@@ -58,7 +58,32 @@ internal static partial class AgentScanner
         new(AgentKind.OpenCode, "opencode", null,
             (loc, _) => OpenCodeConfig.HasMbus(loc.OpenCodeConfig),
             (loc, _) => File.Exists(loc.OpenCodeAuth)),
+        new(AgentKind.Antigravity, "agy", "google",
+            (loc, _) => JsonConfigFile.HasEntry(loc.AntigravityMcpConfig, "mcpServers"),
+            IsAntigravitySignedIn),
     ];
+
+    private static bool IsAntigravitySignedIn(AgentLocations loc, Func<string, string?> env)
+    {
+        if (string.Equals(env("AGY_ADC_AUTH"), "true", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+        if (JsonConfigFile.TryRead(loc.AntigravityConfig)?["userSettings"] is JsonObject userSettings
+            && userSettings["enableAdc"] is JsonValue adc && adc.TryGetValue<bool>(out var adcEnabled) && adcEnabled)
+        {
+            return true;
+        }
+        if (HasAny(env, "GEMINI_API_KEY")
+            && JsonConfigFile.TryRead(loc.AntigravitySettings)?["modelProvider"] is JsonValue provider
+            && provider.TryGetValue<string>(out var providerName)
+            && string.Equals(providerName, "gemini", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+        return JsonConfigFile.TryRead(loc.AntigravityOnboarding)?["onboardingComplete"] is JsonValue onboarded
+            && onboarded.TryGetValue<bool>(out var complete) && complete;
+    }
 
     /// <summary>The command each agent kind is started with.</summary>
     public static string CommandFor(AgentKind kind) => Specs.First(s => s.Kind == kind).Command;
@@ -130,6 +155,7 @@ internal static partial class AgentScanner
         AgentKind.Codex => "codex",
         AgentKind.Copilot => "copilot",
         AgentKind.OpenCode => "opencode",
+        AgentKind.Antigravity => "antigravity",
         _ => "custom",
     };
 
@@ -140,6 +166,7 @@ internal static partial class AgentScanner
         AgentKind.Codex => "Codex",
         AgentKind.Copilot => "GitHub Copilot CLI",
         AgentKind.OpenCode => "OpenCode",
+        AgentKind.Antigravity => "Antigravity CLI",
         _ => "Custom agent",
     };
 

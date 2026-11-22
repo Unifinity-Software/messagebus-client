@@ -21,7 +21,7 @@ internal static class ConnectCommand
     {
         var agent = new Argument<string?>("agent")
         {
-            Description = "Only set up this agent: claude, codex, copilot or opencode.",
+            Description = "Only set up this agent: claude, codex, copilot, opencode or agy.",
             Arity = ArgumentArity.ZeroOrOne,
         };
         var rescan = new Option<bool>("--rescan") { Description = "Look for agents again and update the dashboard. Changes no files." };
@@ -84,7 +84,7 @@ internal static class ConnectCommand
             }
             if (targets.Count == 0)
             {
-                throw new CliException("No agent mbus can set up was found. Install Claude Code, Codex, GitHub Copilot CLI or OpenCode, then run mbus connect again.");
+                throw new CliException("No agent mbus can set up was found. Install Claude Code, Codex, GitHub Copilot CLI, OpenCode or Antigravity CLI, then run mbus connect again.");
             }
         }
 
@@ -144,6 +144,7 @@ internal static class ConnectCommand
         "codex" => AgentKind.Codex,
         "copilot" => AgentKind.Copilot,
         "opencode" => AgentKind.OpenCode,
-        _ => throw new CliException($"'{name}' isn't an agent mbus knows. Use claude, codex, copilot or opencode.", 2),
+        "agy" or "antigravity" => AgentKind.Antigravity,
+        _ => throw new CliException($"'{name}' isn't an agent mbus knows. Use claude, codex, copilot, opencode or agy.", 2),
     };
 }

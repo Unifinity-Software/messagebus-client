@@ -38,7 +38,7 @@ public static class RunEnvironmentScrubber
         "MBUS_SERVER",
     ];
 
-    private static readonly string[] Prefixes = ["LC_", "DOTNET_", "ANTHROPIC_", "CLAUDE_CODE_", "OPENAI_", "CODEX_", "OPENCODE_", "COPILOT_"];
+    private static readonly string[] Prefixes = ["LC_", "DOTNET_", "ANTHROPIC_", "CLAUDE_CODE_", "OPENAI_", "CODEX_", "OPENCODE_", "COPILOT_", "GEMINI_", "AGY_"];
 
     /// <summary>Whether a run inherits <paramref name="name"/> from the runner.</summary>
     /// <param name="name">The variable.</param>

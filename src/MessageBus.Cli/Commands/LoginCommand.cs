@@ -227,6 +227,18 @@ internal static class LoginCommand
             {
                 throw await ChooseWorkspaceAsync(session, ct);
             }
+            if (MachineInventoryCompatibility.HasAntigravity(request.Inventory)
+                && await MachineInventoryCompatibility.IsLegacyInventoryRejectionAsync(response, ct))
+            {
+                var fallback = request with { Inventory = MachineInventoryCompatibility.WithoutAntigravity(request.Inventory) };
+                using var retry = await session.SendEnrollmentAsync(() => ServerConnection.EnrollRequest(fallback), ct)
+                    ?? throw new CliException("The server didn't accept the sign-in. Run mbus login again.");
+                if (await ServerConnection.IsWorkspaceRequiredAsync(retry, ct))
+                {
+                    throw await ChooseWorkspaceAsync(session, ct);
+                }
+                return (await ServerConnection.ReadEnrollAsync(retry, ct), prepared.Binding);
+            }
             return (await ServerConnection.ReadEnrollAsync(response, ct), prepared.Binding);
         }
     }

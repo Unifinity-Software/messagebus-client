@@ -430,4 +430,75 @@ public sealed class AgentLaunchTests : IDisposable
         // Everything but the role's own instructions: the inbox call returns the rest of the message.
         Assert.True(prompt.Length - instructions.Length < 1000, $"The prompt's own text is {prompt.Length - instructions.Length} characters.");
     }
+
+    [Fact]
+    public void Antigravity_launch_maps_developer_and_readonly_profiles_to_settings_and_flags()
+    {
+        var adapter = new AntigravityAdapter();
+        var devCtx = Context(new PermissionProfile
+        {
+            Name = PermissionProfiles.Worker,
+            CanEditFiles = true,
+            CanRunCommands = true,
+            CanPush = false,
+            Network = NetworkAccess.Allowlist,
+            AllowedHosts = ["api.github.com"],
+        }) with
+        {
+            Model = "gemini-4-neon-high",
+            ResumeSessionId = "conv-123",
+            RunnerIsolationEnabled = true,
+            RunnerSandboxed = false,
+            KeepAgentTools = ["context7"],
+        };
+
+        var devLaunch = adapter.BuildLaunch(devCtx);
+        Assert.Null(devLaunch.StandardInput);
+        Assert.Contains("--output-format", devLaunch.Arguments);
+        Assert.Contains("stream-json", devLaunch.Arguments);
+        Assert.Contains("--disable-slash-commands", devLaunch.Arguments);
+        Assert.Contains("--dangerously-skip-permissions", devLaunch.Arguments);
+        Assert.Contains("--sandbox", devLaunch.Arguments);
+        Assert.Contains("--model", devLaunch.Arguments);
+        Assert.Contains("gemini-4-neon-high", devLaunch.Arguments);
+        Assert.Contains("--conversation", devLaunch.Arguments);
+        Assert.Contains("conv-123", devLaunch.Arguments);
+        Assert.Contains("-p", devLaunch.Arguments);
+
+        var settingsIdx = devLaunch.Arguments.ToList().IndexOf("--settings");
+        Assert.True(settingsIdx >= 0);
+        var settingsPath = devLaunch.Arguments[settingsIdx + 1];
+        var devSettings = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(settingsPath))!;
+        var devAllow = devSettings["permissions"]!["allow"]!.AsArray().Select(n => (string)n!).ToList();
+        var devDeny = devSettings["permissions"]!["deny"]!.AsArray().Select(n => (string)n!).ToList();
+        Assert.Contains("mcp(mbus/*)", devAllow);
+        Assert.Contains("mcp(context7/*)", devAllow);
+        Assert.Contains("command(*)", devAllow);
+        Assert.Contains("read_url(api.github.com)", devAllow);
+        Assert.Contains("command(gh pr merge)", devDeny);
+        Assert.Contains("command(git push)", devDeny);
+
+        // Read-only reviewer profile: no --dangerously-skip-permissions, write_file and network denied, allowed Bash commands mapped.
+        var reviewCtx = Context(new PermissionProfile
+        {
+            Name = PermissionProfiles.Reviewer,
+            CanEditFiles = false,
+            CanRunCommands = false,
+            CanPush = false,
+            Network = NetworkAccess.None,
+            AllowedTools = ["Bash(git log:*)", "Bash(git diff:*)"],
+        }) with { RunnerSandboxed = true };
+
+        var reviewLaunch = adapter.BuildLaunch(reviewCtx);
+        Assert.DoesNotContain("--dangerously-skip-permissions", reviewLaunch.Arguments);
+        Assert.DoesNotContain("--sandbox", reviewLaunch.Arguments);
+        var reviewSettings = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(settingsPath))!;
+        var reviewAllow = reviewSettings["permissions"]!["allow"]!.AsArray().Select(n => (string)n!).ToList();
+        var reviewDeny = reviewSettings["permissions"]!["deny"]!.AsArray().Select(n => (string)n!).ToList();
+        Assert.Contains("command(git log)", reviewAllow);
+        Assert.Contains("command(git diff)", reviewAllow);
+        Assert.Contains("write_file(*)", reviewDeny);
+        Assert.Contains("read_url(*)", reviewDeny);
+        Assert.DoesNotContain("command(*)", reviewDeny);
+    }
 }
