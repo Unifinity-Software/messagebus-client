@@ -13,6 +13,8 @@ public enum AgentKind
     [JsonStringEnumMemberName("copilot")] Copilot,
     /// <summary>OpenCode (<c>opencode run</c>).</summary>
     [JsonStringEnumMemberName("opencode")] OpenCode,
+    /// <summary>Google Antigravity CLI (<c>agy -p</c>).</summary>
+    [JsonStringEnumMemberName("antigravity")] Antigravity,
     /// <summary>Any other command configured by the machine's owner.</summary>
     [JsonStringEnumMemberName("custom")] Custom,
 }

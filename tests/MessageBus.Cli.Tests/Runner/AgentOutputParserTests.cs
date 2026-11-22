@@ -236,4 +236,38 @@ public sealed class AgentOutputParserTests
         Assert.Equal((true, "No API key found for anthropic"), (result.ReportedError, result.ErrorText));
         Assert.Null(result.Usage!.EstimatedCostUsd);
     }
+
+    [Fact]
+    public void Antigravity_stream_json_gives_tool_progress_live_usage_final_response_and_errors()
+    {
+        string[] lines =
+        [
+            """{"event":"init","conversation_id":"conv-1","init":{"cwd":"/work","permission_mode":"always-proceed"}}""",
+            """{"event":"step_update","step_update":{"conversation_id":"conv-1","step_index":0,"state":"DONE","step_type":"user_input"}}""",
+            """{"event":"step_update","step_update":{"conversation_id":"conv-1","step_index":1,"state":"ACTIVE","step_type":"tool","tool_name":"run_command","tool_info":{"name":"run_command","parameters":{"CommandLine":"dotnet test"}}}}""",
+            """{"event":"step_update","step_update":{"conversation_id":"conv-1","step_index":1,"state":"DONE","step_type":"tool","tool_name":"run_command"}}""",
+            """{"event":"step_update","step_update":{"conversation_id":"conv-1","step_index":2,"state":"ACTIVE","step_type":"agent_response","text_delta":"All 42 "}}""",
+            """{"event":"step_update","step_update":{"conversation_id":"conv-1","step_index":2,"state":"DONE","step_type":"agent_response","text_delta":"tests pass.\n","duration_seconds":2.5,"usage":{"input_tokens":2000,"output_tokens":80,"thinking_tokens":20,"cache_read_tokens":7000,"total_tokens":2080}}}""",
+        ];
+        var parser = new AntigravityOutputParser("gemini-4-neon-high");
+
+        var notes = lines.Select(parser.Observe).Where(n => n is not null).ToList();
+        Assert.Equal(["Running dotnet test", "All 42 tests pass."], notes);
+
+        var live = parser.UsageSoFar!;
+        Assert.Equal((AgentKind.Antigravity, "google", "gemini-4-neon-high"), (live.AgentKind, live.Vendor, live.Model));
+        Assert.Equal((9000L, 7000L, 80L), (live.TokensIn, live.CachedTokensIn, live.TokensOut));
+
+        parser.Observe("""{"event":"result","result":{"conversation_id":"conv-1","status":"SUCCESS","response":"All 42 tests pass.\n","duration_seconds":4.25,"num_turns":1,"usage":{"input_tokens":11000,"output_tokens":180,"thinking_tokens":50,"cache_read_tokens":7000,"total_tokens":11180}}}""");
+        var outcome = parser.Complete();
+        Assert.False(outcome.ReportedError);
+        Assert.Equal("All 42 tests pass.", outcome.FinalText);
+        Assert.Equal((18000L, 7000L, 180L), (outcome.Usage!.TokensIn, outcome.Usage.CachedTokensIn, outcome.Usage.TokensOut));
+        Assert.Equal(4.25, outcome.Usage.ActiveSeconds);
+
+        var failed = new AntigravityOutputParser("gemini-4-neon-high");
+        failed.Observe("""{"event":"result","result":{"conversation_id":"","status":"ERROR","response":"","error":"invalid model selection","duration_seconds":0,"num_turns":0,"usage":{"input_tokens":0,"output_tokens":0,"cache_read_tokens":0,"total_tokens":0}}}""");
+        var failure = failed.Complete();
+        Assert.Equal((true, "invalid model selection"), (failure.ReportedError, failure.ErrorText));
+    }
 }
