@@ -137,9 +137,10 @@ internal static class DotnetMcpLauncher
             if (DotnetToolInstall.SamePath(directory, keep) || !File.Exists(Path.Combine(directory, ReadyName))) continue;
             try
             {
-                // FileShare.Delete permits retirement while this exclusive lease prevents a new reader. Active
-                // launchers hold shared read leases, so their complete dependency trees stay untouched.
-                using var lease = new FileStream(Path.Combine(directory, LeaseName), FileMode.Open, FileAccess.ReadWrite, FileShare.Delete);
+                // Unix takes an exclusive flock only for FileShare.None and permits unlinking its open lease.
+                // Windows enforces share modes and needs FileShare.Delete to retire our own open lease file.
+                using var lease = new FileStream(Path.Combine(directory, LeaseName), FileMode.Open, FileAccess.ReadWrite,
+                    OperatingSystem.IsWindows() ? FileShare.Delete : FileShare.None);
                 Directory.Delete(directory, recursive: true);
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
