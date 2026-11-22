@@ -112,15 +112,14 @@ public static class ServerConnection
     /// <summary>Enrolls this machine (<see cref="ApiRoutes.MachineEnroll"/>).</summary>
     internal static async Task<MachineEnrollResponse> EnrollAsync(HttpClient client, Uri server, AuthenticationHeaderValue authorization, MachineEnrollRequest body, CancellationToken ct)
     {
+        if (MachineInventoryCompatibility.HasAntigravity(body.Inventory))
+        {
+            var supported = await MessageBus.Mcp.TargetCapabilities.SupportsAsync(client, MachineInventoryCompatibility.CapabilityToken, ct);
+            body = body with { Inventory = MachineInventoryCompatibility.ForServer(body.Inventory, supported) };
+        }
         var request = new HttpRequestMessage(HttpMethod.Post, Relative(ApiRoutes.MachineEnroll)) { Content = Json(body) };
         request.Headers.Authorization = authorization;
         using var response = await SendAsync(client, request, server, ct);
-        if (MachineInventoryCompatibility.HasAntigravity(body.Inventory)
-            && await MachineInventoryCompatibility.IsLegacyInventoryRejectionAsync(response, ct))
-        {
-            var fallback = body with { Inventory = MachineInventoryCompatibility.WithoutAntigravity(body.Inventory) };
-            return await EnrollAsync(client, server, authorization, fallback, ct);
-        }
         return await ReadEnrollAsync(response, ct);
     }
 
@@ -130,41 +129,23 @@ public static class ServerConnection
         Func<Task<MachineEnrollRequest>> body, CancellationToken ct, ConfigStore.ProfileSecurityTransaction? transaction = null,
         Action<PreparedServerSend>? validate = null)
     {
-        var payload = await body();
-        var (response, binding) = await SendEnrollSuppliedOnceAsync(host, store, server, credential, payload, ct, transaction, validate);
-        using (response)
-        {
-            if (MachineInventoryCompatibility.HasAntigravity(payload.Inventory)
-                && await MachineInventoryCompatibility.IsLegacyInventoryRejectionAsync(response, ct))
-            {
-                var fallback = payload with { Inventory = MachineInventoryCompatibility.WithoutAntigravity(payload.Inventory) };
-                var (retryResponse, retryBinding) = await SendEnrollSuppliedOnceAsync(host, store, server, credential, fallback, ct, transaction, validate);
-                using (retryResponse)
-                {
-                    return (await ReadEnrollAsync(retryResponse, ct), retryBinding);
-                }
-            }
-            return (await ReadEnrollAsync(response, ct), binding);
-        }
-    }
-
-    private static async Task<(HttpResponseMessage Response, ServerBindingSnapshot? Binding)> SendEnrollSuppliedOnceAsync(
-        CliHost host, ConfigStore store, Uri server, AuthenticationHeaderValue credential,
-        MachineEnrollRequest payload, CancellationToken ct, ConfigStore.ProfileSecurityTransaction? transaction,
-        Action<PreparedServerSend>? validate)
-    {
         using var gate = new ServerSendGate(host, store, server);
         var destination = new Uri(CliSettings.BaseAddress(server), Relative(ApiRoutes.MachineEnroll));
         var prepared = await gate.PrepareSendAsync(destination, ct, transaction);
         validate?.Invoke(prepared);
+        var payload = await body();
+        payload = payload with
+        {
+            Inventory = MachineInventoryCompatibility.ForServer(payload.Inventory, MachineInventoryCompatibility.SupportsAntigravity(prepared.Discovery.Info)),
+        };
         using var request = new HttpRequestMessage(HttpMethod.Post, destination);
         // No enrollment content or credential is attached until current anonymous validation succeeds.
         request.Content = Json(payload);
         using var client = CreateAnonymousClient(host, server);
-        var response = transaction is null
+        using var response = transaction is null
             ? await store.WithProfileSecurityLockAsync(tx => prepared.ConsumeEnrollmentAsync(destination, Send, ct, tx), ct)
             : await prepared.ConsumeEnrollmentAsync(destination, Send, ct, transaction);
-        return (response, prepared.Binding);
+        return (await ReadEnrollAsync(response, ct), prepared.Binding);
 
         async Task<HttpResponseMessage> Send(ServerSendAuthorization _)
         {
@@ -197,7 +178,8 @@ public static class ServerConnection
         var destination = new Uri(CliSettings.BaseAddress(server), Relative(ApiRoutes.MachineInventory));
         var prepared = await gate.PrepareSendAsync(destination, ct, transaction);
         if (prepared.Binding != binding) throw new ServerBindingException("The enrollment authority changed before proving the new key.");
-        using var request = new HttpRequestMessage(HttpMethod.Put, destination) { Content = Json(inventory with { MachineId = machineId }) };
+        var compatible = MachineInventoryCompatibility.ForServer(inventory, MachineInventoryCompatibility.SupportsAntigravity(prepared.Discovery.Info));
+        using var request = new HttpRequestMessage(HttpMethod.Put, destination) { Content = Json(compatible with { MachineId = machineId }) };
         var bytes = await request.Content.ReadAsByteArrayAsync(ct);
         using var client = CreateAnonymousClient(host, server);
         var signer = new MachineRequestSigner(key, machineId, host.Time);
@@ -223,13 +205,6 @@ public static class ServerConnection
                 request.Headers.Remove(MbusHeaders.Signature);
             }
         }, ct, transaction);
-        if (MachineInventoryCompatibility.HasAntigravity(inventory)
-            && await MachineInventoryCompatibility.IsLegacyInventoryRejectionAsync(response, ct))
-        {
-            await PutEnrollmentInventoryAsync(host, store, server, key, machineId, workspaceId,
-                MachineInventoryCompatibility.WithoutAntigravity(inventory), binding, transaction, ct);
-            return;
-        }
         await EnsureSuccessAsync(response, "prove the enrolled machine key", ct);
     }
 
@@ -241,7 +216,8 @@ public static class ServerConnection
         using var gate = new ServerSendGate(host, store, server);
         var destination = new Uri(CliSettings.BaseAddress(server), Relative(ApiRoutes.MachineInventory));
         var prepared = await gate.PrepareSendAsync(destination, ct, transaction);
-        using var request = new HttpRequestMessage(HttpMethod.Put, destination) { Content = Json(inventory) };
+        var compatible = MachineInventoryCompatibility.ForServer(inventory, MachineInventoryCompatibility.SupportsAntigravity(prepared.Discovery.Info));
+        using var request = new HttpRequestMessage(HttpMethod.Put, destination) { Content = Json(compatible) };
         await request.Content.LoadIntoBufferAsync(ct);
         request.Headers.TryAddWithoutValidation(MbusHeaders.ClientVersion, CliHost.Version);
         request.Headers.TryAddWithoutValidation(MbusHeaders.ClientComponent, "cli");
@@ -261,12 +237,6 @@ public static class ServerConnection
             }
             finally { request.Headers.Authorization = null; }
         }, ct, transaction);
-        if (MachineInventoryCompatibility.HasAntigravity(inventory)
-            && await MachineInventoryCompatibility.IsLegacyInventoryRejectionAsync(response, ct))
-        {
-            return await PutApiKeyEnrollmentInventoryAsync(host, store, server, apiKey,
-                MachineInventoryCompatibility.WithoutAntigravity(inventory), transaction, ct);
-        }
         await EnsureSuccessAsync(response, "report this machine's inventory", ct);
         return prepared.Binding;
     }
@@ -306,14 +276,13 @@ public static class ServerConnection
     /// <summary>Reports a fresh agent scan (<see cref="ApiRoutes.MachineInventory"/>).</summary>
     internal static async Task PutInventoryAsync(HttpClient authenticated, Uri server, MachineInventory inventory, CancellationToken ct)
     {
+        if (MachineInventoryCompatibility.HasAntigravity(inventory))
+        {
+            var supported = await MessageBus.Mcp.TargetCapabilities.SupportsAsync(authenticated, MachineInventoryCompatibility.CapabilityToken, ct);
+            inventory = MachineInventoryCompatibility.ForServer(inventory, supported);
+        }
         var request = new HttpRequestMessage(HttpMethod.Put, Relative(ApiRoutes.MachineInventory)) { Content = Json(inventory) };
         using var response = await SendAsync(authenticated, request, server, ct);
-        if (MachineInventoryCompatibility.HasAntigravity(inventory)
-            && await MachineInventoryCompatibility.IsLegacyInventoryRejectionAsync(response, ct))
-        {
-            await PutInventoryAsync(authenticated, server, MachineInventoryCompatibility.WithoutAntigravity(inventory), ct);
-            return;
-        }
         await EnsureSuccessAsync(response, "update this machine's agent list", ct);
     }
     /// <summary>

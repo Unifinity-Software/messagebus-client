@@ -171,7 +171,7 @@ public sealed class ConnectTests
     }
 
     [Fact]
-    public async Task Antigravity_connect_rescan_models_and_legacy_inventory_fallback()
+    public async Task Antigravity_connect_rescan_and_model_catalog_parsing()
     {
         using var machine = new TestMachine();
         machine.InstallFake("git", new("git version 2.50.1"));
@@ -187,7 +187,13 @@ public sealed class ConnectTests
         Assert.Equal("google", agy.Vendor);
         Assert.True(agy.McpConfigured);
         Assert.True(agy.SignedIn);
-        Assert.Equal("Gemini 4 Neon (High)", agy.DefaultModel);
+        // Without `agy models` output to resolve the display label, a label with spaces is not reported as a --model slug.
+        Assert.Null(agy.DefaultModel);
+
+        // When settings.json holds a slug directly, it is reported even without `agy models`.
+        machine.WriteHomeFile(Path.Combine(".gemini", "antigravity-cli", "settings.json"), """{ "model": "gemini-4-neon-high" }""");
+        var withSlug = (await ScanAsync(machine))[AgentKind.Antigravity];
+        Assert.Equal("gemini-4-neon-high", withSlug.DefaultModel);
 
         // Model catalog parsing resolves display labels back to slugs.
         var parsed = MessageBus.Cli.Agents.ModelCatalog.ParseAntigravityModels(
@@ -196,7 +202,13 @@ public sealed class ConnectTests
         Assert.Equal(["gemini-4-neon-high", "gemini-3.8-flash-medium"], parsed.Value.Models);
         Assert.Equal("gemini-4-neon-high", MessageBus.Cli.Agents.ModelCatalog.ResolveAntigravityDefault("Gemini 4 Neon (High)", parsed.Value.Labels));
 
-        // Legacy server compatibility strips Antigravity agent & capability without touching existing agents.
+        Assert.Equal("antigravity", MessageBus.Mcp.LocalTools.AgentKindOf("Antigravity CLI"));
+        Assert.Equal("antigravity", MessageBus.Mcp.LocalTools.AgentKindOf("agy"));
+    }
+
+    [Fact]
+    public async Task Antigravity_inventory_is_gated_by_server_capability_token()
+    {
         var fullInventory = new MachineInventory
         {
             MachineId = "m_1", HostName = "box", Os = MachineOs.Windows, Architecture = CpuArchitecture.X64, CliVersion = "1.5.0",
@@ -206,41 +218,44 @@ public sealed class ConnectTests
                 new DetectedAgent { Kind = AgentKind.ClaudeCode, Found = true, SignedIn = true, Vendor = "anthropic" },
                 new DetectedAgent { Kind = AgentKind.Antigravity, Found = true, SignedIn = true, Vendor = "google" },
             ],
-            ScannedAt = machine.Time.GetUtcNow(),
+            ScannedAt = DateTimeOffset.UnixEpoch,
         };
-        Assert.True(MessageBus.Cli.Server.MachineInventoryCompatibility.HasAntigravity(fullInventory));
-        var legacy = MessageBus.Cli.Server.MachineInventoryCompatibility.WithoutAntigravity(fullInventory);
-        Assert.False(MessageBus.Cli.Server.MachineInventoryCompatibility.HasAntigravity(legacy));
-        Assert.Equal(["os:windows", "agent:claude-code"], legacy.Capabilities);
-        Assert.Single(legacy.Agents);
-        Assert.Equal(AgentKind.ClaudeCode, legacy.Agents[0].Kind);
 
-        Assert.Equal("antigravity", MessageBus.Mcp.LocalTools.AgentKindOf("Antigravity CLI"));
-        Assert.Equal("antigravity", MessageBus.Mcp.LocalTools.AgentKindOf("agy"));
+        // Server without agentKindAntigravityV1: client omits Antigravity on the first PUT (no 400 retry).
+        var legacyBodies = new List<string>();
+        using (var legacyHttp = new HttpClient(new CapabilityGatedInventoryHandler(advertisesAntigravity: false, legacyBodies)) { BaseAddress = new Uri("https://bus.example.test/") })
+        {
+            var runnerClient = new HttpRunnerServiceClient(legacyHttp);
+            await runnerClient.InventoryAsync(fullInventory, TestContext.Current.CancellationToken);
+        }
+        Assert.Single(legacyBodies);
+        Assert.DoesNotContain("antigravity", legacyBodies[0], StringComparison.OrdinalIgnoreCase);
 
-        // End-to-end HTTP fallback: an older server rejects "antigravity" with 400; HttpRunnerServiceClient retries without it.
-        var seenBodies = new List<string>();
-        using var http = new HttpClient(new LegacyInventoryHandler(seenBodies)) { BaseAddress = new Uri("https://bus.example.test/") };
-        var runnerClient = new HttpRunnerServiceClient(http);
-        await runnerClient.InventoryAsync(fullInventory, TestContext.Current.CancellationToken);
-        Assert.Equal(2, seenBodies.Count);
-        Assert.Contains("antigravity", seenBodies[0], StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("antigravity", seenBodies[1], StringComparison.OrdinalIgnoreCase);
+        // Server advertising agentKindAntigravityV1: client includes Antigravity on the first PUT.
+        var modernBodies = new List<string>();
+        using (var modernHttp = new HttpClient(new CapabilityGatedInventoryHandler(advertisesAntigravity: true, modernBodies)) { BaseAddress = new Uri("https://bus.example.test/") })
+        {
+            var runnerClient = new HttpRunnerServiceClient(modernHttp);
+            await runnerClient.InventoryAsync(fullInventory, TestContext.Current.CancellationToken);
+        }
+        Assert.Single(modernBodies);
+        Assert.Contains("antigravity", modernBodies[0], StringComparison.OrdinalIgnoreCase);
     }
 
-    private sealed class LegacyInventoryHandler(List<string> bodies) : HttpMessageHandler
+    private sealed class CapabilityGatedInventoryHandler(bool advertisesAntigravity, List<string> putBodies) : HttpMessageHandler
     {
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
-            var body = request.Content is null ? "" : await request.Content.ReadAsStringAsync(cancellationToken);
-            bodies.Add(body);
-            if (body.Contains("antigravity", StringComparison.OrdinalIgnoreCase))
+            if (request.Method == HttpMethod.Get && request.RequestUri?.AbsolutePath.EndsWith("/api/server", StringComparison.Ordinal) == true)
             {
-                return new HttpResponseMessage(System.Net.HttpStatusCode.BadRequest)
+                var caps = advertisesAntigravity ? """["agentKindAntigravityV1"]""" : "[]";
+                return new HttpResponseMessage(System.Net.HttpStatusCode.OK)
                 {
-                    Content = new StringContent("""{"error":"Invalid request body."}""", System.Text.Encoding.UTF8, "application/json"),
+                    Content = new StringContent($$"""{"product":"messagebus.ai","capabilities":{{caps}}}""", System.Text.Encoding.UTF8, "application/json"),
                 };
             }
+            var body = request.Content is null ? "" : await request.Content.ReadAsStringAsync(cancellationToken);
+            putBodies.Add(body);
             return new HttpResponseMessage(System.Net.HttpStatusCode.OK)
             {
                 Content = new StringContent("[]", System.Text.Encoding.UTF8, "application/json"),

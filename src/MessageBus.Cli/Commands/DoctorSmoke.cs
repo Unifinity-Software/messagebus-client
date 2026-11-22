@@ -155,7 +155,7 @@ internal static class DoctorSmoke
                 AgentKind.Copilot => new CopilotAdapter(copilotHome: host.GetEnvironmentVariable("COPILOT_HOME") is { Length: > 0 } h ? h : Path.Combine(host.HomeDirectory, ".copilot")),
                 AgentKind.OpenCode => OpenCodeAdapter.ForRunner(found.Version, host.GetEnvironmentVariable, host.HomeDirectory, host.CreateLocalModelHttpHandler,
                     () => Runner.Service.AgentEnvironmentStore.ReadFrom(host.ConfigDirectory)),
-                AgentKind.Antigravity => new AntigravityAdapter(),
+                AgentKind.Antigravity => new AntigravityAdapter(AntigravityAdapter.DefaultMcpConfigFile(host.HomeDirectory)),
                 _ => new ClaudeCodeAdapter(),
             };
             list.Add(new SmokeAgent(kind, adapter, executable));

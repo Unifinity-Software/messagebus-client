@@ -190,7 +190,13 @@ internal static class ModelCatalog
         var listed = await CommandRunner.RunAsync(executable, ["models"], cancellationToken, CodexListTimeout, environment: env.Added).ConfigureAwait(false) is { ExitCode: 0 } run
             ? ParseAntigravityModels(run.Output)
             : null;
-        if (listed is null) return AgentModels.OnlyDefault(configured);
+        if (listed is null)
+        {
+            // Antigravity stores a display label (e.g. "Gemini 4 Neon (High)") in settings.json, whereas --model expects a slug.
+            // Without `agy models` to resolve labels, only return configured when it already looks like a slug (no whitespace).
+            var slug = configured is { Length: > 0 } && !configured.Any(char.IsWhiteSpace) ? configured : null;
+            return AgentModels.OnlyDefault(slug);
+        }
         var model = ResolveAntigravityDefault(configured, listed.Value.Labels);
         var models = listed.Value.Models.ToList();
         if (model is not null && !models.Contains(model, StringComparer.OrdinalIgnoreCase)) models.Insert(0, model);

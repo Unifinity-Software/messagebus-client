@@ -219,7 +219,8 @@ public sealed class RunNetwork : IDisposable
         "openai.com", "*.openai.com", "chatgpt.com", "*.chatgpt.com",
         "githubcopilot.com", "*.githubcopilot.com", "api.github.com",
         "opencode.ai", "*.opencode.ai", "models.dev",
-        "googleapis.com", "*.googleapis.com", "antigravity.google", "*.antigravity.google", "accounts.google.com",
+        "cloudcode-pa.googleapis.com", "daily-cloudcode-pa.googleapis.com", "generativelanguage.googleapis.com",
+        "aiplatform.googleapis.com", "oauth2.googleapis.com", "antigravity.google", "accounts.google.com",
     ];
 
     /// <summary>Package registries builds and tests restore from (download only), and Playwright's browser downloads.</summary>

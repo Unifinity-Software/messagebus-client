@@ -11,8 +11,16 @@ namespace MessageBus.Cli.Runner.Agents;
 /// with a per-run <c>--settings</c> JSON file carrying <c>permissions.allow</c> and <c>permissions.deny</c> rules.
 /// Antigravity evaluates permission lists in strict precedence order (<c>Deny &gt; Ask &gt; Allow</c>), and explicit deny
 /// rules still block actions even when <c>--dangerously-skip-permissions</c> is passed.
+/// <para>
+/// Like the other adapters, a run denies every other MCP server configured in the person's <c>mcp_config.json</c>
+/// except <c>mbus</c> and any tools named in <see cref="AgentLaunchContext.KeepAgentTools"/>, and fails before launch
+/// when a kept tool isn't configured on this machine. Task-scoped <c>MBUS_*</c> variables from
+/// <see cref="AgentLaunchContext.McpEnvironment"/> are forwarded in the launched process environment so the spawned
+/// <c>mbus mcp</c> server receives the run's delivery, settle and run-tools files instead of the machine's interactive sign-in.
+/// </para>
 /// </summary>
-public sealed class AntigravityAdapter : IAgentAdapter
+/// <param name="mcpConfigFile">Antigravity's global <c>mcp_config.json</c>; <c>~/.gemini/config/mcp_config.json</c> by default.</param>
+public sealed class AntigravityAdapter(string? mcpConfigFile = null) : IAgentAdapter
 {
     /// <summary>The per-run settings file written next to the prompt.</summary>
     public const string SettingsFileName = "agy-settings.json";
@@ -26,6 +34,10 @@ public sealed class AntigravityAdapter : IAgentAdapter
         "command(az repos pr update)",
     ];
 
+    /// <summary>Antigravity's default global MCP config path (<c>~/.gemini/config/mcp_config.json</c>).</summary>
+    public static string DefaultMcpConfigFile(string? homeDirectory = null) =>
+        Path.Combine(homeDirectory ?? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".gemini", "config", "mcp_config.json");
+
     /// <inheritdoc />
     public AgentKind Kind => AgentKind.Antigravity;
 
@@ -33,14 +45,39 @@ public sealed class AntigravityAdapter : IAgentAdapter
     public bool ReportsUsageAsItGoes => true;
 
     /// <inheritdoc />
-    public bool CanResume => true;
+    public bool CanResume => false;
 
     /// <inheritdoc />
     public AgentLaunch BuildLaunch(AgentLaunchContext context)
     {
+        var configPath = mcpConfigFile ?? DefaultMcpConfigFile();
+        var configuredServers = ReadConfiguredMcpServers(configPath);
+        var kept = context.KeepAgentTools
+            .Where(n => !string.IsNullOrWhiteSpace(n))
+            .Select(n => n.Trim())
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+
+        var missing = kept
+            .Where(name => !configuredServers.TryGetValue(name, out var enabled) || !enabled)
+            .ToList();
+        if (missing.Count > 0)
+        {
+            return new AgentLaunch([], null)
+            {
+                CannotStart = $"This machine's Antigravity MCP settings don't have {string.Join(", ", missing)}. Configure {(missing.Count == 1 ? "it" : "them")} in {configPath} first.",
+            };
+        }
+
+        var deniedServers = configuredServers.Keys
+            .Where(name => !string.Equals(name, Connect.McpServerName.Value, StringComparison.Ordinal)
+                && !kept.Contains(name, StringComparer.Ordinal))
+            .OrderBy(name => name, StringComparer.Ordinal)
+            .ToList();
+
         var profile = context.Profile;
         var promptDir = Path.GetDirectoryName(Path.GetFullPath(context.PromptFile))!;
-        var settingsPath = WriteRunSettings(context, promptDir);
+        var settingsPath = WriteRunSettings(context, promptDir, kept, deniedServers);
 
         List<string> args =
         [
@@ -50,9 +87,11 @@ public sealed class AntigravityAdapter : IAgentAdapter
             "--add-dir", promptDir,
         ];
 
+        // Under --dangerously-skip-permissions, allow rules are bypassed while permissions.deny rules in --settings
+        // still take precedence (Deny > Ask > Allow). For roles with host-allowlist networking, outbound host
+        // filtering is enforced by the runner's RunNetwork proxy rather than Antigravity's read_url allowlist.
         if (profile.CanRunCommands && profile.CanEditFiles)
         {
-            // Explicit permissions.deny rules in --settings still take precedence over --dangerously-skip-permissions.
             args.Add("--dangerously-skip-permissions");
         }
         else if (profile.CanEditFiles)
@@ -60,9 +99,11 @@ public sealed class AntigravityAdapter : IAgentAdapter
             args.AddRange(["--mode", "accept-edits"]);
         }
 
+        string? note = null;
         if (context.RunnerIsolationEnabled && !context.RunnerSandboxed)
         {
             args.Add("--sandbox");
+            note = "Antigravity CLI requested its own terminal sandbox (--sandbox) because the runner's OS sandbox does not confine this agent.";
         }
 
         if (context.Model is { Length: > 0 } model)
@@ -70,13 +111,25 @@ public sealed class AntigravityAdapter : IAgentAdapter
             args.AddRange(["--model", model]);
         }
 
-        if (context.ResumeSessionId is { Length: > 0 } session)
+        args.AddRange(["-p", $"Read the task in the file {context.PromptFile} and do it."]);
+
+        var env = new Dictionary<string, string>(StringComparer.Ordinal);
+        if (context.McpEnvironment is { } mcpEnv)
         {
-            args.AddRange(["--conversation", session]);
+            foreach (var (key, value) in mcpEnv)
+            {
+                if (!string.IsNullOrEmpty(value))
+                {
+                    env[key] = value;
+                }
+            }
         }
 
-        args.AddRange(["-p", $"Read the task in the file {context.PromptFile} and do it."]);
-        return new AgentLaunch(args, null);
+        return new AgentLaunch(args, null)
+        {
+            Note = note,
+            Environment = env,
+        };
     }
 
     /// <inheritdoc />
@@ -85,7 +138,31 @@ public sealed class AntigravityAdapter : IAgentAdapter
     /// <inheritdoc />
     public IAgentOutputParser CreateParser(string? configuredModel) => new AntigravityOutputParser(configuredModel);
 
-    private static string WriteRunSettings(AgentLaunchContext context, string promptDir)
+    /// <summary>Reads MCP servers from Antigravity's <c>mcp_config.json</c> (name → enabled).</summary>
+    internal static Dictionary<string, bool> ReadConfiguredMcpServers(string configFile)
+    {
+        var result = new Dictionary<string, bool>(StringComparer.Ordinal);
+        if (Connect.JsonConfigFile.TryRead(configFile)?["mcpServers"] is not JsonObject servers)
+        {
+            return result;
+        }
+        foreach (var (name, node) in servers)
+        {
+            if (string.IsNullOrWhiteSpace(name) || node is not JsonObject obj)
+            {
+                continue;
+            }
+            var disabled = obj["disabled"] is JsonValue d && d.TryGetValue<bool>(out var isDisabled) && isDisabled;
+            result[name] = !disabled;
+        }
+        return result;
+    }
+
+    private static string WriteRunSettings(
+        AgentLaunchContext context,
+        string promptDir,
+        IReadOnlyList<string> keptServers,
+        IReadOnlyList<string> deniedServers)
     {
         var profile = context.Profile;
         var allow = new List<string>
@@ -93,12 +170,16 @@ public sealed class AntigravityAdapter : IAgentAdapter
             $"mcp({Connect.McpServerName.Value}/*)",
             $"read_file({context.PromptFile})",
         };
-        foreach (var kept in context.KeepAgentTools.Where(n => !string.IsNullOrWhiteSpace(n)))
+        foreach (var kept in keptServers)
         {
-            allow.Add($"mcp({kept.Trim()}/*)");
+            allow.Add($"mcp({kept}/*)");
         }
 
         var deny = new List<string>(AlwaysDenied);
+        foreach (var other in deniedServers)
+        {
+            deny.Add($"mcp({other}/*)");
+        }
         if (!profile.CanPush)
         {
             deny.Add("command(git push)");
@@ -155,6 +236,15 @@ public sealed class AntigravityAdapter : IAgentAdapter
             },
         };
 
+        // For non-command roles (e.g. read-only reviewers with a small Bash(...) allowlist), explicitly pin
+        // default mode + request-review so Antigravity's auto mode cannot auto-approve unlisted commands;
+        // in headless -p mode, any action that would ask for approval is immediately soft-denied without hanging.
+        if (!profile.CanRunCommands)
+        {
+            settings["agentMode"] = "";
+            settings["toolPermission"] = "request-review";
+        }
+
         var path = Path.Combine(promptDir, SettingsFileName);
         Directory.CreateDirectory(promptDir);
         File.WriteAllText(path, settings.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
@@ -192,11 +282,13 @@ public sealed class AntigravityAdapter : IAgentAdapter
 /// <summary>
 /// Reads <c>agy -p --output-format stream-json</c> NDJSON events:
 /// <list type="bullet">
-/// <item><c>init</c>: records <c>conversation_id</c>.</item>
 /// <item><c>step_update</c>: tool steps emit progress notes; completed <c>agent_response</c> steps accumulate
-/// live token usage (<c>input_tokens</c> + <c>cache_read_tokens</c>, <c>output_tokens</c>) and response deltas.</item>
+/// live token usage and response text.</item>
 /// <item><c>result</c>: final <c>status</c>, <c>response</c>, <c>error</c>, <c>duration_seconds</c> and total <c>usage</c>.</item>
 /// </list>
+/// Observed in Antigravity CLI 1.5.14: <c>usage.input_tokens</c> excludes <c>usage.cache_read_tokens</c> (on multi-step
+/// turns, <c>input_tokens</c> drops by the cached prompt prefix count while <c>total_tokens == input_tokens + output_tokens</c>),
+/// so contract <see cref="Usage.TokensIn"/> sums <c>input_tokens + cache_read_tokens</c> to match the other adapters.
 /// A non-JSON line counts as plain fallback text.
 /// </summary>
 public sealed class AntigravityOutputParser(string? configuredModel = null) : IAgentOutputParser
