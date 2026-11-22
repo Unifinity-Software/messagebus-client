@@ -69,7 +69,7 @@ public sealed class ServerSendGate : IDisposable
                     ?? throw new ServerBindingException("Isolated provisioning requires explicit durable MBUS_HOME.");
                 expected = transaction is not null
                     ? transaction.ValidateProvisioning(Endpoint, expectedJson, home)
-                    : await _store.WithProfileSecurityLockAsync(tx => Task.FromResult(
+                    : await _store.WithProfileSecurityReadLockAsync(tx => Task.FromResult(
                         tx.ValidateProvisioning(Endpoint, expectedJson, home)), ct).ConfigureAwait(false);
             }
 
@@ -79,8 +79,8 @@ public sealed class ServerSendGate : IDisposable
             var discovery = ServerDiscoveryParser.Parse(await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false));
             var snapshot = transaction is not null
                 ? PrepareBinding(transaction)
-                : await _store.WithProfileSecurityLockAsync(tx => Task.FromResult(
-                    PrepareBinding(tx)), ct).ConfigureAwait(false);
+                : await _store.PrepareBindingForSendAsync(Endpoint, discovery, expected, ct).ConfigureAwait(false);
+            if (transaction is null && snapshot is not null) Interlocked.Increment(ref _generation.LegacyValue);
             return new PreparedServerSend(_store, transaction, Endpoint, discovery, snapshot, expected,
                 () => Volatile.Read(ref _disposed) == 0 && Volatile.Read(ref _generation.Value) == generation
                     && (snapshot is not null || Volatile.Read(ref _generation.LegacyValue) == legacyGeneration));
@@ -160,7 +160,7 @@ public sealed class PreparedServerSend
         if (!Endpoint.Contains(destination) || Interlocked.Exchange(ref _consumed, 1) != 0)
             throw new ServerBindingException("The prepared send is stale, already used or for a different destination.");
         return transaction is not null ? ConsumeLocked(transaction)
-            : _store.WithProfileSecurityLockAsync(ConsumeLocked, ct);
+            : _store.WithProfileSecurityReadLockAsync(ConsumeLocked, ct);
 
         Task<T> ConsumeLocked(ConfigStore.ProfileSecurityTransaction tx) => tx.WithSendAsync(_store, async floor =>
         {

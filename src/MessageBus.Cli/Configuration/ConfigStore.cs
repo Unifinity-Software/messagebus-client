@@ -42,7 +42,7 @@ public sealed partial class ConfigStore
         _osVault = osVault;
         _initialKeyStore = keyStore;
         KeyVault = _keyFile;
-        InSecurityTransaction(tx => tx.RefreshKeySelection());
+        InSecurityReadTransaction(tx => tx.RefreshKeySelection());
     }
 
     /// <summary>The folder.</summary>
@@ -304,7 +304,7 @@ public sealed partial class ConfigStore
 
     /// <summary>The stored settings, or empty settings when there are none.</summary>
     public CliConfig Load()
-        => InSecurityTransaction(context => context.Load());
+        => InSecurityReadTransaction(context => context.Load());
 
     private CliConfig ReadConfig()
     {
@@ -377,9 +377,15 @@ public sealed partial class ConfigStore
     /// once the store gives the same key back; if the store can't take it, the file keeps working.
     /// </summary>
     public string? LoadKeyPem()
-        => InSecurityTransaction(tx => tx.LoadKeyPem());
+    {
+        if (_compatibilitySession.Value is not null) return InSecurityTransaction(tx => tx.LoadKeyPem());
+        try { return InSecurityReadTransaction(tx => tx.ReadKeyPem()); }
+        catch (KeyMigrationRequiredException) { return InSecurityTransaction(tx => tx.LoadKeyPem()); }
+    }
 
-    private string? LoadKeyPemLocked(CliConfig config)
+    private sealed class KeyMigrationRequiredException : Exception;
+
+    private string? LoadKeyPemLocked(CliConfig config, bool allowMigration = true)
     {
         SelectKeyGeneration(config);
         var vault = KeyVault;
@@ -421,6 +427,7 @@ public sealed partial class ConfigStore
                 return legacy; // Can't verify the destination; leave both stores alone.
             }
         }
+        if (!allowMigration) throw new KeyMigrationRequiredException();
         try
         {
             vault.Save(legacy);
@@ -451,10 +458,15 @@ public sealed partial class ConfigStore
     /// <summary>Whether a machine key is saved here (without decrypting it).</summary>
     public bool HasKey
     {
-        get => InSecurityTransaction(tx => tx.HasKey());
+        get
+        {
+            if (_compatibilitySession.Value is not null) return InSecurityTransaction(tx => tx.HasKey());
+            try { return InSecurityReadTransaction(tx => tx.ReadHasKey()); }
+            catch (KeyMigrationRequiredException) { return InSecurityTransaction(tx => tx.HasKey()); }
+        }
     }
 
-    private bool HasKeyLocked(CliConfig config)
+    private bool HasKeyLocked(CliConfig config, bool allowMigration = true)
     {
         SelectKeyGeneration(config);
         var vault = KeyVault;
@@ -472,7 +484,7 @@ public sealed partial class ConfigStore
         }
         try
         {
-            return (RunnerKeyReads ? LoadKeyPemLocked(config) : vault.Load()) is not null;
+            return (RunnerKeyReads ? LoadKeyPemLocked(config, allowMigration) : vault.Load()) is not null;
         }
         catch (CliException)
         {
@@ -529,7 +541,9 @@ public sealed partial class ConfigStore
     public sealed partial class ProfileSecurityTransaction
     {
         internal bool RefreshKeySelection() => Execute(() =>
-        { _store.SelectKeyGeneration(_store.ReadBindingState().Config); return true; });
+        { _store.SelectKeyGeneration(_store.ReadBindingState().Config); return true; }, readOnly: true);
+        internal string? ReadKeyPem() => Execute(() => _store.LoadKeyPemLocked(_store.ReadBindingState().Config, allowMigration: false), readOnly: true);
+        internal bool ReadHasKey() => Execute(() => _store.HasKeyLocked(_store.ReadBindingState().Config, allowMigration: false), readOnly: true);
         internal KeyStoreChange PrepareKeyStoreChange(string choice) => Execute(() => _store.PrepareKeyStoreChangeLocked(choice));
         internal string? CommitKeyStoreChange(KeyStoreChange change) => Execute(change.CommitLocked);
         internal bool AbandonKeyStoreChange(KeyStoreChange change) => Execute(change.AbandonLocked);
@@ -549,7 +563,7 @@ public sealed partial class ConfigStore
 
     /// <summary>The saved sign-in, or null when absent. Unreadable state refuses rather than erasing a possible floor.</summary>
     public CliSessionFile? LoadSession()
-        => InSecurityTransaction(context => context.LoadSession());
+        => InSecurityReadTransaction(context => context.LoadSession());
 
     private CliSessionFile? ReadSession()
     {
@@ -649,9 +663,31 @@ public sealed partial class ConfigStore
         }
     }
 
-    private static async Task<FileStream> AcquireLockFileAsync(string path, CancellationToken ct)
+    // Readers share the same OS lock as writers, so pins and identity changes still wait for
+    // every actual send to finish. The local admission gate is released before the read callback:
+    // a long poll must not serialize heartbeats, startup, or another ordinary request.
+    internal async Task<T> WithProfileSecurityReadLockAsync<T>(Func<ProfileSecurityTransaction, Task<T>> body, CancellationToken ct)
     {
-        var options = new FileStreamOptions { Mode = FileMode.OpenOrCreate, Access = FileAccess.ReadWrite, Share = FileShare.None };
+        if (_compatibilitySession.Value is not null)
+            throw new InvalidOperationException("Pass the explicit profile transaction to nested helpers.");
+        EnsureDirectory();
+        var lockPath = Path.GetFullPath(Path.Combine(Directory, CliSessionFile.LockFileName));
+        var gate = SessionGates.GetOrAdd(lockPath, _ => new SemaphoreSlim(1, 1));
+        FileStream file;
+        await gate.WaitAsync(ct).ConfigureAwait(false);
+        try { file = await AcquireLockFileAsync(lockPath, ct, shared: true).ConfigureAwait(false); }
+        finally { gate.Release(); }
+        using (file)
+        {
+            var context = new ProfileSecurityTransaction(this, readOnly: true);
+            try { return await body(context).ConfigureAwait(false); }
+            finally { await context.CompleteAsync().ConfigureAwait(false); }
+        }
+    }
+
+    private static async Task<FileStream> AcquireLockFileAsync(string path, CancellationToken ct, bool shared = false)
+    {
+        var options = new FileStreamOptions { Mode = FileMode.OpenOrCreate, Access = FileAccess.ReadWrite, Share = shared ? FileShare.ReadWrite : FileShare.None };
         if (!OperatingSystem.IsWindows())
         {
             options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;

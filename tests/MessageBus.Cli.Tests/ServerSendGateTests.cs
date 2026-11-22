@@ -2,6 +2,8 @@ using System.Buffers.Text;
 using System.Net;
 using System.Net.Sockets;
 using System.Security.Cryptography;
+using System.Security.AccessControl;
+using System.Security.Principal;
 using System.Text;
 using MessageBus.Cli.Configuration;
 using MessageBus.Cli.Hosting;
@@ -19,6 +21,150 @@ public sealed class ServerSendGateTests
     private const string Machine = "mch_00000000000000000000000000";
     private const string Legacy = """{"product":"messagebus.ai","signIn":{"microsoft":true},"stamp":{"stampId":"eu","geography":"eu","azureRegion":"westeurope","url":"https://eu.stamps.example.test","aliases":[]}}""";
     private const string Isolated = """{"product":"messagebus.ai","stamp":{"stampId":"eu","geography":"eu","azureRegion":"westeurope","url":"https://eu.stamps.example.test","aliases":[]},"signIn":{"authority":{"version":1,"stampId":"eu","issuer":"https://eu.stamps.example.test","audience":"https://eu.stamps.example.test"},"machineSignature":{"version":2,"required":true}}}""";
+
+    [Theory(Timeout = 10_000)]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    public async Task Long_poll_allows_another_authenticated_request_and_new_profile_reader(int mode)
+    {
+        using var fixture = new Fixture { Discovery = mode == 0 ? Legacy : Isolated };
+        if (mode == 2)
+        {
+            fixture.Machine.Env[ServerBindingExpectation.EnvironmentVariable] = """{"version":1,"transportOrigin":"https://eu.stamps.example.test","stampId":"eu","issuer":"https://eu.stamps.example.test","audience":"https://eu.stamps.example.test","authorityVersion":1,"minimumMachineSignatureVersion":2,"machineSignatureRequired":true}""";
+            fixture.Machine.Env[EnvVars.Home] = fixture.Store.Directory;
+        }
+        using var client = fixture.Client();
+        // Pin before the long poll, as a connected runner has already done.
+        using (await client.GetAsync("api/ready", TestContext.Current.CancellationToken)) { }
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.OnAuthenticatedAsync = async (request, ct) =>
+        {
+            if (request.Uri.AbsolutePath.EndsWith("/watch", StringComparison.Ordinal))
+            {
+                entered.TrySetResult();
+                await release.Task.WaitAsync(ct);
+            }
+            return new(HttpStatusCode.OK);
+        };
+        var watching = client.GetAsync("api/watch", TestContext.Current.CancellationToken);
+        try
+        {
+            await entered.Task.WaitAsync(TestContext.Current.CancellationToken);
+            // A new process loads settings and the machine key before it can send its first request.
+            var reading = Task.Run(() =>
+            {
+                var store = new ConfigStore(fixture.Store.Directory, "file");
+                Assert.Equal(Machine, store.Load().MachineId);
+                Assert.True(store.HasKey);
+                Assert.NotNull(store.LoadKeyPem());
+                Assert.Null(store.LoadSession());
+                return ServerConnection.CreateAuthenticatedClient(fixture.Host(), fixture.Settings(), store, "runner");
+            }, TestContext.Current.CancellationToken);
+            using var other = await reading.WaitAsync(TestContext.Current.CancellationToken);
+            using var response = await other.GetAsync("api/heartbeat", TestContext.Current.CancellationToken);
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            Assert.False(watching.IsCompleted);
+            Assert.Equal(3, fixture.Anonymous.Count);
+            var heartbeat = Assert.Single(fixture.Authenticated, r => r.Uri.AbsolutePath.EndsWith("/heartbeat", StringComparison.Ordinal));
+            Assert.Equal(mode == 0 ? null : "2", heartbeat.Header(MbusHeaders.SignatureVersion));
+            Assert.NotNull(heartbeat.Header(MbusHeaders.Signature));
+        }
+        finally
+        {
+            release.TrySetResult();
+            try { using var response = await watching; }
+            catch (OperationCanceledException) when (TestContext.Current.CancellationToken.IsCancellationRequested) { }
+        }
+    }
+
+    [Fact]
+    public async Task Shared_lease_refuses_mutation_and_cannot_escape_its_callback()
+    {
+        using var fixture = new Fixture();
+        ConfigStore.ProfileSecurityTransaction? escaped = null;
+        await fixture.Store.WithProfileSecurityReadLockAsync(tx =>
+        {
+            escaped = tx;
+            Assert.Throws<InvalidOperationException>(() => tx.Save(new CliConfig()));
+            Assert.Throws<InvalidOperationException>(() => tx.DeleteSession());
+            Assert.Throws<InvalidOperationException>(() => tx.LoadKeyPem());
+            Assert.Throws<InvalidOperationException>(() => tx.DeleteKey());
+            Assert.Throws<InvalidOperationException>(() => tx.PrepareBinding(ServerEndpoint.Parse(Origin), ServerDiscoveryParser.Parse(Isolated)));
+            Assert.Equal(Machine, tx.Load().MachineId);
+            return Task.FromResult(true);
+        }, TestContext.Current.CancellationToken);
+        Assert.Throws<InvalidOperationException>(() => escaped!.Load());
+        Assert.Equal(Machine, fixture.Store.Load().MachineId);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Failed_shared_callback_releases_its_lease_for_a_writer(bool cancelled)
+    {
+        using var fixture = new Fixture();
+        var operation = fixture.Store.WithProfileSecurityReadLockAsync<bool>(_ => cancelled
+            ? Task.FromCanceled<bool>(new CancellationToken(canceled: true))
+            : Task.FromException<bool>(new InvalidOperationException("fixture failure")), TestContext.Current.CancellationToken);
+        if (cancelled) await Assert.ThrowsAnyAsync<OperationCanceledException>(() => operation);
+        else await Assert.ThrowsAsync<InvalidOperationException>(() => operation);
+        await fixture.Store.WithProfileSecurityLockAsync(tx =>
+        {
+            tx.Save(tx.Load() with { WorkspaceName = "Updated" });
+            return Task.FromResult(true);
+        }, TestContext.Current.CancellationToken);
+        Assert.Equal("Updated", fixture.Store.Load().WorkspaceName);
+    }
+
+    [Fact]
+    public async Task Existing_pin_reconciles_a_missing_credential_snapshot_before_sending()
+    {
+        using var fixture = new Fixture { Discovery = Isolated };
+        using var client = fixture.Client();
+        using (await client.GetAsync("api/first", TestContext.Current.CancellationToken)) { }
+        var config = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(fixture.Store.ConfigPath))!.AsObject();
+        config.Remove("serverBinding");
+        File.WriteAllText(fixture.Store.ConfigPath, config.ToJsonString());
+        using var response = await client.GetAsync("api/second", TestContext.Current.CancellationToken);
+        Assert.NotNull(fixture.Store.Load().ServerBinding);
+        Assert.Equal("2", fixture.Authenticated[^1].Header(MbusHeaders.SignatureVersion));
+    }
+
+    [Fact]
+    public async Task Existing_pin_still_refuses_a_profile_that_loses_private_permissions()
+    {
+        using var fixture = new Fixture { Discovery = Isolated };
+        using var client = fixture.Client();
+        using (await client.GetAsync("api/first", TestContext.Current.CancellationToken)) { }
+        var directory = new DirectoryInfo(fixture.Store.Directory);
+        DirectorySecurity? originalAcl = null;
+        UnixFileMode originalMode = default;
+        if (OperatingSystem.IsWindows())
+        {
+            originalAcl = directory.GetAccessControl();
+            var shared = directory.GetAccessControl();
+            shared.AddAccessRule(new FileSystemAccessRule(new SecurityIdentifier(WellKnownSidType.WorldSid, null),
+                FileSystemRights.Read, AccessControlType.Allow));
+            directory.SetAccessControl(shared);
+        }
+        else
+        {
+            originalMode = File.GetUnixFileMode(directory.FullName);
+            File.SetUnixFileMode(directory.FullName, originalMode | UnixFileMode.GroupRead);
+        }
+        try
+        {
+            await Assert.ThrowsAsync<ServerBindingException>(() => client.GetAsync("api/refused", TestContext.Current.CancellationToken));
+            Assert.Single(fixture.Authenticated);
+        }
+        finally
+        {
+            if (OperatingSystem.IsWindows()) directory.SetAccessControl(originalAcl!);
+            else File.SetUnixFileMode(directory.FullName, originalMode);
+        }
+    }
 
     [Theory]
     [InlineData(0)]
@@ -428,6 +574,7 @@ public sealed class ServerSendGateTests
         public string Discovery { get; set; } = Legacy;
         public HttpStatusCode DiscoveryStatus { get; set; } = HttpStatusCode.OK;
         public Func<RecordedRequest, HttpResponseMessage> OnAuthenticated { get; set; } = _ => new(HttpStatusCode.OK);
+        public Func<RecordedRequest, CancellationToken, Task<HttpResponseMessage>>? OnAuthenticatedAsync { get; set; }
         public Fixture()
         {
             Store = new ConfigStore(Machine.MbusFolder, "file");
@@ -447,7 +594,8 @@ public sealed class ServerSendGateTests
                 GetEnvironmentVariable = basis.GetEnvironmentVariable, HomeDirectory = basis.HomeDirectory,
                 MachineName = basis.MachineName, MbusCommand = basis.MbusCommand, Browser = basis.Browser,
                 Skills = basis.Skills, McpServer = basis.McpServer, Time = basis.Time,
-                CreateHttpHandler = authenticated ?? (() => new Recorder(Authenticated, OnAuthenticated)),
+                CreateHttpHandler = authenticated ?? (() => new Recorder(Authenticated, r => OnAuthenticated(r),
+                    (r, ct) => OnAuthenticatedAsync?.Invoke(r, ct))),
                 CreateDiscoveryHttpHandler = anonymous ?? (() => new Recorder(Anonymous, _ =>
                     new HttpResponseMessage(DiscoveryStatus) { Content = new StringContent(Discovery) })),
             };
@@ -455,15 +603,17 @@ public sealed class ServerSendGateTests
         public void Dispose() { Key.Dispose(); Machine.Dispose(); }
     }
 
-    private sealed class Recorder(List<RecordedRequest> records, Func<RecordedRequest, HttpResponseMessage> answer) : HttpMessageHandler
+    private sealed class Recorder(List<RecordedRequest> records, Func<RecordedRequest, HttpResponseMessage> answer,
+        Func<RecordedRequest, CancellationToken, Task<HttpResponseMessage>?>? answerAsync = null) : HttpMessageHandler
     {
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
             var recorded = new RecordedRequest(request.Method, request.RequestUri!,
                 request.Headers.ToDictionary(h => h.Key, h => string.Join(",", h.Value), StringComparer.OrdinalIgnoreCase),
                 request.Content is null ? [] : await request.Content.ReadAsByteArrayAsync(cancellationToken));
-            records.Add(recorded);
-            return answer(recorded);
+            lock (records) records.Add(recorded);
+            return answerAsync?.Invoke(recorded, cancellationToken) is { } response
+                ? await response : answer(recorded);
         }
     }
 
