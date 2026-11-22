@@ -19,8 +19,10 @@ internal static class MacRunnerSupervisor
         // The actual mbus command is passed as positional arguments, never evaluated as shell source.
         // Run children in the background so wait is interruptible and TERM reaches the active child.
         // This includes the updater and retry delay, so bootout cannot leave a supervisor restarting work.
+        // Traps record intent: a child can run before child=$! publishes its PID. Stop and wait from normal flow.
         return $$"""
             child=
+            stopping=
             stop_supervisor() {
                 trap '' TERM INT
                 if [ -n "$child" ]; then
@@ -29,27 +31,27 @@ internal static class MacRunnerSupervisor
                 fi
                 exit 0
             }
-            trap stop_supervisor TERM INT
-            while [ ! -f {{stop}} ]; do
-                if [ -f {{hook}} ]; then
-                    /bin/sh {{hook}} &
-                    child=$!
-                    wait "$child"
-                    child=
-                fi
-                [ -f {{stop}} ] && exit 0
+            trap 'stopping=1' TERM INT
+            run_child() {
+                [ -n "$stopping" ] && stop_supervisor
                 "$@" &
                 child=$!
+                [ -n "$stopping" ] && stop_supervisor
                 wait "$child"
                 result=$?
+                [ -n "$stopping" ] && stop_supervisor
                 child=
+            }
+            while [ ! -f {{stop}} ]; do
+                if [ -f {{hook}} ]; then
+                    run_child /bin/sh {{hook}}
+                fi
+                [ -f {{stop}} ] && exit 0
+                run_child "$@"
                 [ "$result" -eq 0 ] && exit 0
                 [ -f {{stop}} ] && exit 0
                 printf 'mbus runner supervisor: runner exited with code %s; restarting in {{RestartDelaySeconds}} seconds.\n' "$result" >&2
-                sleep {{RestartDelaySeconds}} &
-                child=$!
-                wait "$child"
-                child=
+                run_child sleep {{RestartDelaySeconds}}
             done
             exit 0
             """.ReplaceLineEndings("\n");
