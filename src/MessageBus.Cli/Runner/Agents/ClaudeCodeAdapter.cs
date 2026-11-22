@@ -376,6 +376,37 @@ public sealed class ClaudeCodeAdapter(Mcp.McpLaunchCommand? mbus = null, string?
 /// </summary>
 public sealed class ClaudeOutputParser(TimeProvider? time = null) : IAgentOutputParser
 {
+    private Usage? _baseline;
+
+    // Read the same cost-state that the CLI restores, before launching the resumed process.
+    // Assistant messages alone omit helper calls and have partial output counts.
+    internal static ClaudeOutputParser ForResume(string home, string folder, string session)
+    {
+        var parser = new ClaudeOutputParser();
+        var directory = MessageBus.Mcp.SessionUsage.ClaudeFolder(home, folder);
+        var path = directory is null ? null : Path.Combine(directory.FullName, session + ".jsonl");
+        if (path is null || !File.Exists(path)) return parser; // Older CLIs did not restore totals.
+        using var reader = new StreamReader(new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete));
+        while (reader.ReadLine() is { } line)
+        {
+            if (!line.Contains("cost-state", StringComparison.Ordinal)) continue;
+            try
+            {
+                using var doc = JsonDocument.Parse(line);
+                var root = doc.RootElement;
+                if (Str(root, "type") != "cost-state") continue;
+                var result = new JsonObject
+                {
+                    ["modelUsage"] = root.TryGetProperty("modelUsage", out var models) ? JsonNode.Parse(models.GetRawText()) : null,
+                    ["total_cost_usd"] = Dec(root, "totalCostUSD"),
+                };
+                using var baseline = JsonDocument.Parse(result.ToJsonString());
+                parser._baseline = parser.ReadResult(baseline.RootElement).Usage;
+            }
+            catch (JsonException) { } // Ignore an incomplete final transcript line.
+        }
+        return parser;
+    }
     private readonly CapacityReadings _capacity = new("claude-code", time ?? TimeProvider.System);
     /// <inheritdoc />
     public MessageBus.Contracts.Runner.AgentCapacityReport? Capacity => _capacity.Report;
@@ -455,6 +486,8 @@ public sealed class ClaudeOutputParser(TimeProvider? time = null) : IAgentOutput
                 _results++;
                 _durationMs += Long(root, "duration_ms");
                 _result = ReadResult(root);
+                if (_result.Usage is { } total && _baseline is { } baseline)
+                    _result = _result with { Usage = Incremental(total, baseline) };
                 return null;
             default:
                 return null;
@@ -527,6 +560,7 @@ public sealed class ClaudeOutputParser(TimeProvider? time = null) : IAgentOutput
     private AgentOutcome ReadResult(JsonElement root)
     {
         long tokensIn = 0, tokensOut = 0, cachedIn = 0, writes = 0;
+        var models = new List<Usage>();
         string? model = null;
         // Which cache writes were for an hour: only the API usage block says (cache_creation), never modelUsage (the original issue).
         var usage = root.TryGetProperty("usage", out var u) && u.ValueKind == JsonValueKind.Object ? u : default;
@@ -543,6 +577,15 @@ public sealed class ClaudeOutputParser(TimeProvider? time = null) : IAgentOutput
                 cachedIn += Long(m, "cacheReadInputTokens");
                 writes += Long(m, "cacheCreationInputTokens"); // cache writes cost more than input (the original issue)
                 tokensOut += output;
+                models.Add(new Usage
+                {
+                    Model = entry.Name,
+                    TokensIn = Long(m, "inputTokens") + Long(m, "cacheReadInputTokens") + Long(m, "cacheCreationInputTokens"),
+                    CachedTokensIn = Long(m, "cacheReadInputTokens"),
+                    CacheWriteTokensIn = Long(m, "cacheCreationInputTokens"),
+                    TokensOut = output,
+                    EstimatedCostUsd = Dec(m, "costUSD"),
+                });
                 // The model that cost most did the work; small helper models also show up here.
                 var weight = Dec(m, "costUSD") ?? output;
                 if (weight > bestCost)
@@ -573,6 +616,7 @@ public sealed class ClaudeOutputParser(TimeProvider? time = null) : IAgentOutput
                 AgentKind = AgentKind.ClaudeCode,
                 Vendor = "anthropic",
                 Model = model ?? _initModel,
+                Models = models.Count > 0 ? models : null,
                 TokensIn = tokensIn,
                 CachedTokensIn = cachedIn,
                 CacheWriteTokensIn = writes,
@@ -582,6 +626,27 @@ public sealed class ClaudeOutputParser(TimeProvider? time = null) : IAgentOutput
                 // Every turn's time; with more than one turn the runner uses its own clock (SpansTurns).
                 ActiveSeconds = _durationMs / 1000.0,
             },
+        };
+    }
+
+    private static Usage Incremental(Usage total, Usage baseline)
+    {
+        // A CLI that starts from zero (or a conversation reset) restores no earlier spend.
+        if (total.TokensIn < baseline.TokensIn || total.TokensOut < baseline.TokensOut
+            || total.CachedTokensIn < baseline.CachedTokensIn || total.CacheWriteTokensIn < baseline.CacheWriteTokensIn
+            || total.EstimatedCostUsd < baseline.EstimatedCostUsd) return total;
+        var models = total.Models?.Select(model => Incremental(model,
+            baseline.Models?.FirstOrDefault(old => old.Model == model.Model) ?? new Usage())).ToList();
+        return total with
+        {
+            TokensIn = total.TokensIn - baseline.TokensIn,
+            TokensOut = total.TokensOut - baseline.TokensOut,
+            CachedTokensIn = total.CachedTokensIn - baseline.CachedTokensIn,
+            CacheWriteTokensIn = total.CacheWriteTokensIn - baseline.CacheWriteTokensIn,
+            CacheWrite1hTokensIn = Math.Min(total.CacheWrite1hTokensIn, total.CacheWriteTokensIn - baseline.CacheWriteTokensIn),
+            EstimatedCostUsd = total.EstimatedCostUsd - (baseline.EstimatedCostUsd ?? 0),
+            Models = models,
+            Model = models is { Count: > 0 } ? models.MaxBy(m => m.EstimatedCostUsd ?? m.TokensIn + m.TokensOut)!.Model : total.Model,
         };
     }
 

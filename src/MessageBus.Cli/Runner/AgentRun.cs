@@ -376,7 +376,11 @@ internal sealed class AgentRun
                 if (process.StandardInput is { } launchPrompt && launchPrompt != prompt)
                     await File.WriteAllTextAsync(workspace.PromptFile, launchPrompt).ConfigureAwait(false);
 
-                var parser = _adapter.CreateParser(Delivery.Model);
+                var parser = _adapter.Kind == AgentKind.ClaudeCode && Resume?.SessionId is { } sessionId
+                    ? ClaudeOutputParser.ForResume(MessageBus.Mcp.SessionUsage.ClaudeHome(name =>
+                        process.Environment.TryGetValue(name, out var value) ? value : _s.Host.GetEnvironmentVariable(name)),
+                        workspace.WorkTree, sessionId)
+                    : _adapter.CreateParser(Delivery.Model);
                 Note($"Started {AgentKinds.DisplayName(_adapter.Kind)}"
                     + (Delivery.Model is not { } model ? ""
                         : Delivery.EconomyModel ? $" with {model}, the role's cheaper model (its daily budget is used)"

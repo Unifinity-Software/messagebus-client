@@ -984,3 +984,13 @@ differs from the approved base. Process output does not appear in these fields.
 The service exposes this result as optional `verification` on full thread summaries and compact
 status tasks. Omission represents legacy work. Optional `currentFrictionKinds` is authoritative
 when present, including an empty array. Existing `frictionKinds` continues to represent history.
+
+### Delivery usage on resumed sessions
+
+A delivery's settlement usage covers only that delivery. Claude Code v2.1.277 and later
+restore cumulative cost and per-model tokens on resume. Before starting the resumed process,
+the runner snapshots the transcript's last `cost-state` and subtracts it from result totals,
+including error results and the final result after background turns. Duration remains local
+to the process. A CLI whose totals restart below the saved baseline is counted from zero.
+Codex `turn.completed` usage is already per turn and is summed only within the current process.
+This normalization changes no wire fields and requires no server feature negotiation.
