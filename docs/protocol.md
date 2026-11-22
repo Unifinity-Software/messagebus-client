@@ -229,7 +229,9 @@ session credentials, then returns an immutable `ServerBindingSnapshot` for new c
 is storage evidence, not permission to send; callers still need current discovery for each actual send. Existing
 session-lock callbacks receive that explicit context and use its `Load`, `Save`, `LoadSession`, `SaveSession`
 and `DeleteSession` operations, including through awaited helpers. Concurrent operations through the same
-context are rejected before reading or writing state. Ordinary store methods acquire the profile lock. The
+context are rejected before reading or writing state. Ordinary non-mutating settings, session and key reads
+acquire shared read leases on the same lock file; mutations acquire exclusive transactions. Key reads that
+need legacy-file migration release their reader and reread under an exclusive transaction before migrating. The
 published `WithSessionLockAsync<T>(Func<Task<T>>, CancellationToken)` signature remains as an obsolete
 compatibility overload: within its callback, ordinary `Load`, `Save`, `LoadSession`, `SaveSession` and
 `DeleteSession` on that exact store route to the held context's guarded operations, including after awaits.
@@ -308,14 +310,18 @@ Authenticated API transports retain their existing explicit/system proxy behavio
 `DemandDestination(finalUri)` checks the exact selected origin/base scope before metadata or authentication is
 attached. `PrepareSendAsync(finalUri, cancellationToken, optionalLockHeldTransaction)` checks the destination,
 validates supplied `MBUS_SERVER_BINDING` and explicit matching writable `MBUS_HOME`, fetches current anonymous
-`GET <base>/api/server`, strictly parses the successful response and calls `PrepareBinding` under the existing
-profile security lock. Every actual send repeats discovery; no TTL, stale fallback or legacy choice on failure
+`GET <base>/api/server`, and strictly parses the successful response. Preparation reads the complete binding
+state under a shared lease. Affirmative legacy discovery and already-persisted isolated bindings with matching
+credential snapshots need no writes. A first pin or missing matching snapshot releases its reader and repeats
+policy evaluation and durable `PrepareBinding` under an exclusive transaction. Provisioning validation also
+uses a shared lease; its unique private writable-home probe never changes the binding floor.
+Every actual send repeats discovery; no TTL, stale fallback or legacy choice on failure
 exists. Discovery failure, redirect, downgrade and persistence failure produce terminal `ServerBindingException`.
 
 The returned `PreparedServerSend` carries the selected endpoint, strictly parsed current `Discovery` (for
 approval/destination checks), and optional durably prepared snapshot. It is
 single-use: `ConsumeAsync(finalUri, sendCallback, cancellationToken, optionalLockHeldTransaction)` reacquires the
-profile lock and rereads the ledger and every surviving snapshot immediately before consumption. It evaluates
+profile lock in shared mode and rereads the ledger and every surviving snapshot immediately before consumption. It evaluates
 the prepared discovery against that current floor and requires an isolated snapshot to retain its durable pin.
 Thus a pin published by another process also blocks a queued legacy send, without any shared generation counter.
 Successful isolated preparation invalidates outstanding legacy contexts in this process; failed preparation
@@ -329,11 +335,15 @@ v1 signer. This replaces the earlier checkpoint's standalone `Consume` and prepa
 headers must not escape the lock scope for a later send. A snapshot alone never grants a send.
 
 Buffer content before consumption. The normal handler buffers machine and API-key request bodies outside the
-lock, then attaches credentials/signatures and awaits the actual transport send inside the callback. The process
-semaphore and exclusive profile file lock remain held until the transport returns response headers or fails.
+lock, then attaches credentials/signatures and awaits the actual transport send inside the callback. A shared
+profile file lease remains held until the transport returns response headers or fails; other prepared sends and
+non-mutating profile reads may proceed concurrently. The process admission semaphore is not held during a
+shared send. Each read context rejects mutation and expires when its callback completes. Short synchronous
+state and key-selector operations serialize within each store; network waits do not hold that monitor.
 Consequently a competing durable pin either commits before the final floor read (legacy refuses), or waits
-until that send finishes. Response-body reading occurs after the scope. This serializes sends per profile and
-can delay other profile operations by the request timeout; callbacks must not acquire another profile lock or
+until that send finishes. Response-body reading occurs after the scope. Binding and identity mutations remain
+exclusive and retain the existing lock-acquisition timeout; a long active send can still delay or refuse those
+mutations. Cross-process writer fairness is not guaranteed. Callbacks must not acquire another profile lock or
 call ordinary store methods. The dedicated anonymous discovery transport never enters this callback.
 
 Callers already holding a session/profile transaction pass that explicit same-store context to preparation and

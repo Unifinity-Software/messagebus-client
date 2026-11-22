@@ -22,13 +22,14 @@ public sealed partial class ConfigStore
     public sealed partial class ProfileSecurityTransaction
     {
         private readonly ConfigStore _store;
+        private readonly bool _readOnly;
         private readonly object _operation = new();
         private bool _active = true;
         private bool _busy;
         private TaskCompletionSource? _asyncOperation;
-        internal ProfileSecurityTransaction(ConfigStore store) => _store = store;
+        internal ProfileSecurityTransaction(ConfigStore store, bool readOnly = false) { _store = store; _readOnly = readOnly; }
 
-        private T Execute<T>(Func<T> body)
+        private T Execute<T>(Func<T> body, bool readOnly = false)
         {
             if (!Monitor.TryEnter(_operation))
                 throw new InvalidOperationException("Concurrent profile transaction operations are not supported.");
@@ -36,8 +37,9 @@ public sealed partial class ConfigStore
             {
                 if (!_active) throw new InvalidOperationException("The profile security transaction is no longer held.");
                 if (_busy) throw new InvalidOperationException("Nested profile transaction operations are not supported.");
+                if (_readOnly && !readOnly) throw new InvalidOperationException("A shared profile read lease cannot change security state.");
                 _busy = true;
-                try { return body(); }
+                try { lock (_store._profileOperations) return body(); }
                 finally { _busy = false; }
             }
             finally { Monitor.Exit(_operation); }
@@ -70,7 +72,8 @@ public sealed partial class ConfigStore
             finally { Monitor.Exit(_operation); }
             try
             {
-                var state = _store.ReadBindingState();
+                BindingState state;
+                lock (_store._profileOperations) state = _store.ReadBindingState();
                 // This check belongs inside the reserved operation, after discovery/content awaits.
                 // Calling Execute/DemandEnrollmentTrust here would recursively enter the busy transaction.
                 if (requireEnrollmentTrust) _store.ValidateEnrollmentTrust(state.Config);
@@ -83,14 +86,14 @@ public sealed partial class ConfigStore
             }
         }
         internal void DemandStore(ConfigStore store) => Execute(() => ReferenceEquals(store, _store)
-            ? true : throw new InvalidOperationException("The transaction belongs to a different profile store."));
+            ? true : throw new InvalidOperationException("The transaction belongs to a different profile store."), readOnly: true);
 
         /// <summary>Reads settings inside the held transaction.</summary>
-        public CliConfig Load() => Execute(() => _store.ReadBindingState().Config);
+        public CliConfig Load() => Execute(() => _store.ReadBindingState().Config, readOnly: true);
         /// <summary>Saves settings while preserving the durable binding floor.</summary>
         public void Save(CliConfig config) => Execute(() => { _store.SaveConfigLocked(config); return true; });
         /// <summary>Reads the saved sign-in inside the held transaction.</summary>
-        public CliSessionFile? LoadSession() => Execute(() => _store.ReadBindingState().Session);
+        public CliSessionFile? LoadSession() => Execute(() => _store.ReadBindingState().Session, readOnly: true);
         /// <summary>Saves the sign-in while preserving the durable binding floor.</summary>
         public void SaveSession(CliSessionFile session) => Execute(() => { _store.SaveSessionLocked(session); return true; });
         /// <summary>Forgets the sign-in while retaining the durable binding floor.</summary>
@@ -98,7 +101,21 @@ public sealed partial class ConfigStore
 
         /// <summary>Rereads ledger and every surviving snapshot; corruption or missing-ledger evidence refuses.</summary>
         public ServerBindingFloor LoadBindingFloor()
-            => Execute(() => _store.ReadBindingState().Floor);
+            => Execute(() => _store.ReadBindingState().Floor, readOnly: true);
+
+        internal (bool Ready, ServerBindingSnapshot? Snapshot) PreparedBinding(ServerEndpoint selected,
+            ServerDiscovery discovery, ServerBindingExpectation? expected) => Execute(() =>
+        {
+            var state = _store.ReadBindingState();
+            var binding = ServerBindingPolicy.Evaluate(selected, discovery, state.Floor, expected).Binding;
+            if (binding is null) return (true, (ServerBindingSnapshot?)null);
+            DurableProfileFile.ValidatePrivateDirectory(_store.Directory);
+            var snapshot = ServerBindingSnapshot.Create(selected, binding);
+            var ready = state.Ledger.Bindings.TryGetValue(selected.Origin, out var pin) && pin.Binding == binding
+                && (state.Config.Server is not { } configServer || ServerEndpoint.Parse(configServer) != selected || state.Config.ServerBinding == snapshot)
+                && (state.Session is not { } session || ServerEndpoint.Parse(session.Server) != selected || session.ServerBinding == snapshot);
+            return (ready, snapshot);
+        }, readOnly: true);
 
         /// <summary>
         /// Validates current discovery and durably pins before returning a matching snapshot for new credentials.
@@ -130,13 +147,36 @@ public sealed partial class ConfigStore
             try { _store.WriteOwnerOnly(probe, "durable-profile-probe"); }
             finally { if (File.Exists(probe)) { File.Delete(probe); DurableProfileFile.FlushDirectory(_store.Directory); } }
             return expected;
-        });
+        }, readOnly: true);
     }
 
     // Only the published zero-argument session callback installs this routing scope. It does not grant
     // ownership: every routed operation MUST call a guarded transaction method, never a *Locked helper.
     // AsyncLocal children inherit the same context and therefore the same busy/active checks.
     private readonly AsyncLocal<ProfileSecurityTransaction?> _compatibilitySession = new();
+
+    // Shared leases may run network requests concurrently. Only their short synchronous profile/key
+    // operations serialize here; no network await holds this instance monitor.
+    private readonly object _profileOperations = new();
+
+    private T InSecurityReadTransaction<T>(Func<ProfileSecurityTransaction, T> body)
+    {
+        if (_compatibilitySession.Value is { } context)
+        {
+            context.DemandStore(this);
+            return body(context);
+        }
+        return WithProfileSecurityReadLockAsync(tx => Task.FromResult(body(tx)), CancellationToken.None).GetAwaiter().GetResult();
+    }
+
+    internal async Task<ServerBindingSnapshot?> PrepareBindingForSendAsync(ServerEndpoint selected,
+        ServerDiscovery discovery, ServerBindingExpectation? expected, CancellationToken ct)
+    {
+        var current = await WithProfileSecurityReadLockAsync(tx => Task.FromResult(tx.PreparedBinding(selected, discovery, expected)), ct).ConfigureAwait(false);
+        if (current.Ready) return current.Snapshot;
+        // Never upgrade a held reader. Re-evaluate all evidence under the writer before publishing.
+        return await WithProfileSecurityLockAsync(tx => Task.FromResult(tx.PrepareBinding(selected, discovery, expected)), ct).ConfigureAwait(false);
+    }
 
     private T InSecurityTransaction<T>(Func<ProfileSecurityTransaction, T> body)
     {
