@@ -152,7 +152,7 @@ internal static class WindowsServiceCommands
         await host.Out.WriteLineAsync(Runner.Sandbox.RunIsolation.WindowsServiceLimit);
         await host.Out.WriteLineAsync(result.Enrolled ? "Runner identity enrolled." : "Runner identity is awaiting enrollment.");
         var anyToken = false;
-        foreach (var kind in new[] { Contracts.Machines.AgentKind.ClaudeCode, Contracts.Machines.AgentKind.Codex, Contracts.Machines.AgentKind.Copilot })
+        foreach (var kind in new[] { Contracts.Machines.AgentKind.ClaudeCode, Contracts.Machines.AgentKind.Codex, Contracts.Machines.AgentKind.Copilot, Contracts.Machines.AgentKind.Antigravity })
         {
             var hasToken = ServiceAgentTokens.For(kind).Any((result.TokenNames ?? []).Contains);
             await host.Out.WriteLineAsync($"{Agents.AgentKinds.DisplayName(kind)}: {(hasToken ? "token configured" : "no token configured")}");
@@ -228,6 +228,7 @@ internal static class ServiceAgentTokens
         Contracts.Machines.AgentKind.ClaudeCode => ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"],
         Contracts.Machines.AgentKind.Codex => ["OPENAI_API_KEY", "CODEX_API_KEY"],
         Contracts.Machines.AgentKind.Copilot => ["COPILOT_GITHUB_TOKEN"],
+        Contracts.Machines.AgentKind.Antigravity => ["GEMINI_API_KEY"],
         _ => [],
     };
 }

@@ -31,14 +31,14 @@ public static class RunEnvironmentScrubber
         "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
         "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY",
         // The agent's model provider settings (its own sign-in otherwise lives in its settings or the keychain).
-        "CLAUDE_CONFIG_DIR",
+        "CLAUDE_CONFIG_DIR", "GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_CLOUD_PROJECT",
         // The server's address. Nothing that signs in as this machine (MBUS_API_KEY, MBUS_HOME with its
         // key, the one-time MBUS_ENROLL_TOKEN): the runner serves each run's mbus tools itself, with a
         // credential for that run alone (the original issue).
         "MBUS_SERVER",
     ];
 
-    private static readonly string[] Prefixes = ["LC_", "DOTNET_", "ANTHROPIC_", "CLAUDE_CODE_", "OPENAI_", "CODEX_", "OPENCODE_", "COPILOT_"];
+    private static readonly string[] Prefixes = ["LC_", "DOTNET_", "ANTHROPIC_", "CLAUDE_CODE_", "OPENAI_", "CODEX_", "OPENCODE_", "COPILOT_", "GEMINI_", "AGY_"];
 
     /// <summary>Whether a run inherits <paramref name="name"/> from the runner.</summary>
     /// <param name="name">The variable.</param>

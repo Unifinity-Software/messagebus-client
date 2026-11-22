@@ -69,4 +69,27 @@ internal sealed class AgentLocations(CliHost host)
 
     /// <summary>OpenCode's saved provider sign-ins.</summary>
     public string OpenCodeAuth => Path.Combine(Env("XDG_DATA_HOME") ?? Path.Combine(Home, ".local", "share"), "opencode", "auth.json");
+
+    // ── Google Antigravity CLI ──────────────────────────────────────────────────
+
+    /// <summary>Antigravity's shared global configuration folder (<c>~/.gemini/config</c>).</summary>
+    public string AntigravityConfigDirectory => Path.Combine(Home, ".gemini", "config");
+
+    /// <summary>Antigravity's global MCP server configuration (<c>~/.gemini/config/mcp_config.json</c>).</summary>
+    public string AntigravityMcpConfig => Path.Combine(AntigravityConfigDirectory, "mcp_config.json");
+
+    /// <summary>Antigravity's global user settings (<c>~/.gemini/config/config.json</c>).</summary>
+    public string AntigravityConfig => Path.Combine(AntigravityConfigDirectory, "config.json");
+
+    /// <summary>Antigravity's global skills folder (<c>~/.gemini/config/skills</c>).</summary>
+    public string AntigravitySkills => Path.Combine(AntigravityConfigDirectory, "skills");
+
+    /// <summary>Antigravity CLI's own data folder (<c>~/.gemini/antigravity-cli</c>).</summary>
+    public string AntigravityCliDirectory => Path.Combine(Home, ".gemini", "antigravity-cli");
+
+    /// <summary>Antigravity CLI's settings file (<c>~/.gemini/antigravity-cli/settings.json</c>).</summary>
+    public string AntigravitySettings => Path.Combine(AntigravityCliDirectory, "settings.json");
+
+    /// <summary>Antigravity CLI's onboarding marker (<c>~/.gemini/antigravity-cli/cache/onboarding.json</c>).</summary>
+    public string AntigravityOnboarding => Path.Combine(AntigravityCliDirectory, "cache", "onboarding.json");
 }

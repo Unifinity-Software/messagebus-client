@@ -8,7 +8,7 @@ namespace MessageBus.Cli.Runner.Agents;
 public static class AgentKinds
 {
     /// <summary>Kinds the runner has an adapter for.</summary>
-    public static IReadOnlyList<AgentKind> Launchable { get; } = [AgentKind.ClaudeCode, AgentKind.Codex, AgentKind.Copilot, AgentKind.OpenCode];
+    public static IReadOnlyList<AgentKind> Launchable { get; } = [AgentKind.ClaudeCode, AgentKind.Codex, AgentKind.Copilot, AgentKind.OpenCode, AgentKind.Antigravity];
 
     /// <summary>The contract name (<c>claude-code</c>).</summary>
     public static string Name(AgentKind kind) => kind switch
@@ -17,6 +17,7 @@ public static class AgentKinds
         AgentKind.Codex => "codex",
         AgentKind.Copilot => "copilot",
         AgentKind.OpenCode => "opencode",
+        AgentKind.Antigravity => "antigravity",
         _ => "custom",
     };
 
@@ -27,6 +28,7 @@ public static class AgentKinds
         AgentKind.Codex => "codex",
         AgentKind.Copilot => "copilot",
         AgentKind.OpenCode => "opencode",
+        AgentKind.Antigravity => "agy",
         _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, "No command for custom agents."),
     };
 
@@ -37,6 +39,7 @@ public static class AgentKinds
         AgentKind.Codex => "Codex",
         AgentKind.Copilot => "GitHub Copilot CLI",
         AgentKind.OpenCode => "OpenCode",
+        AgentKind.Antigravity => "Antigravity CLI",
         _ => "Custom agent",
     };
 

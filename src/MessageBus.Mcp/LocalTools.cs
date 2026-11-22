@@ -218,6 +218,7 @@ internal sealed partial class LocalTools : IAsyncDisposable
         var n when n.Contains("codex") => "codex",
         var n when n.Contains("copilot") => "copilot",
         var n when n.Contains("opencode") => "opencode",
+        var n when n.Contains("antigravity") || n == "agy" => "antigravity",
         _ => null,
     };
 

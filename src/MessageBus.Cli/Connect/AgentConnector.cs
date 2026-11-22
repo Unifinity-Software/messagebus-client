@@ -20,7 +20,7 @@ internal sealed record PlannedChange(AgentKind Agent, string Path, string What, 
 internal static class AgentConnector
 {
     /// <summary>Agents <c>mbus connect</c> can set up.</summary>
-    public static readonly AgentKind[] Supported = [AgentKind.ClaudeCode, AgentKind.Codex, AgentKind.Copilot, AgentKind.OpenCode];
+    public static readonly AgentKind[] Supported = [AgentKind.ClaudeCode, AgentKind.Codex, AgentKind.Copilot, AgentKind.OpenCode, AgentKind.Antigravity];
 
     public static IReadOnlyList<PlannedChange> Plan(CliHost host, AgentKind agent)
     {
@@ -63,11 +63,25 @@ internal static class AgentConnector
                     () => OpenCodeConfig.SetMbus(openCodeConfig, command)));
                 AddSkill(changes, agent, locations.OpenCodeSkills, host.Skills.Name, skill);
                 break;
+            case AgentKind.Antigravity:
+                var antigravityConfig = locations.AntigravityMcpConfig;
+                changes.Add(new PlannedChange(agent, antigravityConfig,
+                    JsonConfigFile.HasEntry(antigravityConfig, "mcpServers") ? "update the mbus MCP server" : "add the mbus MCP server",
+                    () => JsonConfigFile.SetEntry(antigravityConfig, "mcpServers", AntigravityEntry(command))));
+                AddSkill(changes, agent, locations.AntigravitySkills, host.Skills.Name, skill);
+                break;
             default:
                 throw new CliException($"mbus connect can't set up {AgentScanner.DisplayName(agent)} yet. Add the MCP server '{string.Join(' ', [command.Command, .. command.Args])}' to it by hand.");
         }
         return changes;
     }
+
+    private static JsonObject AntigravityEntry(McpLaunchCommand command) => new()
+    {
+        ["command"] = command.Command,
+        ["args"] = new JsonArray([.. command.Args.Select(a => (JsonNode?)JsonValue.Create(a))]),
+        ["disabled"] = false,
+    };
 
     private static JsonObject ClaudeEntry(McpLaunchCommand command) => new()
     {

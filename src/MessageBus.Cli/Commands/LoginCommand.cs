@@ -211,6 +211,10 @@ internal static class LoginCommand
         using var gate = new ServerSendGate(context.Host, context.Store, context.Settings.Server!);
         var prepared = await gate.PrepareSendAsync(new Uri(CliSettings.BaseAddress(context.Settings.Server!), "api/machines/enroll"), ct);
         var request = await body();
+        request = request with
+        {
+            Inventory = MachineInventoryCompatibility.ForServer(request.Inventory, MachineInventoryCompatibility.SupportsAntigravity(prepared.Discovery.Info)),
+        };
         var response = await session.SendEnrollmentAsync(() => ServerConnection.EnrollRequest(request), ct);
         if (response is null)
         {

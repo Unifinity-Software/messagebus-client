@@ -430,4 +430,106 @@ public sealed class AgentLaunchTests : IDisposable
         // Everything but the role's own instructions: the inbox call returns the rest of the message.
         Assert.True(prompt.Length - instructions.Length < 1000, $"The prompt's own text is {prompt.Length - instructions.Length} characters.");
     }
+
+    [Fact]
+    public void Antigravity_launch_maps_profiles_denies_other_mcp_servers_and_forwards_mcp_env()
+    {
+        var mcpConfig = Path.Combine(_run, "mcp_config.json");
+        File.WriteAllText(mcpConfig, """
+            {
+              "mcpServers": {
+                "mbus": { "command": "mbus", "args": ["mcp"] },
+                "context7": { "command": "npx", "args": ["-y", "context7"] },
+                "github": { "command": "npx", "args": ["-y", "github-mcp"] }
+              }
+            }
+            """);
+
+        var adapter = new AntigravityAdapter(mcpConfig);
+        Assert.False(adapter.CanResume);
+
+        // Missing kept tool refuses before launch.
+        var missingCtx = Context(new PermissionProfile { Name = PermissionProfiles.Worker }) with { KeepAgentTools = ["not-installed"] };
+        var missingLaunch = adapter.BuildLaunch(missingCtx);
+        Assert.NotNull(missingLaunch.CannotStart);
+        Assert.Contains("not-installed", missingLaunch.CannotStart);
+
+        var devCtx = Context(new PermissionProfile
+        {
+            Name = PermissionProfiles.Worker,
+            CanEditFiles = true,
+            CanRunCommands = true,
+            CanPush = false,
+            Network = NetworkAccess.Allowlist,
+            AllowedHosts = ["api.github.com"],
+        }) with
+        {
+            Model = "gemini-4-neon-high",
+            RunnerIsolationEnabled = true,
+            RunnerSandboxed = false,
+            KeepAgentTools = ["context7"],
+        };
+
+        var devLaunch = adapter.BuildLaunch(devCtx);
+        Assert.Null(devLaunch.CannotStart);
+        Assert.Null(devLaunch.StandardInput);
+        Assert.Contains("--output-format", devLaunch.Arguments);
+        Assert.Contains("stream-json", devLaunch.Arguments);
+        Assert.Contains("--disable-slash-commands", devLaunch.Arguments);
+        Assert.Contains("--dangerously-skip-permissions", devLaunch.Arguments);
+        Assert.Contains("--sandbox", devLaunch.Arguments);
+        Assert.NotNull(devLaunch.Note);
+        Assert.Contains("--model", devLaunch.Arguments);
+        Assert.Contains("gemini-4-neon-high", devLaunch.Arguments);
+        Assert.Contains("-p", devLaunch.Arguments);
+        Assert.Equal("agt_1", devLaunch.Environment["MBUS_AGENT"]);
+
+        var settingsIdx = devLaunch.Arguments.ToList().IndexOf("--settings");
+        Assert.True(settingsIdx >= 0);
+        var settingsPath = devLaunch.Arguments[settingsIdx + 1];
+        var devSettings = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(settingsPath))!;
+        var devAllow = devSettings["permissions"]!["allow"]!.AsArray().Select(n => (string)n!).ToList();
+        var devDeny = devSettings["permissions"]!["deny"]!.AsArray().Select(n => (string)n!).ToList();
+        Assert.Contains("mcp(mbus/*)", devAllow);
+        Assert.Contains("mcp(context7/*)", devAllow);
+        Assert.Contains("mcp(github/*)", devDeny);
+        Assert.DoesNotContain("mcp(context7/*)", devDeny);
+        Assert.Contains("command(*)", devAllow);
+        Assert.Contains("read_url(api.github.com)", devAllow);
+        Assert.Contains("command(gh pr merge)", devDeny);
+        Assert.Contains("command(git push)", devDeny);
+
+        // Read-only reviewer profile: no --dangerously-skip-permissions, explicit default/request-review mode,
+        // write_file and network denied, allowed Bash commands mapped, and all non-mbus MCP servers denied.
+        var reviewCtx = Context(new PermissionProfile
+        {
+            Name = PermissionProfiles.Reviewer,
+            CanEditFiles = false,
+            CanRunCommands = false,
+            CanPush = false,
+            Network = NetworkAccess.None,
+            AllowedTools = ["Bash(git log:*)", "Bash(git diff:*)"],
+        }) with { RunnerSandboxed = true };
+
+        var reviewLaunch = adapter.BuildLaunch(reviewCtx);
+        Assert.DoesNotContain("--dangerously-skip-permissions", reviewLaunch.Arguments);
+        Assert.DoesNotContain("--sandbox", reviewLaunch.Arguments);
+        Assert.Null(reviewLaunch.Note);
+        var reviewSettings = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(settingsPath))!;
+        Assert.Equal("", (string?)reviewSettings["agentMode"]);
+        Assert.Equal("request-review", (string?)reviewSettings["toolPermission"]);
+        var reviewAllow = reviewSettings["permissions"]!["allow"]!.AsArray().Select(n => (string)n!).ToList();
+        var reviewDeny = reviewSettings["permissions"]!["deny"]!.AsArray().Select(n => (string)n!).ToList();
+        Assert.Contains("command(git log)", reviewAllow);
+        Assert.Contains("command(git diff)", reviewAllow);
+        Assert.Contains("write_file(*)", reviewDeny);
+        Assert.Contains("read_url(*)", reviewDeny);
+        Assert.Contains("mcp(github/*)", reviewDeny);
+        Assert.Contains("mcp(context7/*)", reviewDeny);
+        Assert.DoesNotContain("command(*)", reviewDeny);
+
+        // RunNetwork does not expose wildcard *.googleapis.com (which would include storage.googleapis.com).
+        Assert.DoesNotContain("*.googleapis.com", MessageBus.Cli.Runner.Sandbox.RunNetwork.ModelProviders);
+        Assert.Contains("cloudcode-pa.googleapis.com", MessageBus.Cli.Runner.Sandbox.RunNetwork.ModelProviders);
+    }
 }

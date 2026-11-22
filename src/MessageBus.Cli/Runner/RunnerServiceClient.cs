@@ -76,6 +76,11 @@ public sealed class HttpRunnerServiceClient(HttpClient http) : IRunnerServiceCli
     /// <inheritdoc />
     public async Task<IReadOnlyList<AgentInfo>> InventoryAsync(MachineInventory inventory, CancellationToken cancellationToken)
     {
+        if (MessageBus.Cli.Server.MachineInventoryCompatibility.HasAntigravity(inventory))
+        {
+            var supported = await MessageBus.Mcp.TargetCapabilities.SupportsAsync(http, MessageBus.Cli.Server.MachineInventoryCompatibility.CapabilityToken, cancellationToken).ConfigureAwait(false);
+            inventory = MessageBus.Cli.Server.MachineInventoryCompatibility.ForServer(inventory, supported);
+        }
         // The service takes inventory at the machines route (the original issue, the original issue) and answers with the registry's agents.
         using var response = await SendAsync(HttpMethod.Put, ApiRoutes.MachineInventory, inventory, cancellationToken).ConfigureAwait(false);
         var text = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
