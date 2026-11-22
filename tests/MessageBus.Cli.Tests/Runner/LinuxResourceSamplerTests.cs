@@ -134,8 +134,32 @@ public sealed class LinuxResourceSamplerTests
         fixture.Process(300, 200, 9000, 9999, 30);
         var reused = await fixture.Sample();
         Assert.Null(reused.Tasks!.CpuPercent);
-        Assert.Equal("process-warmup", reused.Tasks.Reason);
-        Assert.Equal(0d, reused.Runner!.CpuPercent);
+        Assert.Equal("process-root-reused", reused.Tasks.Reason);
+        Assert.Null(reused.Tasks.ResidentBytes);
+        Assert.Null(reused.Runner!.CpuPercent);
+        Assert.Equal("process-task-exclusion-incomplete", reused.Runner.Reason);
+    }
+
+    [Fact]
+    public async Task Reused_parent_does_not_adopt_an_older_process_and_removed_roots_release_their_identity()
+    {
+        var fixture = new ProcFixture { Roots = [200] };
+        fixture.Process(100, 1, 1000, 0, 10);
+        fixture.Process(200, 100, 5000, 0, 20);
+        fixture.Process(300, 200, 3000, 0, 30); // Child of an earlier incarnation of PID 200.
+        var first = await fixture.Sample();
+        Assert.Equal(1, first.Tasks!.ProcessCount);
+        Assert.Equal(20 * 4096, first.Tasks.ResidentBytes);
+        fixture.Process(200, 100, 6000, 0, 40);
+        var reused = await fixture.Sample();
+        Assert.Equal("process-root-reused", reused.Tasks!.Reason);
+        Assert.Null(reused.Tasks.ProcessCount);
+        fixture.Roots = [];
+        await fixture.Sample();
+        fixture.Roots = [200];
+        var newTask = await fixture.Sample();
+        Assert.Equal(1, newTask.Tasks!.ProcessCount);
+        Assert.Equal(40 * 4096, newTask.Tasks.ResidentBytes);
     }
 
     [Fact]

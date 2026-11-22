@@ -17,6 +17,7 @@ internal sealed class LinuxResourceSampler : ISystemResourceSampler
     private readonly bool _supported;
     private readonly char[] _buffer = new char[MaxFileChars + 1];
     private Baseline? _previous;
+    private Dictionary<int, long> _rootIdentities = [];
     private bool _readFailure;
     private bool _lastReadFailure;
     private CancellationToken _cancellation;
@@ -80,16 +81,36 @@ internal sealed class LinuxResourceSampler : ISystemResourceSampler
                 utilization = Percent(1 - (double)(idle - oldIdle) / (total - oldTotal));
         }
 
-        var taskSet = Descendants(processes, context.OwnedRunRootProcessIds);
-        var runnerSet = Descendants(processes, [context.RunnerProcessId]);
+        var nextIdentities = new Dictionary<int, long>();
+        var reusedRoots = new HashSet<int>();
+        foreach (var root in context.OwnedRunRootProcessIds.Take(MaxProcesses).Prepend(context.RunnerProcessId))
+        {
+            if (_rootIdentities.TryGetValue(root, out var identity))
+            {
+                nextIdentities[root] = identity;
+                if (processes.TryGetValue(root, out var observed) && observed.Start != identity)
+                    reusedRoots.Add(root);
+            }
+            else if (processes.TryGetValue(root, out var observed)) nextIdentities[root] = observed.Start;
+        }
+        var taskSet = Descendants(processes, context.OwnedRunRootProcessIds, reusedRoots);
+        var runnerSet = Descendants(processes, [context.RunnerProcessId], reusedRoots);
         runnerSet.ExceptWith(taskSet);
         var tasks = Aggregate(taskSet, context.OwnedRunRootProcessIds, processes, previous, seconds, limits.Cpus, processPartial);
         var runner = Aggregate(runnerSet, [context.RunnerProcessId], processes, previous, seconds, limits.Cpus, processPartial);
+        if (context.OwnedRunRootProcessIds.Any(reusedRoots.Contains))
+        {
+            tasks = new RunnerProcessTreeSample { Reason = "process-root-reused" };
+            runner = new RunnerProcessTreeSample { Reason = "process-task-exclusion-incomplete" };
+        }
+        else if (reusedRoots.Contains(context.RunnerProcessId))
+            runner = new RunnerProcessTreeSample { Reason = "process-root-reused" };
         var partial = _readFailure || processPartial || host.Total is null || host.LogicalCpus is null ||
             hostTotal is null || hostAvailable is null || limits.Unknown || runner.Reason is not null || tasks.Reason is not null ||
             (limits.CpuSource != ResourceLimitSource.Host && limits.UsageSeconds is null);
         cancellationToken.ThrowIfCancellationRequested();
         _previous = new Baseline(context.TimeProvider, stamp, host, limits.Cpus, limits.UsageSeconds, limits.UsageKey, processes);
+        _rootIdentities = nextIdentities;
         return ValueTask.FromResult(new ResourceSamplingResult(context.TimeProvider.GetUtcNow(), window,
             partial ? ResourceSampleStatus.Partial : ResourceSampleStatus.Ok, partial ? "read-partial" : null,
             new RunnerCpuSample { HostLogicalCpus = host.LogicalCpus, EffectiveCpus = limits.Cpus,
@@ -328,7 +349,8 @@ internal sealed class LinuxResourceSampler : ISystemResourceSampler
         };
     }
 
-    private static HashSet<int> Descendants(Dictionary<int, ProcessCounters> processes, IReadOnlyList<int> roots)
+    private static HashSet<int> Descendants(Dictionary<int, ProcessCounters> processes, IReadOnlyList<int> roots,
+        HashSet<int> reusedRoots)
     {
         // Build one adjacency map instead of repeatedly walking every process's parent chain.
         var children = new Dictionary<int, List<int>>();
@@ -341,8 +363,11 @@ internal sealed class LinuxResourceSampler : ISystemResourceSampler
         var pending = new Stack<int>(roots.Take(MaxProcesses));
         while (pending.TryPop(out var pid))
         {
-            if (!processes.ContainsKey(pid) || !result.Add(pid)) continue;
-            if (children.TryGetValue(pid, out var list)) foreach (var child in list) pending.Push(child);
+            if (reusedRoots.Contains(pid) || !processes.TryGetValue(pid, out var process) || !result.Add(pid)) continue;
+            if (children.TryGetValue(pid, out var list))
+                foreach (var child in list)
+                    // The new process that reused a parent PID cannot own its older children.
+                    if (processes[child].Start >= process.Start) pending.Push(child);
         }
         return result;
     }
