@@ -174,7 +174,12 @@ public sealed class MacRunnerSupervisorTests
             await supervisor.WaitForExitAsync(deadline.Token);
             Assert.Equal(0, supervisor.ExitCode);
             Assert.True(child.HasExited, "The supervisor must wait for its active child to terminate.");
-            Assert.Equal(new[] { "started", "terminated" }, fixture.Events);
+            var events = fixture.Events;
+            Assert.Equal("started", events[0]);
+            // The trap and shutdown wait can both forward TERM before the child finishes exiting.
+            // Require one launch and a completed termination, without assuming signals are coalesced.
+            Assert.NotEmpty(events.Skip(1));
+            Assert.All(events.Skip(1), entry => Assert.Equal("terminated", entry));
         }
         finally
         {
