@@ -140,8 +140,9 @@ public sealed class ServiceManager(ServicePlatform platform, string userName, ui
 /// update stopped, the original issue). So the task's command is a loop: it starts the runner again a few seconds after any exit but
 /// a clean stop (0), like launchd's KeepAlive; the repeat stays as a second way back. It runs without a window
 /// (<c>conhost --headless</c>), its output appended to a log.</item>
-/// <item>macOS: a launchd agent that starts at sign-in and is restarted whenever it exits with a code other than 0
-/// (an update, or a connection that gave up); 0 means it was stopped on purpose.</item>
+/// <item>macOS: a launchd agent with a supervisor that restarts the runner after failures and updates without
+/// exiting itself. This also works when the GUI domain defers KeepAlive respawns in on-demand-only mode.
+/// A clean runner exit or stop request ends the supervisor.</item>
 /// </list>
 /// </summary>
 public static class RunnerServiceDefinitions
@@ -292,7 +293,7 @@ public static class RunnerServiceDefinitions
                 new XElement("dict",
                     Key("Label"), Text(LaunchdLabel),
                     Key("ProgramArguments"), new XElement("array", new[] { "/bin/sh", "-c",
-                        $"if [ -f {Update.DotnetToolUpdater.Sh(Path.Combine(configDirectory, "update", "wrapper.sh"))} ]; then /bin/sh {Update.DotnetToolUpdater.Sh(Path.Combine(configDirectory, "update", "wrapper.sh"))}; fi; exec " + string.Join(" ", command.Select(Update.DotnetToolUpdater.Sh)) }.Select(Text)),
+                        MacRunnerSupervisor.Script(configDirectory), MacRunnerSupervisor.ArgumentMarker }.Concat(command).Select(Text)),
                     Key("RunAtLoad"), new XElement("true"),
                     // Restart after any exit but a clean stop (0): an update (75) or a connection that gave up (1).
                     Key("KeepAlive"), new XElement("dict", Key("SuccessfulExit"), new XElement("false")),

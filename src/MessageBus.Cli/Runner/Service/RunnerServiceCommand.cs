@@ -614,7 +614,9 @@ internal static class RunnerServiceCommand
                 var index = items.FindIndex(e => e.Name == "key" && e.Value == "ProgramArguments");
                 tokens = items[index + 1].Elements("string").Select(e => e.Value);
                 var argv = tokens.ToArray();
-                if (argv is ["/bin/sh", "-c", var shell] && shell.LastIndexOf("; exec ", StringComparison.Ordinal) is var exec && exec >= 0)
+                if (argv is ["/bin/sh", "-c", _, MacRunnerSupervisor.ArgumentMarker, .. var supervised])
+                    tokens = supervised;
+                else if (argv is ["/bin/sh", "-c", var shell] && shell.LastIndexOf("; exec ", StringComparison.Ordinal) is var exec && exec >= 0)
                     tokens = ShTokens(shell[(exec + 7)..]);
             }
             else
@@ -660,8 +662,10 @@ internal static class RunnerServiceCommand
                 var args = root.Descendants().First(e => e.Name.LocalName == "Arguments").Value;
                 return args.Contains($"(if exist \"{hook}\" call \"{hook}\") & ", StringComparison.Ordinal);
             }
-            return root.Descendants("array").SelectMany(e => e.Elements("string")).Any(e => e.Value.Contains(
-                $"if [ -f {Update.DotnetToolUpdater.Sh(hook)} ]; then /bin/sh {Update.DotnetToolUpdater.Sh(hook)}; fi; exec ", StringComparison.Ordinal));
+            var scripts = root.Descendants("array").SelectMany(e => e.Elements("string")).Select(e => e.Value);
+            var quotedHook = Update.DotnetToolUpdater.Sh(hook);
+            return scripts.Any(script => script.Contains($"if [ -f {quotedHook} ]; then /bin/sh {quotedHook}; fi; exec ", StringComparison.Ordinal)
+                || script.Contains(MacRunnerSupervisor.Script(directory), StringComparison.Ordinal));
         }
         catch (Exception ex) when (ex is System.Xml.XmlException or InvalidOperationException or ArgumentException) { return false; }
     }
