@@ -20,6 +20,22 @@ mbus runner install
 shows each file it changes first. `mbus runner install` keeps the machine available for tasks. Update later with
 `dotnet tool update --global MessageBus.Ai.Cli`, or with **Update now** on the dashboard's Runners page.
 
+### Unattended Mac runners
+
+The installed launch agent keeps a supervisor running while it restarts a failed runner after five seconds.
+It applies pending updates before each launch. This avoids depending on launchd to respawn the runner when
+macOS defers automatic starts in a GUI session's on-demand-only mode. A clean exit, `mbus runner stop`, or
+`mbus runner uninstall` stops it. If the supervisor itself is terminated, launchd's restart can still be deferred.
+
+After upgrading an existing Mac installation, run `mbus runner install` once to replace its older launch agent.
+The new service definition takes effect then; updating the executable alone leaves the previous definition in place.
+For an already installed but stopped service, `launchctl kickstart "gui/$(id -u)/ai.messagebus.runner"` starts it
+explicitly. Check `~/.mbus/logs/runner.log` and `runner-errors.log` for connection and supervisor failures.
+
+Agent authentication is separate: to avoid depending on Claude Code's login Keychain, set
+`CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token` when running `mbus runner install`. This stores it for the
+runner's agents; the supervisor neither creates nor refreshes agent credentials.
+
 ### Windows runners that start at boot
 
 For personal PCs, `mbus runner install` sets up a Scheduled Task that starts when you sign in.
