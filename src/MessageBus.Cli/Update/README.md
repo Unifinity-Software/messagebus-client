@@ -42,6 +42,22 @@ out/tools/mbus --version
 
 On Windows the launcher is `out/tools/mbus.exe`.
 
+**Agent sessions.** For global and `--tool-path` installs, `mbus connect` installs an immutable bootstrap under
+`<tools>/.mbus-mcp/launcher-v1/` and writes `dotnet <bootstrap>/mbus.dll __mcp-launch <tools> mcp` into the agent's
+MCP configuration. The bootstrap resolves the currently installed package on each connection and atomically
+copies its complete program directory to `.mbus-mcp/runtimes/<package-version>-<checksum>/`. The MCP child
+inherits the agent's streams and environment; neither process loads the replaceable tool shim or store.
+The bootstrap holds a shared runtime lease for the session, so later launches can delete inactive copies while
+preserving every dependency of a live session. Concurrent starts publish only complete copies. The immutable
+bootstrap remains for the agent configurations that reference it. Standalone, image-managed, source-build and
+local-manifest installations keep their existing launch commands.
+
+After upgrading from the old direct launch, run `mbus connect` and reconnect each agent's mbus MCP server once.
+Already running direct `mbus mcp` processes cannot be moved by updating the installation and remain real holders.
+After adoption, ordinary MCP sessions no longer delay either manual or service updates. Runner tasks still drain
+before the runner updates. The real-tool regression in `RealDotnetUpdateTests` exercises both appliers with live
+MCP sessions, version selection on a new connection and a first attachment call after the old store is removed.
+
 **Manual update.** `mbus update` selects the newest listed package for the channel (or the exact `--version`), lists
 any processes holding this install and refuses while any remain. It also refuses when a registered runner uses this
 install: use **Update now** on the Runners page or `mbus runner stop` first. It asks
@@ -56,7 +72,7 @@ from the standalone feed.
 install once on this machine so it can update itself." Terminal runners, local manifest tools and Linux services
 can't use this handoff.
 
-The runner keeps taking work while other processes hold this install, reporting `waiting-for-sessions` and only the
+The runner keeps taking work while legacy direct MCP sessions or other processes hold this install, reporting `waiting-for-sessions` and only the
 number of holders (its local log lists their process ids and names). Once clear, it drains its tasks, checks again,
 prepares the update and exits 75. It never kills sessions. Before each service start, `update/wrapper.sh` or
 `wrapper.cmd` starts a private applier copy outside the tool store, which runs `dotnet tool update` with an isolated

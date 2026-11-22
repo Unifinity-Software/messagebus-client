@@ -45,7 +45,7 @@ public static class RunnerUpdateSetup
             log.WriteLine("Updates: the Windows service supervisor updates the private .NET tool after the worker exits.");
             return new DotnetToolUpdater(worker, host.ConfigDirectory, service.Dotnet, log,
                 record ?? RunnerUpdateRecord.In(host.ConfigDirectory), package.Version, host.Time)
-                { MinimumServiceVersion = service.HostVersion };
+            { MinimumServiceVersion = service.HostVersion };
         }
         if (DotnetToolInstall.Running is { } installedTool)
         {
@@ -75,7 +75,7 @@ public static class RunnerUpdateSetup
             if (reason is not null) { log.WriteLine("Updates: off. " + reason); return null; }
             var updater = new DotnetToolUpdater(installedTool, host.ConfigDirectory, dotnet!, log,
                 record ?? RunnerUpdateRecord.In(host.ConfigDirectory), CliHost.Version, host.Time);
-            log.WriteLine("Updates: through dotnet, applied by the registered runner service after open sessions close.");
+            log.WriteLine("Updates: through dotnet, applied by the registered runner service after running tasks finish.");
             return updater;
         }
         SelfUpdater probe;
