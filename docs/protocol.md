@@ -755,12 +755,15 @@ Timing and close codes come from the public `Groundhog.Protocol` package: the se
 The heartbeat response can advertise `supportsResourceSamples: true` for the current runner
 connection session. An omitted or false flag means the runner omits `resources` from heartbeats.
 Once negotiated, sample collection and reporting run every 15 seconds with at least one busy slot
-and every 60 seconds when idle. Lease heartbeats keep their existing timing. Local runner
-`/status` can expose the latest sample as `resources` independently of service support.
+and every 60 seconds when idle. The runner keeps any faster active lease heartbeat interval.
+Every reconnect requires a new acknowledgement, including when the transport reuses the session
+ID. Faster heartbeats can repeat the cached sample with its original sequence, timestamp and
+window. Local runner `/status` can expose the latest sample as `resources` independently of
+service support.
 
-A `RunnerResourceSample` has `schemaVersion: 1`, a strictly increasing `sequence` within the
-connection session, a UTC `sampledAt`, and `windowMs` for the monotonic measurement window when
-known. `status` describes collection (`ok`, `partial`, `unsupported`, or `error`).
+A `RunnerResourceSample` has `schemaVersion: 1`, a `sequence` that strictly increases for new
+observations within the connection session, a UTC `sampledAt`, and `windowMs` for the
+monotonic measurement window when known. `status` describes collection (`ok`, `partial`, `unsupported`, or `error`).
 `reason` is an optional short code. Missing or null metrics represent unknown values.
 A zero metric represents a measured zero.
 

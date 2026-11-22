@@ -384,6 +384,7 @@ namespace MessageBus.Cli.Runner
         {
             var session = Guid.NewGuid().ToString("N");
             var engine = dispatcher.Engine;
+            engine.SetResourceConnectionAvailable(false);
             engine.SessionId = session;
             ReverseConnectionClient? client = null;
             long connectedAt = 0; // UTC ticks of the open connection; 0 while not connected
@@ -393,6 +394,7 @@ namespace MessageBus.Cli.Runner
                 if (opened != 0 && sentAt.UtcTicks - opened >= ConnectGrace.Ticks
                     && client?.DropConnection("The service doesn't have this runner's connection (it restarted, or a proxy in between kept a dead connection open).") == true)
                 {
+                    engine.SetResourceConnectionAvailable(false);
                     Interlocked.Exchange(ref connectedAt, 0);
                 }
             }
@@ -427,6 +429,7 @@ namespace MessageBus.Cli.Runner
                 },
                 OnStatus = status =>
                 {
+                    engine.SetResourceConnectionAvailable(status.State == ReverseConnectionState.Connected);
                     Interlocked.Exchange(ref connectedAt, status.State == ReverseConnectionState.Connected ? time.GetUtcNow().UtcTicks : 0);
                     if (status.State == ReverseConnectionState.Connected)
                     {
