@@ -23,7 +23,7 @@ public sealed class AgentEnvironmentStore
     /// <summary>The variables carried into the service: the agents' sign-ins mbus recognises (<see cref="MessageBus.Cli.Agents.AgentScanner"/>).</summary>
     /// <remarks>Not <c>GH_TOKEN</c> or <c>GITHUB_TOKEN</c>: those reach repositories, and runs get their own per-run credential (the original issue).</remarks>
     public static readonly IReadOnlyList<string> Names =
-        [MessageBus.Cli.Agents.SignInChecks.ClaudeTokenVariable, "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "CODEX_API_KEY", "COPILOT_GITHUB_TOKEN"];
+        [MessageBus.Cli.Agents.SignInChecks.ClaudeTokenVariable, "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "CODEX_API_KEY", "COPILOT_GITHUB_TOKEN", "GEMINI_API_KEY"];
 
     /// <summary>macOS and Linux: JSON, owner-only.</summary>
     public const string FileName = "agent-env";

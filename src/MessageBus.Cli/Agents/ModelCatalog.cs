@@ -33,7 +33,7 @@ internal sealed record AgentModels(string? Default, IReadOnlyList<string> Models
 /// </summary>
 internal static class ModelCatalog
 {
-    /// <summary>How long <c>codex debug models</c> may take before the cached catalog is read instead.</summary>
+    /// <summary>How long <c>codex debug models</c> or <c>agy models</c> may take before falling back.</summary>
     internal static readonly TimeSpan CodexListTimeout = TimeSpan.FromSeconds(5);
 
     /// <summary>Largest catalog file read; anything bigger isn't one.</summary>
@@ -53,6 +53,7 @@ internal static class ModelCatalog
                 AgentKind.ClaudeCode => Claude(locations, env, version),
                 AgentKind.Codex => await CodexAsync(executable, locations, env, cancellationToken).ConfigureAwait(false),
                 AgentKind.OpenCode => OpenCodeSettings.Read(env.Get, locations.HomeDirectory, version).Inventory,
+                AgentKind.Antigravity => await AntigravityAsync(executable, locations, env, cancellationToken).ConfigureAwait(false),
                 _ => AgentModels.Unknown,
             };
         }
@@ -179,6 +180,60 @@ internal static class ModelCatalog
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
         return models.Count == 0 ? null : models;
+    }
+
+    // ── Google Antigravity CLI ──────────────────────────────────────────────────
+
+    private static async Task<AgentModels> AntigravityAsync(string executable, AgentLocations locations, SignInEnvironment env, CancellationToken cancellationToken)
+    {
+        var configured = ReadString(locations.AntigravitySettings, "model");
+        var listed = await CommandRunner.RunAsync(executable, ["models"], cancellationToken, CodexListTimeout, environment: env.Added).ConfigureAwait(false) is { ExitCode: 0 } run
+            ? ParseAntigravityModels(run.Output)
+            : null;
+        if (listed is null)
+        {
+            // Antigravity stores a display label (e.g. "Gemini 4 Neon (High)") in settings.json, whereas --model expects a slug.
+            // Without `agy models` to resolve labels, only return configured when it already looks like a slug (no whitespace).
+            var slug = configured is { Length: > 0 } && !configured.Any(char.IsWhiteSpace) ? configured : null;
+            return AgentModels.OnlyDefault(slug);
+        }
+        var model = ResolveAntigravityDefault(configured, listed.Value.Labels);
+        var models = listed.Value.Models.ToList();
+        if (model is not null && !models.Contains(model, StringComparer.OrdinalIgnoreCase)) models.Insert(0, model);
+        return new AgentModels(model, models, Partial: false);
+    }
+
+    /// <summary>
+    /// Parses <c>agy models</c> tab-separated output (<c>slug\tDisplay Name</c>), ignoring status lines;
+    /// null when no model rows are present.
+    /// </summary>
+    internal static (IReadOnlyList<string> Models, IReadOnlyDictionary<string, string> Labels)? ParseAntigravityModels(string? output)
+    {
+        if (string.IsNullOrWhiteSpace(output)) return null;
+        var models = new List<string>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var labels = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var raw in output.Split('\n'))
+        {
+            var line = raw.Trim();
+            if (line.Length == 0) continue;
+            var tab = line.IndexOf('\t');
+            if (tab <= 0) continue;
+            var slug = line[..tab].Trim();
+            var display = line[(tab + 1)..].Trim();
+            if (slug.Length == 0 || slug.Any(char.IsWhiteSpace)) continue;
+            if (seen.Add(slug)) models.Add(slug);
+            if (display.Length > 0) labels.TryAdd(display, slug);
+        }
+        return models.Count == 0 ? null : (models, labels);
+    }
+
+    /// <summary>Resolves Antigravity's saved display label (e.g. <c>Gemini 4 Neon (High)</c>) to its model slug.</summary>
+    internal static string? ResolveAntigravityDefault(string? configured, IReadOnlyDictionary<string, string>? labels)
+    {
+        if (string.IsNullOrWhiteSpace(configured)) return null;
+        var value = configured.Trim();
+        return labels is not null && labels.TryGetValue(value, out var slug) ? slug : value;
     }
 
     // ── helpers ─────────────────────────────────────────────────────────────────

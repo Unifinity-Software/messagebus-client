@@ -56,6 +56,7 @@ public sealed class ConnectTests
             (agents[AgentKind.Codex].Found, agents[AgentKind.Codex].Version, agents[AgentKind.Codex].OnPath, agents[AgentKind.Codex].McpConfigured, agents[AgentKind.Codex].SignedIn));
         Assert.False(agents[AgentKind.Copilot].Found);
         Assert.False(agents[AgentKind.OpenCode].Found);
+        Assert.False(agents[AgentKind.Antigravity].Found);
     }
 
     [Fact]
@@ -100,6 +101,7 @@ public sealed class ConnectTests
         machine.InstallAgent("codex", "codex-cli 0.50.0");
         machine.InstallAgent("copilot", "GitHub Copilot CLI 1.0.112.");
         machine.InstallAgent("opencode", "2.3.0");
+        machine.InstallAgent("agy", "1.5.14");
         machine.SkillFiles["SKILL.md"] = "---\nname: mbus-orchestrate\n---\n";
         machine.SkillFiles["reference/patterns.md"] = "# Patterns\n";
         var claudeJson = machine.WriteHomeFile(".claude.json", """{ "theme": "dark", "mcpServers": { "other": { "command": "other" } } }""");
@@ -107,6 +109,8 @@ public sealed class ConnectTests
             "model = \"gpt-5\"\n\n[mcp_servers.mbus]\ncommand = \"old-mbus\"\n\n[mcp_servers.mbus.env]\nX = \"1\"\n\n[mcp_servers.other]\ncommand = \"other\"\n");
 
         var copilotJson = machine.WriteHomeFile(Path.Combine(".copilot", "mcp-config.json"), """{ "mcpServers": { "playwright": { "type": "local", "command": "npx", "args": [], "tools": ["*"] } } }""");
+        // Fresh Antigravity installs leave a 0-byte mcp_config.json; mbus connect handles it cleanly.
+        var agyJson = machine.WriteHomeFile(Path.Combine(".gemini", "config", "mcp_config.json"), "");
         // OpenCode 2's own shape (mcp.servers), with a comment, as in an opencode.jsonc it wrote.
         var openCodeJsonc = machine.WriteHomeFile(Path.Combine(".config", "opencode", "opencode.jsonc"), """
             {
@@ -147,7 +151,12 @@ public sealed class ConnectTests
         Assert.Equal("https://mcp.context7.com/mcp", (string?)openCode["mcp"]!["servers"]!["context7"]!["url"]);
         Assert.Equal([machine.MbusCommand.Command, "mcp"], openCode["mcp"]!["servers"]!["mbus"]!["command"]!.AsArray().Select(a => (string?)a));
 
-        foreach (var skills in new[] { ".claude", ".codex", ".copilot", Path.Combine(".config", "opencode") }.Select(d => Path.Combine(machine.Home, d, "skills")))
+        var agy = JsonNode.Parse(File.ReadAllText(agyJson))!["mcpServers"]!;
+        Assert.Equal(machine.MbusCommand.Command, (string?)agy["mbus"]!["command"]);
+        Assert.Equal(["mcp"], agy["mbus"]!["args"]!.AsArray().Select(a => (string?)a));
+        Assert.False((bool?)agy["mbus"]!["disabled"]);
+
+        foreach (var skills in new[] { ".claude", ".codex", ".copilot", Path.Combine(".config", "opencode"), Path.Combine(".gemini", "config") }.Select(d => Path.Combine(machine.Home, d, "skills")))
         {
             Assert.True(File.Exists(Path.Combine(skills, "mbus-orchestrate", "SKILL.md")));
             Assert.True(File.Exists(Path.Combine(skills, "mbus-orchestrate", "reference", "patterns.md")));
@@ -158,6 +167,100 @@ public sealed class ConnectTests
         Assert.True(agents[AgentKind.Codex].McpConfigured);
         Assert.True(agents[AgentKind.Copilot].McpConfigured);
         Assert.True(agents[AgentKind.OpenCode].McpConfigured);
+        Assert.True(agents[AgentKind.Antigravity].McpConfigured);
+    }
+
+    [Fact]
+    public async Task Antigravity_connect_rescan_and_model_catalog_parsing()
+    {
+        using var machine = new TestMachine();
+        machine.InstallFake("git", new("git version 2.50.1"));
+        machine.InstallAgent("agy", "1.5.14");
+        machine.WriteHomeFile(Path.Combine(".gemini", "antigravity-cli", "cache", "onboarding.json"), """{ "onboardingComplete": true }""");
+        machine.WriteHomeFile(Path.Combine(".gemini", "antigravity-cli", "settings.json"), """{ "model": "Gemini 4 Neon (High)" }""");
+
+        Assert.Equal(0, (await machine.RunAsync("connect", "agy", "--yes")).ExitCode);
+        var agents = await ScanAsync(machine);
+        var agy = agents[AgentKind.Antigravity];
+        Assert.True(agy.Found);
+        Assert.Equal("1.5.14", agy.Version);
+        Assert.Equal("google", agy.Vendor);
+        Assert.True(agy.McpConfigured);
+        Assert.True(agy.SignedIn);
+        // Without `agy models` output to resolve the display label, a label with spaces is not reported as a --model slug.
+        Assert.Null(agy.DefaultModel);
+
+        // When settings.json holds a slug directly, it is reported even without `agy models`.
+        machine.WriteHomeFile(Path.Combine(".gemini", "antigravity-cli", "settings.json"), """{ "model": "gemini-4-neon-high" }""");
+        var withSlug = (await ScanAsync(machine))[AgentKind.Antigravity];
+        Assert.Equal("gemini-4-neon-high", withSlug.DefaultModel);
+
+        // Model catalog parsing resolves display labels back to slugs.
+        var parsed = MessageBus.Cli.Agents.ModelCatalog.ParseAntigravityModels(
+            "Fetching available models...\ngemini-4-neon-high\tGemini 4 Neon (High)\ngemini-3.8-flash-medium\tGemini 3.8 Flash (Medium)\n");
+        Assert.NotNull(parsed);
+        Assert.Equal(["gemini-4-neon-high", "gemini-3.8-flash-medium"], parsed.Value.Models);
+        Assert.Equal("gemini-4-neon-high", MessageBus.Cli.Agents.ModelCatalog.ResolveAntigravityDefault("Gemini 4 Neon (High)", parsed.Value.Labels));
+
+        Assert.Equal("antigravity", MessageBus.Mcp.LocalTools.AgentKindOf("Antigravity CLI"));
+        Assert.Equal("antigravity", MessageBus.Mcp.LocalTools.AgentKindOf("agy"));
+    }
+
+    [Fact]
+    public async Task Antigravity_inventory_is_gated_by_server_capability_token()
+    {
+        var fullInventory = new MachineInventory
+        {
+            MachineId = "m_1", HostName = "box", Os = MachineOs.Windows, Architecture = CpuArchitecture.X64, CliVersion = "1.5.0",
+            Capabilities = ["os:windows", "agent:claude-code", "agent:antigravity"],
+            Agents =
+            [
+                new DetectedAgent { Kind = AgentKind.ClaudeCode, Found = true, SignedIn = true, Vendor = "anthropic" },
+                new DetectedAgent { Kind = AgentKind.Antigravity, Found = true, SignedIn = true, Vendor = "google" },
+            ],
+            ScannedAt = DateTimeOffset.UnixEpoch,
+        };
+
+        // Server without agentKindAntigravityV1: client omits Antigravity on the first PUT (no 400 retry).
+        var legacyBodies = new List<string>();
+        using (var legacyHttp = new HttpClient(new CapabilityGatedInventoryHandler(advertisesAntigravity: false, legacyBodies)) { BaseAddress = new Uri("https://bus.example.test/") })
+        {
+            var runnerClient = new HttpRunnerServiceClient(legacyHttp);
+            await runnerClient.InventoryAsync(fullInventory, TestContext.Current.CancellationToken);
+        }
+        Assert.Single(legacyBodies);
+        Assert.DoesNotContain("antigravity", legacyBodies[0], StringComparison.OrdinalIgnoreCase);
+
+        // Server advertising agentKindAntigravityV1: client includes Antigravity on the first PUT.
+        var modernBodies = new List<string>();
+        using (var modernHttp = new HttpClient(new CapabilityGatedInventoryHandler(advertisesAntigravity: true, modernBodies)) { BaseAddress = new Uri("https://bus.example.test/") })
+        {
+            var runnerClient = new HttpRunnerServiceClient(modernHttp);
+            await runnerClient.InventoryAsync(fullInventory, TestContext.Current.CancellationToken);
+        }
+        Assert.Single(modernBodies);
+        Assert.Contains("antigravity", modernBodies[0], StringComparison.OrdinalIgnoreCase);
+    }
+
+    private sealed class CapabilityGatedInventoryHandler(bool advertisesAntigravity, List<string> putBodies) : HttpMessageHandler
+    {
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            if (request.Method == HttpMethod.Get && request.RequestUri?.AbsolutePath.EndsWith("/api/server", StringComparison.Ordinal) == true)
+            {
+                var caps = advertisesAntigravity ? """["agentKindAntigravityV1"]""" : "[]";
+                return new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+                {
+                    Content = new StringContent($$"""{"product":"messagebus.ai","capabilities":{{caps}}}""", System.Text.Encoding.UTF8, "application/json"),
+                };
+            }
+            var body = request.Content is null ? "" : await request.Content.ReadAsStringAsync(cancellationToken);
+            putBodies.Add(body);
+            return new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+            {
+                Content = new StringContent("[]", System.Text.Encoding.UTF8, "application/json"),
+            };
+        }
     }
 
     [Fact]

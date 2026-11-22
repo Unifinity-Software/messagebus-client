@@ -144,6 +144,7 @@ public sealed class AgentConnectRequests(CliHost host, IMachineConfirmer confirm
         AgentKind.Codex => "codex",
         AgentKind.Copilot => "copilot",
         AgentKind.OpenCode => "opencode",
+        AgentKind.Antigravity => "agy",
         _ => "",
     };
 }

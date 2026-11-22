@@ -32,7 +32,7 @@ internal static class DoctorCommand
             Description = "Also have each agent change a line, build, test and commit in a small project here, as a task would. "
                 + "This runs each agent once, so it uses some of its tokens.",
         };
-        var agent = new Option<string?>("--agent") { Description = "With --smoke: test only this agent (claude-code, codex, copilot or opencode)." };
+        var agent = new Option<string?>("--agent") { Description = "With --smoke: test only this agent (claude-code, codex, copilot, opencode or antigravity)." };
         var keep = new Option<bool>("--keep") { Description = "With --smoke: keep each test's run folder for a day and print where it is." };
         command.Options.Add(smoke);
         command.Options.Add(agent);
@@ -176,7 +176,7 @@ internal static class DoctorCommand
         var found = scan.Agents.Where(a => a.Agent.Found).ToList();
         if (found.Count == 0)
         {
-            Bad("agents", "no coding agent is installed. Fix: install Claude Code, Codex, GitHub Copilot CLI or OpenCode, then mbus connect.");
+            Bad("agents", "no coding agent is installed. Fix: install Claude Code, Codex, GitHub Copilot CLI, OpenCode or Antigravity CLI, then mbus connect.");
         }
         foreach (var (agent, warning) in found)
         {
@@ -211,6 +211,10 @@ internal static class DoctorCommand
             if (!agent.McpConfigured && agent.Kind == AgentKind.ClaudeCode)
             {
                 Bad(name, "it doesn't have the mbus tools, so its tasks can't report back. Fix: mbus connect claude.");
+            }
+            else if (!agent.McpConfigured && agent.Kind == AgentKind.Antigravity)
+            {
+                Bad(name, "it doesn't have the mbus tools, so its tasks can't report back. Fix: mbus connect agy.");
             }
             else if (!agent.McpConfigured && agent.Kind == AgentKind.Codex)
             {

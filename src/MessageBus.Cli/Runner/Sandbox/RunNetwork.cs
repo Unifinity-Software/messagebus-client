@@ -212,13 +212,15 @@ public sealed class RunNetwork : IDisposable
         return hosts;
     }
 
-    /// <summary>The agents' model providers and sign-in (Claude Code, Codex, GitHub Copilot CLI, OpenCode).</summary>
+    /// <summary>The agents' model providers and sign-in (Claude Code, Codex, GitHub Copilot CLI, OpenCode, Antigravity CLI).</summary>
     internal static readonly string[] ModelProviders =
     [
         "anthropic.com", "*.anthropic.com", "claude.ai", "*.claude.ai", "claude.com", "*.claude.com",
         "openai.com", "*.openai.com", "chatgpt.com", "*.chatgpt.com",
         "githubcopilot.com", "*.githubcopilot.com", "api.github.com",
         "opencode.ai", "*.opencode.ai", "models.dev",
+        "cloudcode-pa.googleapis.com", "daily-cloudcode-pa.googleapis.com", "generativelanguage.googleapis.com",
+        "aiplatform.googleapis.com", "oauth2.googleapis.com", "antigravity.google", "accounts.google.com",
     ];
 
     /// <summary>Package registries builds and tests restore from (download only), and Playwright's browser downloads.</summary>
