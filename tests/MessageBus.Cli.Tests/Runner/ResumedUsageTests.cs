@@ -108,6 +108,40 @@ public sealed class ResumedUsageTests
         Assert.InRange(stream.BytesRead, 1, 4 * 1024 * 1024 + 1);
     }
 
+    [Theory]
+    [InlineData("""{"type":"cost-state","totalCostUSD":5,"modelUsage":{"model":{"inputTokens":"unsupported","outputTokens":50,"costUSD":5}}}""")]
+    [InlineData("""{"type":"cost-state","totalCostUSD":5,"modelUsage":{"model":{"outputTokens":50,"costUSD":5}}}""")]
+    [InlineData("""{"type":"cost-state","modelUsage":{"model":{"inputTokens":500,"outputTokens":50,"costUSD":5}}}""")]
+    public async Task A_later_unreadable_cost_snapshot_invalidates_an_older_baseline(string later)
+    {
+        using var transcript = new Transcript();
+        File.WriteAllText(transcript.Path,
+            """{"type":"cost-state","totalCostUSD":1,"modelUsage":{"model":{"inputTokens":10,"outputTokens":1,"costUSD":1}}}""" + "\n" + later);
+        var parser = await ClaudeOutputParser.ForResumeAsync(transcript.Home, transcript.Work, "session", TestContext.Current.CancellationToken);
+        parser.Observe("""{"type":"assistant","message":{"id":"current-call","model":"model","usage":{"input_tokens":5,"output_tokens":1}}}""");
+        parser.Observe("""{"type":"result","total_cost_usd":10,"modelUsage":{"model":{"inputTokens":1000,"outputTokens":100,"costUSD":10}}}""");
+        Assert.Null(parser.Complete().Usage!.EstimatedCostUsd); // Never subtract the older $1 and charge $9.
+        Assert.Equal(5, parser.Complete().Usage!.TokensIn);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task An_oversized_cost_snapshot_invalidates_earlier_totals_until_a_later_readable_snapshot(bool newerReadable)
+    {
+        using var transcript = new Transcript();
+        var content = """{"type":"cost-state","totalCostUSD":1,"modelUsage":{"model":{"inputTokens":10,"outputTokens":1,"costUSD":1}}}""" + "\n"
+            + "{\"type\":\"cost-state\",\"totalCostUSD\":5,\"padding\":\"" + new string('x', 128 * 1024) + "\"}\n";
+        if (newerReadable)
+            content += """{"type":"cost-state","totalCostUSD":7,"modelUsage":{"model":{"inputTokens":700,"outputTokens":70,"costUSD":7}}}""";
+        File.WriteAllText(transcript.Path, content);
+        var parser = await ClaudeOutputParser.ForResumeAsync(transcript.Home, transcript.Work, "session", TestContext.Current.CancellationToken);
+        parser.Observe("""{"type":"assistant","message":{"id":"current-call","model":"model","usage":{"input_tokens":5,"output_tokens":1}}}""");
+        parser.Observe("""{"type":"result","total_cost_usd":10,"modelUsage":{"model":{"inputTokens":1000,"outputTokens":100,"costUSD":10}}}""");
+        Assert.Equal(newerReadable ? 3m : null, parser.Complete().Usage!.EstimatedCostUsd);
+        Assert.Equal(newerReadable ? 300 : 5, parser.Complete().Usage!.TokensIn);
+    }
+
     [Fact]
     public async Task Cancelling_a_baseline_read_propagates_instead_of_starting_with_unknown_cost()
     {

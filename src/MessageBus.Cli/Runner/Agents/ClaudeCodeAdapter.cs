@@ -423,13 +423,17 @@ public sealed class ClaudeOutputParser(TimeProvider? time = null) : IAgentOutput
                     cancellationToken.ThrowIfCancellationRequested();
                     var end = buffer.AsSpan(offset, read - offset).IndexOf((byte)'\n');
                     var size = end < 0 ? read - offset : end;
-                    if (!skipLeading && size is > 0 and <= MaxBaselineLineBytes)
-                        parser.ReadBaseline(buffer.AsMemory(offset, size));
+                    if (!skipLeading && size > 0)
+                    {
+                        var line = buffer.AsMemory(offset, size);
+                        if (size <= MaxBaselineLineBytes) parser.ReadBaseline(line);
+                        else if (line.Span.IndexOf("cost-state"u8) >= 0) parser._baseline = null;
+                    }
                     skipLeading = false;
                     offset += size + 1;
                 }
             }
-            finally { ArrayPool<byte>.Shared.Return(buffer); }
+            finally { ArrayPool<byte>.Shared.Return(buffer, clearArray: true); }
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {
@@ -447,7 +451,10 @@ public sealed class ClaudeOutputParser(TimeProvider? time = null) : IAgentOutput
         {
             using var doc = JsonDocument.Parse(line);
             var root = doc.RootElement;
-            if (Str(root, "type") != "cost-state" || Dec(root, "totalCostUSD") is not { } cost || cost < 0
+            if (Str(root, "type") != "cost-state") return;
+            // The CLI may restore this newer snapshot even when we cannot interpret its counters.
+            _baseline = null;
+            if (Dec(root, "totalCostUSD") is not { } cost || cost < 0
                 || !root.TryGetProperty("modelUsage", out var models) || models.ValueKind != JsonValueKind.Object)
                 return;
             foreach (var model in models.EnumerateObject())
