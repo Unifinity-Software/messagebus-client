@@ -353,6 +353,7 @@ jobs:
               '',
               `- Tag: \`${image}:${version}\``,
               `- Digest pin: \`${image}@${digest}\``,
+              `- [Runner deployment guide](https://github.com/${repo.owner}/${repo.repo}/blob/${tag}/docker/runner/README.md)`,
               `- Source: \`${sha}\``,
               ...versions.split(';').map(cli => `- \`${cli}\``)
             ].join('\n');
