@@ -1,3 +1,4 @@
+using System.Net;
 using System.Reflection;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -113,7 +114,8 @@ public sealed class DotnetToolUpdater(DotnetToolInstall install, string director
             LastResult = new() { Outcome = RunnerUpdateOutcome.NotInstalled, FromVersion = CurrentVersion ?? currentVersion, ToVersion = request.Version,
                 Reason = Diagnostic(ex.Message), At = time.GetUtcNow() };
             record.Save(LastResult, log, install);
-            await log.WriteLineAsync("Update not installed: " + LastResult.Reason);
+            await log.WriteLineAsync("Update not installed: " + LastResult.Reason
+                + (ex.InnerException is { } inner ? " (" + Diagnostic(inner.Message) + ")" : ""));
             return false;
         }
     }
@@ -213,39 +215,52 @@ public sealed class DotnetToolUpdater(DotnetToolInstall install, string director
         }
         else
         {
-            // Registration metadata includes listed=false; flat-container lists alone cannot exclude pulled releases.
-            using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
-            var index = "https://api.nuget.org/v3/registration5-gz-semver2/messagebus.ai.cli/index.json";
-            if (source is not null)
+            try { await ReadRegistrationAsync(source, versions, ct); }
+            catch (Exception ex) when (ex is HttpRequestException or JsonException or KeyNotFoundException or InvalidOperationException
+                || ex is OperationCanceledException && !ct.IsCancellationRequested)
             {
-                using var service = JsonDocument.Parse(await client.GetStringAsync(source, ct));
-                var registration = service.RootElement.GetProperty("resources").EnumerateArray()
-                    .FirstOrDefault(r => r.GetProperty("@type").GetString() == "RegistrationsBaseUrl/3.6.0");
-                if (registration.ValueKind == JsonValueKind.Undefined)
-                    throw new IOException("The update source does not expose SemVer 2 registration metadata.");
-                index = registration.GetProperty("@id").GetString()!.TrimEnd('/') + "/messagebus.ai.cli/index.json";
-            }
-            using var document = JsonDocument.Parse(await client.GetStringAsync(index, ct));
-            foreach (var page in document.RootElement.GetProperty("items").EnumerateArray())
-            {
-                if (page.TryGetProperty("items", out var items)) Add(items);
-                else
-                {
-                    using var loaded = JsonDocument.Parse(await client.GetStringAsync(page.GetProperty("@id").GetString(), ct));
-                    Add(loaded.RootElement.GetProperty("items"));
-                }
-            }
-            void Add(JsonElement items)
-            {
-                foreach (var item in items.EnumerateArray())
-                {
-                    var entry = item.GetProperty("catalogEntry");
-                    if (entry.TryGetProperty("listed", out var listed) && listed.ValueKind == JsonValueKind.False) continue;
-                    if (entry.GetProperty("version").GetString() is { } version) versions.Add(version);
-                }
+                throw new IOException(source is null ? "Couldn't read the list of mbus versions from nuget.org."
+                    : "Couldn't read the list of mbus versions from this machine's update source.", ex);
             }
         }
         return SelectLatest(versions, channel) ?? throw new IOException("No listed package version is available from this machine's update source.");
+    }
+
+    private static async Task ReadRegistrationAsync(string? source, List<string> versions, CancellationToken ct)
+    {
+        // Registration metadata includes listed=false; flat-container lists alone cannot exclude pulled releases.
+        // nuget.org serves registration5-gz-semver2 gzip-compressed whatever the request asks for.
+        using var client = new HttpClient(new SocketsHttpHandler { AutomaticDecompression = DecompressionMethods.All })
+            { Timeout = TimeSpan.FromSeconds(10) };
+        var index = "https://api.nuget.org/v3/registration5-gz-semver2/messagebus.ai.cli/index.json";
+        if (source is not null)
+        {
+            using var service = JsonDocument.Parse(await client.GetStringAsync(source, ct));
+            var registration = service.RootElement.GetProperty("resources").EnumerateArray()
+                .FirstOrDefault(r => r.GetProperty("@type").GetString() == "RegistrationsBaseUrl/3.6.0");
+            if (registration.ValueKind == JsonValueKind.Undefined)
+                throw new IOException("The update source does not expose SemVer 2 registration metadata.");
+            index = registration.GetProperty("@id").GetString()!.TrimEnd('/') + "/messagebus.ai.cli/index.json";
+        }
+        using var document = JsonDocument.Parse(await client.GetStringAsync(index, ct));
+        foreach (var page in document.RootElement.GetProperty("items").EnumerateArray())
+        {
+            if (page.TryGetProperty("items", out var items)) Add(items);
+            else
+            {
+                using var loaded = JsonDocument.Parse(await client.GetStringAsync(page.GetProperty("@id").GetString(), ct));
+                Add(loaded.RootElement.GetProperty("items"));
+            }
+        }
+        void Add(JsonElement items)
+        {
+            foreach (var item in items.EnumerateArray())
+            {
+                var entry = item.GetProperty("catalogEntry");
+                if (entry.TryGetProperty("listed", out var listed) && listed.ValueKind == JsonValueKind.False) continue;
+                if (entry.GetProperty("version").GetString() is { } version) versions.Add(version);
+            }
+        }
     }
 
     internal static string? SelectLatest(IEnumerable<string> versions, string? channel)

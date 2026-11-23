@@ -1,4 +1,7 @@
 using System.IO.Compression;
+using System.Net;
+using System.Net.Sockets;
+using System.Text;
 using System.Xml.Linq;
 using MessageBus.Cli.Agents;
 using MessageBus.Cli.Runner.Service;
@@ -29,6 +32,42 @@ public sealed class DotnetToolUpdaterTests : IDisposable
     private static readonly string ToolPath = Path.Combine(Path.GetTempPath(), "tools");
     private static readonly string DotnetPath = Path.Combine(Path.GetTempPath(), "dotnet");
     private static readonly string MbusPath = Path.Combine(ToolPath, "mbus");
+    [Fact]
+    public async Task Latest_version_reads_a_gzip_compressed_registration()
+    {
+        // nuget.org always serves its registration index gzip-compressed (Content-Encoding: gzip).
+        var ct = TestContext.Current.CancellationToken;
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var origin = $"http://127.0.0.1:{((IPEndPoint)listener.LocalEndpoint).Port}";
+        var bodies = new Dictionary<string, string>
+        {
+            ["/v3/index.json"] = $$"""{"resources":[{"@id":"{{origin}}/registration/","@type":"RegistrationsBaseUrl/3.6.0"}]}""",
+            ["/registration/messagebus.ai.cli/index.json"] =
+                """{"items":[{"items":[{"catalogEntry":{"version":"9.1.0"}},{"catalogEntry":{"version":"9.2.0","listed":false}}]}]}""",
+        };
+        var serving = Task.Run(async () =>
+        {
+            for (var i = 0; i < bodies.Count; i++)
+            {
+                using var connection = await listener.AcceptTcpClientAsync(ct);
+                using var stream = connection.GetStream();
+                using var reader = new StreamReader(stream, Encoding.ASCII, leaveOpen: true);
+                var path = (await reader.ReadLineAsync(ct))!.Split(' ')[1];
+                while (!string.IsNullOrEmpty(await reader.ReadLineAsync(ct))) { }
+                using var gzipped = new MemoryStream();
+                using (var gzip = new GZipStream(gzipped, CompressionLevel.Fastest, leaveOpen: true))
+                    gzip.Write(Encoding.UTF8.GetBytes(bodies[path]));
+                var head = $"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Encoding: gzip\r\nContent-Length: {gzipped.Length}\r\nConnection: close\r\n\r\n";
+                await stream.WriteAsync(Encoding.ASCII.GetBytes(head), ct);
+                await stream.WriteAsync(gzipped.ToArray(), ct);
+            }
+        }, ct);
+
+        Assert.Equal("9.1.0", await DotnetToolUpdater.LatestAsync(origin + "/v3/index.json", "stable", ct));
+        await serving;
+    }
+
     [Theory]
     [InlineData(true, "bad%path")]
     [InlineData(true, "bad^path")]

@@ -90,7 +90,8 @@ internal static class DotnetToolUpdateCommand
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or HttpRequestException or System.Text.Json.JsonException
             or KeyNotFoundException or InvalidOperationException or Win32Exception)
         {
-            throw new CliException("Couldn't update the dotnet tool: " + DotnetToolUpdater.Diagnostic(ex.Message));
+            throw new CliException("Couldn't update the dotnet tool: " + DotnetToolUpdater.Diagnostic(ex.Message)
+                + (ex.InnerException is { } inner ? " (" + DotnetToolUpdater.Diagnostic(inner.Message) + ")" : ""));
         }
     }
 
