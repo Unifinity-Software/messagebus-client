@@ -10,11 +10,13 @@ public sealed class WindowsResourceSamplerTests
 {
     private static CancellationToken Cancel => TestContext.Current.CancellationToken;
 
-    [Fact]
-    public async Task Deltas_use_monotonic_window_and_deduplicate_owned_trees_excluding_them_from_runner()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)] // In a job that sets no limits, as at sign-in or in a terminal: the host capacity applies.
+    public async Task Deltas_use_monotonic_window_and_deduplicate_owned_trees_excluding_them_from_runner(bool inJob)
     {
         var time = new FakeTimeProvider();
-        var snapshot = Observation();
+        var snapshot = Observation() with { Job = new(inJob) };
         var sampler = new WindowsResourceSampler((_, _) => snapshot);
         var context = new ResourceSamplingContext(time, 10, [20, 21, 20, 30]);
         var first = await sampler.SampleAsync(context, Cancel);
@@ -125,14 +127,17 @@ public sealed class WindowsResourceSamplerTests
     }
 
     [Theory]
-    [InlineData(true, true)]
-    [InlineData(true, false)]
-    [InlineData(null, false)]
-    public async Task Immediate_job_limits_never_masquerade_as_verified_effective_limits(bool? inJob, bool queried)
+    [InlineData(true, true, 5u, null, null)]
+    [InlineData(true, true, null, 1000ul, null)]
+    [InlineData(true, true, null, null, 3ul)]
+    [InlineData(true, false, null, null, null)]
+    [InlineData(null, false, null, null, null)]
+    public async Task Immediate_job_limits_never_masquerade_as_verified_effective_limits(bool? inJob, bool queried,
+        uint? cpuFlags, ulong? memoryLimit, ulong? affinity)
     {
         var time = new FakeTimeProvider();
         // A 25% immediate cap may itself be nested beneath an unqueryable 50% ancestor.
-        var snapshot = Observation() with { Job = new(inJob, queried, 5, 2500, 1000, 3) };
+        var snapshot = Observation() with { Job = new(inJob, queried, cpuFlags, 2500, memoryLimit, affinity) };
         var sampler = new WindowsResourceSampler((_, _) => snapshot);
         var context = new ResourceSamplingContext(time, 10, [20]);
         await sampler.SampleAsync(context, Cancel);
