@@ -152,7 +152,8 @@ public sealed class MacRunnerSupervisorTests
         const string block = """
             trap 'printf "terminated\n" >> "$TEST_ROOT/events"; exit 0' TERM
             exec 3<> "$TEST_ROOT/gate"
-            printf 'ready\n'
+            printf 'started\n' >> "$TEST_ROOT/events"
+            printf 'ready:%s\n' "$$"
             read line <&3
             """;
         using (var fifo = Process.Start(new ProcessStartInfo("mkfifo", [fixture.Root + "/gate"]) { UseShellExecute = false })!)
@@ -164,12 +165,21 @@ public sealed class MacRunnerSupervisorTests
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(15));
         try
         {
-            Assert.Equal("ready", await supervisor.StandardOutput.ReadLineAsync(deadline.Token));
+            var ready = await supervisor.StandardOutput.ReadLineAsync(deadline.Token);
+            Assert.NotNull(ready);
+            Assert.StartsWith("ready:", ready);
+            using var child = Process.GetProcessById(int.Parse(ready["ready:".Length..], System.Globalization.CultureInfo.InvariantCulture));
             using var signal = Process.Start(new ProcessStartInfo("/bin/kill", ["-TERM", supervisor.Id.ToString()]) { UseShellExecute = false })!;
             await signal.WaitForExitAsync(deadline.Token);
             await supervisor.WaitForExitAsync(deadline.Token);
             Assert.Equal(0, supervisor.ExitCode);
-            Assert.Equal(new[] { "terminated" }, fixture.Events);
+            Assert.True(child.HasExited, "The supervisor must wait for its active child to terminate.");
+            var events = fixture.Events;
+            Assert.Equal("started", events[0]);
+            // The trap and shutdown wait can both forward TERM before the child finishes exiting.
+            // Require one launch and a completed termination, without assuming signals are coalesced.
+            Assert.NotEmpty(events.Skip(1));
+            Assert.All(events.Skip(1), entry => Assert.Equal("terminated", entry));
         }
         finally
         {
