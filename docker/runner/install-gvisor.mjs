@@ -18,8 +18,11 @@ try {
     if (hash.digest('hex') !== sha512) throw Error('Official gVisor checksum mismatch.');
     const output = '/usr/local/lib/mbus/gvisor';
     fs.mkdirSync(output, { recursive: true });
+    // mbus invokes runsc directly and never checkpoints/restores to Google Cloud
+    // Storage. Omit the containerd integration and GCS checkpoint helper; retain
+    // the matching Sentry and all other runtime sidecars beside runsc.
     const result = spawnSync('/usr/bin/perl', ['-MIO::Uncompress::Bunzip2=bunzip2,$Bunzip2Error', '-e',
-        'my ($source,$dest)=@ARGV; open my $tar,"|-","tar","-xf","-","-C",$dest or die; bunzip2($source=>$tar) or die $Bunzip2Error; close $tar or die;', archive, output],
+        'my ($source,$dest)=@ARGV; open my $tar,"|-","tar","-xf","-","--exclude=containerd-shim-runsc-v1","--exclude=gvisor-bin/checkpointgofer","-C",$dest or die; bunzip2($source=>$tar) or die $Bunzip2Error; close $tar or die;', archive, output],
         { stdio: 'inherit', timeout: 60000 });
     if (result.status !== 0) throw Error('Verified gVisor extraction failed.');
     fs.writeFileSync(output + '/version.json', JSON.stringify({ version, architecture: 'amd64', sha512 }));
