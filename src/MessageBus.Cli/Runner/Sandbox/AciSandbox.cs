@@ -181,7 +181,7 @@ internal sealed class AciSandbox
 
             outside.Start();
             var port = ((IPEndPoint)outside.LocalEndpoint).Port;
-            response = ReplyAsync(outside, stop.Token);
+            response = ReplyAsync(outside, 1 + options.ProbeAgents.Count(agent => agent.Name == "codex"), stop.Token);
             using var network = RunNetwork.StartAci(Path.Combine(sockets, SocketName), new HostAllowList([FixtureHost]), TextWriter.Null, "probe",
                 async (_, _, ct) =>
                 {
@@ -325,13 +325,18 @@ internal sealed class AciSandbox
         }
     }
 
-    private static async Task ReplyAsync(TcpListener listener, CancellationToken ct)
+    private static async Task ReplyAsync(TcpListener listener, int requests, CancellationToken ct)
     {
-        using var client = await listener.AcceptSocketAsync(ct).ConfigureAwait(false);
-        await using var stream = new NetworkStream(client);
-        using var reader = new StreamReader(stream, leaveOpen: true);
-        while (await reader.ReadLineAsync(ct).ConfigureAwait(false) is { Length: > 0 }) { }
-        await stream.WriteAsync("HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\npassed"u8.ToArray(), ct).ConfigureAwait(false);
+        // Native isolation and each Codex fallback check use the same endpoint.
+        // Serve that bounded set, with cancellation on every blocking operation.
+        for (var request = 0; request < requests; request++)
+        {
+            using var client = await listener.AcceptSocketAsync(ct).ConfigureAwait(false);
+            await using var stream = new NetworkStream(client);
+            using var reader = new StreamReader(stream, leaveOpen: true);
+            while (await reader.ReadLineAsync(ct).ConfigureAwait(false) is { Length: > 0 }) { }
+            await stream.WriteAsync("HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\npassed"u8.ToArray(), ct).ConfigureAwait(false);
+        }
     }
 
     private const string Fixture = """
