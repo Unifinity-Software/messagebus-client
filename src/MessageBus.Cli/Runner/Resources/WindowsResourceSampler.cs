@@ -38,7 +38,8 @@ internal sealed class WindowsResourceSampler : ISystemResourceSampler
 
         double? capacity = current.HostLogicalCpus > 0 ? current.HostLogicalCpus : null;
         ResourceLimitSource? source = capacity is not null ? ResourceLimitSource.Host : null;
-        if (current.Job.InJob != false)
+        var jobMayLimit = current.Job.InJob != false && !current.Job.SetsNoLimits;
+        if (jobMayLimit)
         {
             // QueryInformationJobObject(NULL) sees ONLY the immediate job. Ancestor caps can be
             // stricter, and CPU rates are relative to the parent. Never publish that upper bound
@@ -71,7 +72,7 @@ internal sealed class WindowsResourceSampler : ISystemResourceSampler
         long? totalBytes = hostTotal;
         long? available = current.Memory?.Available;
         if (current.Memory is null) reasons.Add("windows_memory_unavailable");
-        if (current.Job.InJob != false)
+        if (jobMayLimit)
         {
             totalBytes = null;
             available = null;
@@ -120,7 +121,7 @@ internal sealed class WindowsResourceSampler : ISystemResourceSampler
             new RunnerCpuSample { HostLogicalCpus = current.HostLogicalCpus > 0 ? current.HostLogicalCpus : null,
                 EffectiveCpus = capacity, UtilizationPercent = utilization, LimitSource = source },
             new RunnerMemorySample { HostTotalBytes = hostTotal, TotalBytes = totalBytes,
-                AvailableBytes = available, LimitSource = current.Job.InJob == false
+                AvailableBytes = available, LimitSource = !jobMayLimit
                     ? (hostTotal is null ? null : ResourceLimitSource.Host) : source },
             runnerSample, taskSample));
     }
@@ -213,7 +214,17 @@ internal sealed class WindowsResourceSampler : ISystemResourceSampler
     internal sealed record MemoryReading(long Total, long Available);
     internal sealed record ProcessReading(int ParentId, long? Created = null, ulong? CpuTicks = null, long? ResidentBytes = null);
     internal sealed record JobReading(bool? InJob, bool QuerySucceeded = true,
-        uint? CpuFlags = null, uint? CpuRate = null, ulong? MemoryLimit = null, ulong? Affinity = null);
+        uint? CpuFlags = null, uint? CpuRate = null, ulong? MemoryLimit = null, ulong? Affinity = null)
+    {
+        // Nearly every Windows process is in a job (Task Scheduler, terminals and IDEs create them) that caps nothing.
+        // Host CPU time and free physical memory are whole-machine readings, so a job that sets no CPU rate, job memory
+        // limit or affinity leaves the host capacity in effect. A job above this one could still cap CPU or memory
+        // without this process being able to see it; that only happens when a tool nests a capped job on purpose.
+        internal bool SetsNoLimits => InJob == true && QuerySucceeded
+            && ((CpuFlags ?? 0) & CpuRateControlEnable) == 0 && MemoryLimit is null && Affinity is null;
+
+        private const uint CpuRateControlEnable = 0x1;
+    }
     internal sealed record Snapshot(int HostLogicalCpus, SystemTimes? System, MemoryReading? Memory,
         JobReading Job, IReadOnlyDictionary<int, ProcessReading> Processes, string? Reason = null);
 
