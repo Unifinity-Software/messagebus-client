@@ -25,6 +25,14 @@ public sealed record ProcessLaunch
 
     /// <summary>Written to stdin, which is then closed; null closes stdin at once.</summary>
     public string? StandardInput { get; init; }
+
+    // Set only by the runner's checkout implementation. Delivery setup and agent
+    // commands must retain their role's file restrictions.
+    internal bool TrustedCheckout { get; init; }
+
+    // Captured before an OS wrapper replaces its host environment. Never serialized
+    // into launch plans, arguments or helper environment variables.
+    internal Func<string, string>? OutputFilter { get; init; }
 }
 
 /// <summary>
@@ -63,6 +71,7 @@ public sealed class AgentProcess : IDisposable
 
     internal static AgentProcess Start(ProcessLaunch launch, Action<string>? onOutputLine, int tailLines, Func<string, string>? filterOutput)
     {
+        filterOutput ??= launch.OutputFilter;
         var info = new ProcessStartInfo
         {
             UseShellExecute = false,

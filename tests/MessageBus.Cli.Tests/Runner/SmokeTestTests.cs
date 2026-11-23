@@ -2,6 +2,8 @@ using MessageBus.Cli.Commands;
 using MessageBus.Cli.Runner;
 using MessageBus.Cli.Runner.Agents;
 using MessageBus.Contracts.Machines;
+using MessageBus.Contracts.Roles;
+using MessageBus.Contracts.Runner;
 using Spectre.Console;
 using Xunit;
 
@@ -21,12 +23,12 @@ public sealed class SmokeTestTests : IDisposable
     private static readonly string Build = OperatingSystem.IsWindows() ? @".\build.cmd" : "sh build.sh";
     private static readonly string Test = OperatingSystem.IsWindows() ? @".\test.cmd" : "sh test.sh";
 
-    private SmokeTest Smoke(string directives, bool keep = false, string? openAiKey = null) => new(new SmokeTestOptions
+    private SmokeTest Smoke(string directives, bool keep = false, string? openAiKey = null, IRunSandbox? sandbox = null) => new(new SmokeTestOptions
     {
         WorkRoot = WorkRoot,
         Git = CommandLocator.Find("git", Environment.GetEnvironmentVariable, []) ?? throw new InvalidOperationException("git is needed for these tests."),
         Dotnet = null,
-        Sandbox = new NoSandbox(),
+        Sandbox = sandbox ?? new NoSandbox(),
         Keep = keep,
         PromptSuffix = directives,
         GetEnvironmentVariable = name => name == "OPENAI_API_KEY" ? openAiKey : null,
@@ -51,15 +53,59 @@ public sealed class SmokeTestTests : IDisposable
         Assert.Contains("completed an authenticated model request", success.Steps.First().Detail);
     }
 
-    [Fact]
-    public async Task Codex_smoke_reports_a_provider_refusal_without_its_key()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Codex_smoke_reports_a_provider_refusal_without_its_key(bool wrapped)
     {
         var codex = new SmokeAgent(AgentKind.Codex, new CodexAdapter(null, codexHome: Path.Combine(_root, ".codex")), RunnerHarness.FakeAgentPath);
         const string key = "fixture-smoke-credential";
-        var refused = await Smoke("fake-agent: mode=codex-ineligible", openAiKey: key).RunAsync(codex, TestContext.Current.CancellationToken);
+        var refused = await Smoke(wrapped ? "fake-agent: mode=claim" : "fake-agent: mode=codex-ineligible", openAiKey: key,
+            sandbox: wrapped ? new FileEnvironmentSandbox(key, emitDiagnostic: true) : null)
+            .RunAsync(codex, TestContext.Current.CancellationToken);
         Assert.False(refused.Passed);
-        Assert.Contains("Codex-eligible sign-in or API project", Assert.Single(refused.Steps).Detail);
+        Assert.Contains(wrapped ? "fixture provider rejected [redacted]" : "Codex-eligible sign-in or API project", Assert.Single(refused.Steps).Detail);
         Assert.DoesNotContain(key, Report([refused]).Output);
+    }
+
+    [Fact]
+    public async Task Smoke_awaits_cleanup_and_preserves_a_quarantined_workspace()
+    {
+        var sandbox = new SmokeCleanup();
+        var codex = new SmokeAgent(AgentKind.Codex, new CodexAdapter(null, codexHome: Path.Combine(_root, ".codex")), RunnerHarness.FakeAgentPath);
+        var run = Smoke("fake-agent: mode=codex-ineligible", sandbox: sandbox).RunAsync(codex, TestContext.Current.CancellationToken);
+        try
+        {
+            await sandbox.Entered.Task.WaitAsync(TimeSpan.FromSeconds(15), TestContext.Current.CancellationToken);
+            Assert.False(run.IsCompleted);
+            Assert.Equal(AgentKind.Codex, sandbox.Workspace!.AgentKind);
+            Assert.True(Directory.Exists(sandbox.Workspace.Root));
+        }
+        finally { sandbox.Release.TrySetResult(); }
+        await Assert.ThrowsAsync<IOException>(() => run);
+        Assert.True(Directory.Exists(sandbox.Workspace!.Root));
+        Assert.Contains("9999-12-31", File.ReadAllText(Path.Combine(sandbox.Workspace.Root, RunWorkspace.HoldFileName)));
+    }
+
+    private sealed class SmokeCleanup : IRunSandbox
+    {
+        internal readonly TaskCompletionSource Entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal readonly TaskCompletionSource Release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal RunWorkspace? Workspace;
+        public ProcessLaunch Wrap(ProcessLaunch launch, RunWorkspace workspace, PermissionProfile profile) => launch;
+        public Task PrepareAsync(RunWorkspace workspace, TaskDelivery delivery, PermissionProfile profile, CancellationToken cancellationToken)
+        {
+            Workspace = workspace;
+            return Task.CompletedTask;
+        }
+        public void Ended(RunWorkspace workspace) => throw new InvalidOperationException("Legacy cleanup must not bypass asynchronous teardown.");
+        public async Task EndedAsync(RunWorkspace workspace)
+        {
+            Entered.TrySetResult();
+            await Release.Task;
+            workspace.SandboxCleanupIncomplete = true;
+            throw new IOException("Owned cleanup remains unverified.");
+        }
     }
 
     [Fact]

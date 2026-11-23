@@ -125,7 +125,7 @@ public sealed class RunnerEngine : IAsyncDisposable
     private int _beating;
     private bool _draining;
     private string? _managedDrainId;
-    private bool IsDraining => _draining || _managedDrainId is not null;
+    private bool IsDraining => _draining || _managedDrainId is not null || _ext.Sandbox.QuarantineProblem is not null;
     private bool _userDraining;
     private bool _offlineForUpdate;
     private bool _waitingForSessions;
@@ -662,16 +662,21 @@ public sealed class RunnerEngine : IAsyncDisposable
         });
 
     /// <summary>The runner's opt-in Git setup state.</summary>
-    public ToolSetupReport ToolSetupStatus => _ext.ToolSetup?.Status
+    public ToolSetupReport ToolSetupStatus => _ext.Sandbox.QuarantineProblem is { } quarantine
+        ? new() { State = "failed", CanStart = false, Detail = quarantine }
+        : _ext.ToolSetup?.Status
         ?? new() { State = "disabled", Detail = "This runner doesn't support owner-approved Git setup. Update mbus and opt in on the machine." };
 
     /// <summary>The setup state the dashboard and terminal show: says Git is installed when it already works.</summary>
     public Task<ToolSetupReport> ToolSetupCurrentAsync(CancellationToken cancellationToken) =>
-        _ext.ToolSetup?.CurrentAsync(cancellationToken) ?? Task.FromResult(ToolSetupStatus);
+        _ext.Sandbox.QuarantineProblem is not null ? Task.FromResult(ToolSetupStatus)
+        : _ext.ToolSetup?.CurrentAsync(cancellationToken) ?? Task.FromResult(ToolSetupStatus);
 
     /// <summary>Starts the same local setup flow as the terminal command; a refusal on a machine that has Git says so instead.</summary>
     public async Task<ToolSetupReport> StartToolSetupAsync(CancellationToken cancellationToken) =>
-        _ext.ToolSetup?.Start() is { } started
+        _ext.Sandbox.QuarantineProblem is { } quarantine
+            ? new() { State = "failed", CanStart = false, Detail = quarantine }
+        : _ext.ToolSetup?.Start() is { } started
             ? started.State == "disabled" ? await ToolSetupCurrentAsync(cancellationToken).ConfigureAwait(false) : started
             : ToolSetupStatus;
 
@@ -1041,14 +1046,14 @@ public sealed class RunnerEngine : IAsyncDisposable
         lock (_gate)
         {
             _runs.Remove(run.DeliveryId);
-            if (_runs.Count == 0) _resources.SetBusy(false);
-            _ext.WorkActivityChanged?.Invoke(_runs.Count > 0);
+            if (_runs.Count == 0) _resources.SetBusy(_ext.Sandbox.QuarantineProblem is not null);
+            _ext.WorkActivityChanged?.Invoke(_runs.Count > 0 || _ext.Sandbox.QuarantineProblem is not null);
             CheckUpdateReady();
         }
     }
 
     /// <summary>Rejects a completed drain superseded by another request.</summary>
-    public bool IsCurrentUpdate(UpdateRequest request) { lock (_gate) return _update == request; }
+    public bool IsCurrentUpdate(UpdateRequest request) { lock (_gate) return _ext.Sandbox.QuarantineProblem is null && _update == request; }
 
     /// <summary>The transport confirmed this version connected.</summary>
     public void ConfirmUpdateConnected() => _ext.SessionUpdater?.ConfirmConnected();
@@ -1120,7 +1125,7 @@ public sealed class RunnerEngine : IAsyncDisposable
 
     private void CheckUpdateReady()
     {
-        if (!_waitingForSessions && _update is { } update && _runs.Count == 0 && !_settingUp && _ext.ToolSetup?.BlocksWork != true)
+        if (_ext.Sandbox.QuarantineProblem is null && !_waitingForSessions && _update is { } update && _runs.Count == 0 && !_settingUp && _ext.ToolSetup?.BlocksWork != true)
         {
             _updateReady.TrySetResult(update);
         }

@@ -210,20 +210,23 @@ public sealed class RunnerTaskTests
     }
 
     [Theory]
-    [InlineData("codex-missing-auth", "no API credential reached the provider")]
-    [InlineData("codex-ineligible", "Codex-eligible sign-in or API project")]
-    public async Task A_Codex_provider_refusal_is_actionable_and_never_echoes_the_key(string mode, string advice)
+    [InlineData("codex-missing-auth", "no API credential reached the provider", false)]
+    [InlineData("codex-ineligible", "Codex-eligible sign-in or API project", false)]
+    [InlineData("codex-missing-auth", "no API credential reached the provider", true)]
+    [InlineData("codex-ineligible", "Codex-eligible sign-in or API project", true)]
+    public async Task A_Codex_provider_refusal_is_actionable_and_never_echoes_the_key(string mode, string advice, bool wrapped)
     {
         const string key = "fixture-provider-refusal";
         var log = new StringWriter();
         await using var h = new RunnerHarness(environment: new Dictionary<string, string> { ["OPENAI_API_KEY"] = key }, log: log,
+            sandbox: wrapped ? _ => new FileEnvironmentSandbox(key) : null,
             extensions: e => e with { Readiness = new RunnerReadiness(log) });
         var run = new RunEnvironment { Checkout = CheckoutMode.Empty, Logs = LogCapture.Local };
         Assert.True((await h.DeliverAsync(h.Task("dlv_codex_refusal", "agt_codex", environment: run, directives: d => d["mode"] = mode))).Accepted);
         var settle = await h.Service.SettledAsync("dlv_codex_refusal");
         await h.Engine.StopAsync();
 
-        Assert.Equal(DeclineReason.MachineNotReady, settle.Declined);
+        Assert.True(settle.Declined == DeclineReason.MachineNotReady, settle.Result.Error ?? settle.Result.Summary);
         Assert.Equal(SettleStatus.Abandoned, settle.Result.Status);
         Assert.Contains(advice, settle.Result.Error);
         Assert.DoesNotContain(key, settle.Result.Error);

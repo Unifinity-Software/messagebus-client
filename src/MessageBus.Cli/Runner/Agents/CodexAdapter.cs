@@ -96,7 +96,8 @@ public sealed partial class CodexAdapter(
         // start inside it and would block builds and commits there. Windows roles may opt into the runner's
         // isolation and command rules instead, but only when that isolation is enabled.
         // A resumed session keeps Codex's own: it works in its own folder, which may be the user's repository.
-        var sandbox = !writable ? "read-only"
+        var sandbox = context.ExternalFilePolicyEnforced && context.ResumeSessionId is null ? "danger-full-access"
+            : !writable ? "read-only"
             : onWindows && machineOverride is not null ? "workspace-write"
             : (context.RunnerSandboxed && context.ResumeSessionId is null) || (roleModeApplies && machineOverride is null) ? "danger-full-access"
             : "workspace-write";

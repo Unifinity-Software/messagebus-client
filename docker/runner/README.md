@@ -206,16 +206,19 @@ files and a local test endpoint to verify the same task launcher used for real
 work. If the container denies the required namespace operations, the runner
 stays connected and reports its harnesses as unavailable. It won't run tasks
 with basic isolation. Confirm that the target deployment passes the check
-before assigning roles. When the kernel denies a fresh procfs mount, the runner
-repeats the checks with a private, empty, read-only `/proc` and the same mount,
-PID and network namespaces. A standalone Node.js fixture in a disposable,
-unprivileged ACI container verified this layout under UID 10001. It wrote its
-own file and could not see dummy files or the loopback listener outside the
-sandbox.
+before assigning roles. When the kernel denies a fresh procfs mount, the official
+amd64 image uses its checksum-pinned gVisor userspace kernel for Codex deliveries (release-20261116.0,
+systrap platform). This provides dynamic, private `/proc` without mounting the
+enclosing container's procfs into a task. Codex checkout, setup, agent and tools
+use this protected launcher. Other agents keep the existing protected native launcher.
+The runtime needs no KVM, privileged container
+or additional host capabilities. Its Apache 2.0 license ships in the image.
 
 - **Files and processes.** A task gets its own home, worktree, temporary
   directories and PID namespace. The runner's settings, machine key and other
-  worktrees aren't mounted. The image's toolchain is read-only.
+  worktrees aren't mounted. The image's toolchain is read-only. Codex read-only roles
+  get a read-only worktree mount, including its Git metadata. Only the runner's
+  initial checkout has a separate, trusted write phase.
 - **Network.** A task has a separate network namespace. Its proxy allows
   approved public IPv4 connections on HTTPS or SSH ports. The proxy denies
   private, loopback, link-local and Azure platform addresses, and the runner's
@@ -223,15 +226,21 @@ sandbox.
   proxies and host-local models aren't supported in this mode.
 - **Harnesses.** Claude Code and Codex start with a fresh home. Use credentials
   supplied by the deployment, no saved sign-ins or tools from the runner's
-  home. A harness that fails its protected launch check is unavailable. Codex
-  also has to start its nested command sandbox. In local offline checks with
-  an empty `/proc`, Claude Code 2.1.330 and GitHub Copilot CLI 1.0.114 passed
-  startup. Codex 0.171.0 failed its nested sandbox probe and OpenCode 1.19.6
-  failed to start. Codex also failed to load its configuration before making
-  any model request in a noninteractive test using the outer sandbox alone.
-  The same test completed against a dummy Responses API through the relay
-  with a fresh, namespace-local procfs. Codex stays unavailable on the
-  empty-proc profile. Resumed harness sessions aren't supported in this mode.
+  home. A harness that fails its protected launch check is unavailable. The
+  userspace launcher enforces Codex's file profile externally; readiness checks
+  a real Codex command against an offline Responses fixture for both writable
+  and read-only profiles. The check has no provider credentials or model bill.
+  Custom images without the bundled runtime retain the protected empty-proc
+  profile and cannot offer harnesses that need dynamic procfs. Resumed harness
+  sessions aren't supported in this mode.
+  Existing ACI deployments need the new released runner image: updating only
+  the `mbus` binary inside an older image does not install the runtime and helper.
+  Keep the existing runner name and identity storage when replacing its image.
+- **Cleanup.** Private runtime journals remain outside guest mounts. Before a
+  run releases capacity, the runner ends its exact owned sandbox IDs and verifies
+  their recorded Gofer and Sentry process identities have exited. Uncertain
+  cleanup quarantines the runner and preserves the journal and worktree. Startup
+  recovers only this runner's owned journals before accepting new tasks.
 
 `infra/runner-aci.bicep` provisions a Linux ACI runner that enrolls itself in Azure. You do not
 run an enrollment container on your computer or copy a machine private key into a deployment.

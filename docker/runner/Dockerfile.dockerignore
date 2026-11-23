@@ -11,6 +11,10 @@
 !skills/
 !docker/runner/entrypoint.sh
 !docker/runner/aci-bootstrap.mjs
+!docker/runner/aci-sandbox.mjs
+!docker/runner/aci-codex-probe.mjs
+!docker/runner/install-gvisor.mjs
+!docker/runner/gvisor-LICENSE
 src/client/
 **/bin/
 **/obj/

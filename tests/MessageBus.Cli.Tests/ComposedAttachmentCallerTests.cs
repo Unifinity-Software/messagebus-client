@@ -31,7 +31,7 @@ using Xunit;
 
 namespace MessageBus.Cli.Tests;
 
-public sealed class ComposedAttachmentCallerTests
+public sealed partial class ComposedAttachmentCallerTests
 {
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
     private const string Legacy = """{"product":"messagebus.ai","signIn":{"microsoft":true},"capabilities":[]}""";

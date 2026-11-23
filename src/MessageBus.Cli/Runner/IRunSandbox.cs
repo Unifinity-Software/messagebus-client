@@ -21,6 +21,12 @@ public interface IRunSandbox
 
     internal bool UsesPrivateHome => false;
 
+    internal string? QuarantineProblem => null;
+
+    // True only for this fresh launch when the external sandbox physically enforces
+    // the supplied file policy. This must never be inferred from machine-wide readiness.
+    internal bool EnforcesAgentFilePolicy(RunWorkspace workspace, PermissionProfile profile) => false;
+
     /// <summary>The launch to use instead of <paramref name="launch"/>.</summary>
     ProcessLaunch Wrap(ProcessLaunch launch, RunWorkspace workspace, PermissionProfile profile);
 
@@ -35,6 +41,13 @@ public interface IRunSandbox
     /// <summary>The run is over: end whatever it left running and withdraw its credential. Never throws.</summary>
     void Ended(RunWorkspace workspace)
     {
+    }
+
+    /// <summary>Awaits owned sandbox cleanup before the run can settle and release its slot.</summary>
+    Task EndedAsync(RunWorkspace workspace)
+    {
+        Ended(workspace);
+        return Task.CompletedTask;
     }
 
     /// <summary>What runs get here, for the Runners page (the original issue); null when this sandbox doesn't say.</summary>

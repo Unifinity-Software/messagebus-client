@@ -97,6 +97,7 @@ internal sealed class SmokeTest(SmokeTestOptions options)
         var now = options.Time.GetUtcNow();
         var id = $"smoke-{AgentKinds.Name(agent.Kind)}-{now.ToString("yyyyMMddHHmmss", CultureInfo.InvariantCulture)}";
         var workspace = RunWorkspace.Create(options.WorkRoot, id, 1);
+        workspace.AgentKind = agent.Adapter.Kind;
         workspace.LocalModelEndpoint = (agent.Adapter as OpenCodeAdapter)?.LocalEndpoint;
         var profile = PermissionProfiles.Defaults(PermissionProfiles.Worker);
         var project = options.Dotnet is { } dotnet ? ScratchProject.Dotnet(dotnet) : ScratchProject.Shell();
@@ -143,8 +144,7 @@ internal sealed class SmokeTest(SmokeTestOptions options)
             using (var limit = new CancellationTokenSource(options.TimeLimit, options.Time))
             using (var stop = CancellationTokenSource.CreateLinkedTokenSource(limit.Token, cancellationToken))
             using (var process = AgentProcess.Start(launch, line => { lock (gate) { parser.Observe(line); } }, tailLines: 50,
-                filterOutput: agent.Kind == AgentKind.Codex
-                    ? CodexAuthentication.RedactOutput(launch.Environment.GetValueOrDefault(CodexAuthentication.CodexKey)) : null))
+                filterOutput: launch.OutputFilter))
             {
                 options.Sandbox.Started(workspace, process.Id);
                 using (stop.Token.Register(process.Kill))
@@ -188,7 +188,14 @@ internal sealed class SmokeTest(SmokeTestOptions options)
         }
         finally
         {
-            options.Sandbox.Ended(workspace);
+            try { await options.Sandbox.EndedAsync(workspace).ConfigureAwait(false); }
+            catch
+            {
+                workspace.SandboxCleanupIncomplete = true;
+                workspace.Hold(DateTimeOffset.MaxValue);
+                workspace.Dispose();
+                throw;
+            }
             if (options.Keep)
             {
                 // Like a real run's kept work (the original issue): the runner's housekeeping deletes it a day later.

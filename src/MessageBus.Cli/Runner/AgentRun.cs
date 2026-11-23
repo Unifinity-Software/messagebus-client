@@ -252,6 +252,8 @@ internal sealed class AgentRun
         {
             await EndToolsAndSandboxAsync(workspace).ConfigureAwait(false);
         }
+        if (workspace?.SandboxCleanupIncomplete == true)
+            failure = (SettleStatus.Abandoned, "Protected sandbox cleanup could not be verified. This runner is quarantined; the run's files are preserved.");
         if (verifier is not null)
             agentSettle = Volatile.Read(ref _verifiedAgentSettle);
 
@@ -259,6 +261,7 @@ internal sealed class AgentRun
         {
             // the original issue: a resumed session works in its own folder; the run's directory holds only the run's files.
             workspace = RunWorkspace.Create(_s.Options.WorkRoot, DeliveryId, Delivery.Attempt, Resume?.Folder);
+            workspace.AgentKind = _adapter.Kind;
             workspace.LocalModelEndpoint = (_adapter as OpenCodeAdapter)?.LocalEndpoint;
             await File.WriteAllTextAsync(workspace.DeliveryFile, MessageBusJson.Serialize(Delivery)).ConfigureAwait(false);
             var prompt = Resume is null ? TaskPrompt.Build(Delivery, _s.Host.MachineName, _restricted) : TaskPrompt.BuildResume(Delivery, _s.Host.MachineName);
@@ -394,8 +397,7 @@ internal sealed class AgentRun
                 // A long step (a build, a test run, a slow model turn) prints nothing for minutes: say it is still going (the original issue).
                 var agentStarted = _s.Time.GetUtcNow();
                 using var stillRunning = _s.Time.CreateTimer(_ => StillRunning(agentStarted), null, _s.Options.StillRunningInterval, _s.Options.StillRunningInterval);
-                var filterOutput = _adapter.Kind == AgentKind.Codex
-                    ? CodexAuthentication.RedactOutput(process.Environment.GetValueOrDefault(CodexAuthentication.CodexKey)) : null;
+                var filterOutput = process.OutputFilter;
                 using var agent = AgentProcess.Start(process, line => OnOutput(parser, line), _s.Options.LogTailLines, filterOutput);
                 exitCode = await WaitForOwnedProcessAsync(workspace, agent).ConfigureAwait(false);
                 lock (_parserGate)
@@ -569,6 +571,15 @@ internal sealed class AgentRun
     {
         try
         {
+            if (workspace.SandboxCleanupIncomplete)
+            {
+                // A runtime may still hold these files. Do not hand them to the
+                // ordinary timed housekeeper while ownership is unresolved.
+                workspace.Hold(DateTimeOffset.MaxValue);
+                workspace.Dispose();
+                await _s.Log.WriteLineAsync($"{DeliveryId}: sandbox cleanup is quarantined; the run's files are preserved in {workspace.Root}.").ConfigureAwait(false);
+                return;
+            }
             if (_s.Options.KeepRunFolders)
             {
                 workspace.Dispose();
@@ -613,7 +624,7 @@ internal sealed class AgentRun
             // Before the settle: what the run left running is ended and its credential withdrawn.
             try
             {
-                _s.Sandbox.Ended(workspace);
+                await _s.Sandbox.EndedAsync(workspace).ConfigureAwait(false);
             }
             catch (Exception ex)
             {
@@ -903,16 +914,20 @@ internal sealed class AgentRun
         var launch = adapter.BuildLaunch(context with
         {
             RunnerSandboxed = sandbox.ConfinesAgents, RunnerIsolationEnabled = sandbox.IsolationEnabled, RunDirectory = workspace.Root,
+            ExternalFilePolicyEnforced = context.ResumeSessionId is null && sandbox.EnforcesAgentFilePolicy(workspace, runProfile),
             UsesCodexEnvironmentKey = environment.ContainsKey(CodexAuthentication.CodexKey),
         });
         onLaunch?.Invoke(launch);
+        var agentEnvironment = WithAgentVariables(environment, launch.Environment);
         return sandbox.Wrap(new ProcessLaunch
         {
             FileName = executable,
             Arguments = launch.Arguments,
             WorkingDirectory = context.WorkingDirectory,
-            Environment = WithAgentVariables(environment, launch.Environment),
+            Environment = agentEnvironment,
             StandardInput = launch.StandardInput,
+            OutputFilter = adapter.Kind == AgentKind.Codex
+                ? CodexAuthentication.RedactOutput(agentEnvironment.GetValueOrDefault(CodexAuthentication.CodexKey)) : null,
         }, workspace, runProfile);
     }
 
