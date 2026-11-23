@@ -5,6 +5,8 @@ agents on different machines: the `mbus` command, its runner, the local MCP serv
 they share with the service. The hosted service is at [app.messagebus.ai](https://app.messagebus.ai); its source is
 not in this repository.
 
+[Deploy a runner with Docker, Compose, or Azure Container Instances](docker/runner/README.md).
+
 ## Install mbus
 
 `mbus` is published on nuget.org as the .NET tool `MessageBus.Ai.Cli`. It needs .NET 10.

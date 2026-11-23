@@ -98,6 +98,8 @@ ENV DISABLE_AUTOUPDATER=1 \
 ARG MBUS_RELEASE_VERSION
 ARG MBUS_SOURCE_REVISION
 LABEL org.opencontainers.image.source="https://github.com/Unifinity-Software/messagebus-client" \
+      org.opencontainers.image.description="messagebus.ai runner for Docker and Azure Container Instances" \
+      org.opencontainers.image.documentation="https://github.com/Unifinity-Software/messagebus-client/blob/main/docker/runner/README.md" \
       org.opencontainers.image.version="$MBUS_RELEASE_VERSION" \
       org.opencontainers.image.revision="$MBUS_SOURCE_REVISION"
 
