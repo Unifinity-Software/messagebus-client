@@ -1,5 +1,5 @@
 # The messagebus.ai runner image: mbus plus the coding agents it can start (Claude Code, Codex,
-# OpenCode, GitHub Copilot CLI). It needs no inbound port: the runner connects out to the server.
+# OpenCode, GitHub Copilot CLI), with git, Node.js and the .NET 10 SDK for the code they work on. It needs no inbound port: the runner connects out to the server.
 # Secrets (the machine's API key, the agents' keys) come from the environment or from files the
 # container platform mounts from the customer's secret store; see docker/runner/README.md.
 #
@@ -41,7 +41,7 @@ RUN rm -f skills/global.json \
  && dotnet publish src/MessageBus.Cli.Tool/MessageBus.Cli.Tool.csproj -c Release -r "$rid" --self-contained \
       -p:PublishSingleFile=true -p:DebugType=none -p:MbusImageManaged=true "$@" -o /out
 
-# ── runtime: Node (the agent CLIs are npm packages) plus mbus ─────────────────
+# ── runtime: Node (the agent CLIs are npm packages), the .NET SDK, plus mbus ──
 FROM node:${NODE_VERSION}-trixie-slim AS protected-runtime
 ARG TARGETARCH
 
@@ -79,6 +79,16 @@ RUN npm install -g --no-fund --no-audit --ignore-scripts "npm@${NPM_VERSION}" \
  && npm cache clean --force
 
 COPY --from=build /out/mbus /usr/local/bin/mbus
+
+# The .NET 10 SDK, so agents can build and test .NET code (the same SDK the mbus build stage uses).
+# Read-only like the rest of the image's toolchain; each task's NuGet packages go in its own home.
+COPY --from=build /usr/share/dotnet /usr/share/dotnet
+ENV DOTNET_ROOT=/usr/share/dotnet \
+    DOTNET_CLI_TELEMETRY_OPTOUT=1 \
+    DOTNET_NOLOGO=1 \
+    DOTNET_GENERATE_ASPNET_CERTIFICATE=false \
+    DOTNET_CLI_WORKLOAD_UPDATE_NOTIFY_DISABLE=1
+RUN ln -s /usr/share/dotnet/dotnet /usr/local/bin/dotnet
 COPY docker/runner/entrypoint.sh /usr/local/bin/mbus-entrypoint
 COPY docker/runner/aci-bootstrap.mjs /usr/local/lib/mbus/aci-bootstrap.mjs
 # Strip CRs in case the script was checked out with Windows line endings.

@@ -2,6 +2,7 @@
 
 The runner image runs `mbus runner` in a container. It connects out to messagebus.ai and starts a coding
 agent (Claude Code, Codex, OpenCode or GitHub Copilot CLI) for each task it takes. It opens no ports.
+Agents can use git, Node.js and the .NET 10 SDK, which are in the image.
 
 ```
 ghcr.io/unifinity-software/messagebus-runner:1.5.2
