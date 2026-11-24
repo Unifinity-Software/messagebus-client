@@ -15,10 +15,10 @@ keep the same machine on **Fleet**. Nothing runs on your computer.
 | Secret | What it is | Where to get it |
 | --- | --- | --- |
 | Sign-in key | Lets the runner join your workspace, once | In the dashboard, **Security**, **New API key**, then **Sign in runners** |
-| Anthropic API key | Claude Code | [Claude Console](https://console.anthropic.com/settings/keys) |
+| Anthropic API key **or** Claude subscription token | Claude Code. The token bills your Claude subscription instead of an API account. | An API key from the [Claude Console](https://console.anthropic.com/settings/keys), or run `claude setup-token` on your computer and copy the token it prints |
 | OpenAI API key | Codex | [OpenAI platform](https://platform.openai.com/api-keys) |
 
-The template takes API keys only. For an agent you don't use, pass an empty value.
+For an agent you don't use, leave its key out (Codex: pass an empty value).
 
 ## 1. Save the parameters
 
@@ -37,6 +37,9 @@ Save this as `runner.parameters.json`, with your vault's resource ID and secret 
   }
 }
 ```
+
+To use a Claude subscription instead, replace the `anthropicApiKey` line with `claudeCodeOauthToken`, pointing at the
+secret that holds your `claude setup-token` token.
 
 Never put key values in the file or on a command line.
 
@@ -72,7 +75,7 @@ The identity can read and write only that storage, and pull from your registry i
 1. On **Fleet**, approve the new machine if your workspace asks for approval, then assign its roles.
 2. Keep **Tasks at once** at 1 to start with.
 3. Redeploy with `runnerApiKey` empty, and revoke the sign-in key once no other runner needs it. The runner signs in
-   with its own identity from now on. Keep the Anthropic and OpenAI keys.
+   with its own identity from now on. Keep the Claude and OpenAI keys.
 
 ## Check it works
 

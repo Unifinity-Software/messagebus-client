@@ -23,9 +23,13 @@ param runnerApiKey string = ''
 @description('Display name of the shared runner in the workspace.')
 param machineName string = runnerName
 
-@description('Claude Code API key, supplied from the customer\'s secret store.')
+@description('Claude Code API key, supplied from the customer\'s secret store. Empty when Claude Code uses claudeCodeOauthToken or is not used.')
 @secure()
-param anthropicApiKey string
+param anthropicApiKey string = ''
+
+@description('Claude Code on a Claude subscription instead of an API key: the token from claude setup-token, supplied from the customer\'s secret store.')
+@secure()
+param claudeCodeOauthToken string = ''
 
 @description('Codex API key, supplied from the customer\'s secret store.')
 @secure()
@@ -120,7 +124,8 @@ resource runner 'Microsoft.ContainerInstance/containerGroups@2023-05-01' = {
         // ACI supports only privileged here. The image's USER runner sets UID 10001.
         securityContext: { privileged: false }
         resources: { requests: { cpu: cpu, memoryInGB: memoryInGB } }
-        environmentVariables: [
+        // A Claude credential is set only when it has a value, so an empty one never shadows the other.
+        environmentVariables: concat([
           { name: 'MBUS_HOME', value: '/home/runner/.mbus' }
           { name: 'MBUS_SERVER', value: serverUrl }
           { name: 'MBUS_MACHINE_NAME', value: machineName }
@@ -131,9 +136,12 @@ resource runner 'Microsoft.ContainerInstance/containerGroups@2023-05-01' = {
           { name: 'MBUS_DEPLOYMENT_TARGET', value: 'aci' }
           { name: 'MBUS_AZURE_RESOURCE_ID', value: resourceId('Microsoft.ContainerInstance/containerGroups', runnerName) }
           { name: 'MBUS_KEY_STORE', value: 'file' }
-          { name: 'ANTHROPIC_API_KEY', secureValue: anthropicApiKey }
           { name: 'OPENAI_API_KEY', secureValue: openaiApiKey }
-        ]
+        ], empty(anthropicApiKey) ? [] : [
+          { name: 'ANTHROPIC_API_KEY', secureValue: anthropicApiKey }
+        ], empty(claudeCodeOauthToken) ? [] : [
+          { name: 'CLAUDE_CODE_OAUTH_TOKEN', secureValue: claudeCodeOauthToken }
+        ])
       }
     }]
   }
