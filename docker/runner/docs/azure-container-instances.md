@@ -1,91 +1,29 @@
-# Azure Container Instances
+# Run a runner in Azure Container Instances
 
 Back to the [runner image guide](../README.md).
 
+One template, `infra/runner-aci.bicep`, runs the public runner image in Azure. On its first start the runner signs
+itself in to your workspace and keeps its identity in a private Azure storage account, so restarts and new images
+keep the same machine on **Fleet**. Nothing runs on your computer.
 
-The Linux ACI runner requires a protected launch under UID 10001. It enrolls or
-restores its identity before announcing readiness. A startup check uses dummy
-files and a local test endpoint to verify the same task launcher used for real
-work. If the container denies the required namespace operations, the runner
-stays connected and reports its harnesses as unavailable. It won't run tasks
-with basic isolation. Confirm that the target deployment passes the check
-before assigning roles. When the kernel denies a fresh procfs mount, the official
-amd64 image uses its checksum-pinned gVisor userspace kernel for Codex deliveries (release-20261116.0,
-systrap platform). This provides dynamic, private `/proc` without mounting the
-enclosing container's procfs into a task. Codex checkout, setup, agent and tools
-use this protected launcher. Other agents keep the existing protected native launcher.
-The runtime needs no KVM, privileged container
-or additional host capabilities. Its Apache 2.0 license ships in the image.
+## What you need
 
-- **Files and processes.** A task gets its own home, worktree, temporary
-  directories and PID namespace. The runner's settings, machine key and other
-  worktrees aren't mounted. The image's toolchain is read-only. Codex read-only roles
-  get a read-only worktree mount, including its Git metadata. Only the runner's
-  initial checkout has a separate, trusted write phase.
-- **Network.** A task has a separate network namespace. Its proxy allows
-  approved public IPv4 connections on HTTPS or SSH ports. The proxy denies
-  private, loopback, link-local and Azure platform addresses, and the runner's
-  identity storage host. Open-network roles still use this allow-list. Upstream
-  proxies and host-local models aren't supported in this mode.
-- **Harnesses.** Claude Code and Codex start with a fresh home. Use credentials
-  supplied by the deployment, no saved sign-ins or tools from the runner's
-  home. A harness that fails its protected launch check is unavailable. The
-  userspace launcher enforces Codex's file profile externally; readiness checks
-  a real Codex command against an offline Responses fixture for both writable
-  and read-only profiles. The check has no provider credentials or model bill.
-  Custom images without the bundled runtime retain the protected empty-proc
-  profile and cannot offer harnesses that need dynamic procfs. Resumed harness
-  sessions aren't supported in this mode.
-  Existing ACI deployments need the new released runner image: updating only
-  the `mbus` binary inside an older image does not install the runtime and helper.
-  Keep the existing runner name and identity storage when replacing its image.
-- **Cleanup.** Private runtime journals remain outside guest mounts. Before a
-  run releases capacity, the runner ends its exact owned sandbox IDs and verifies
-  their recorded Gofer and Sentry process identities have exited. Uncertain
-  cleanup quarantines the runner and preserves the journal and worktree. Startup
-  recovers only this runner's owned journals before accepting new tasks.
+- An Azure resource group you can deploy to.
+- A Key Vault that allows template deployment, with these secrets. You need `Microsoft.KeyVault/vaults/deploy/action`
+  on the vault ([how Key Vault references work](https://learn.microsoft.com/en-us/azure/azure-resource-manager/templates/key-vault-parameter)).
 
-`infra/runner-aci.bicep` provisions a Linux ACI runner that enrolls itself in Azure. You do not
-run an enrollment container on your computer or copy a machine private key into a deployment.
-Use a runner image that includes `docker/runner/aci-bootstrap.mjs` and the pending-enrollment
-checkpoint support. Images built from `mbus-v1.1.0` predate this bootstrap.
+| Secret | What it is | Where to get it |
+| --- | --- | --- |
+| Sign-in key | Lets the runner join your workspace, once | In the dashboard, **Security**, **New API key**, then **Sign in runners** |
+| Anthropic API key | Claude Code | [Claude Console](https://console.anthropic.com/settings/keys) |
+| OpenAI API key | Codex | [OpenAI platform](https://platform.openai.com/api-keys) |
 
-For a release whose notes list a verified public Linux amd64 runner image, copy the
-**Digest pin** from the notes into `runnerImage`. It has the form
-`ghcr.io/unifinity-software/messagebus-runner@sha256:<digest>`. Leave
-`containerRegistryName` empty. This path uses the published image directly. To
-upgrade, select the digest from the newer release and redeploy with the same
-runner name, resource group and identity storage. For a custom image, supply
-its own tag or digest and set `containerRegistryName` for a private ACR.
+The template takes API keys only. For an agent you don't use, pass an empty value.
 
-The template defaults to the official `1.5.2` image. Choose a verified
-digest pin to deploy the exact release image.
+## 1. Save the parameters
 
-## Deploy in Azure
-
-Choose a distinct container group name for each runner. Deploy the template through Azure Cloud
-Shell or your deployment pipeline. The default is one
-mbus task slot, two CPU cores, four GiB of memory and no public ingress. Agents run as UID 10001.
-
-| Parameter | Value |
-|---|---|
-| `runnerName` | Your ACI container group name. |
-| `runnerImage` | Defaults to the official `1.5.2` tag. Set a verified digest to pin the exact image, or supply a custom image. |
-| `containerRegistryName` | Existing private ACR name in the resource group; empty for a public image. |
-| `serverUrl` | Your reachable mbus server address. |
-| `machineName` | How the runner appears in Fleet; defaults to the container group name. |
-| `runnerApiKey` | A workspace API key with **Sign in runners**, supplied as a secure value. |
-| `anthropicApiKey` | Claude Code API key, supplied as a secure value. |
-| `openaiApiKey` | Codex API key, supplied as a secure value. |
-
-Keep key values in your Azure secret/deployment configuration. Do not commit them to a parameter
-file or place them on a command line. For a Key Vault reference, the vault must allow template
-deployment and the deployer needs `Microsoft.KeyVault/vaults/deploy/action` on it.
-[Required permissions and reference format](https://learn.microsoft.com/en-us/azure/azure-resource-manager/templates/key-vault-parameter).
-Save the following as `runner.parameters.json`. Replace the Key Vault resource ID,
-secret names, server URL and names with your deployment's values. For an unused
-provider, use `{"value": ""}` for its parameter. Use the same resource group and
-runner name when upgrading so the template reuses its identity storage.
+Save this as `runner.parameters.json`, with your vault's resource ID and secret names. Give each runner its own
+`runnerName`.
 
 ```json
 {
@@ -93,100 +31,106 @@ runner name when upgrading so the template reuses its identity storage.
   "contentVersion": "1.0.0.0",
   "parameters": {
     "runnerName": {"value": "mbus-aci-runner"},
-    "machineName": {"value": "mbus-aci-runner"},
-    "runnerImage": {"value": "ghcr.io/unifinity-software/messagebus-runner:1.5.2"},
-    "containerRegistryName": {"value": ""},
-    "serverUrl": {"value": "https://app.messagebus.ai"},
-    "runnerApiKey": {
-      "reference": {
-        "keyVault": {"id": "<key-vault-resource-id>"},
-        "secretName": "mbus-runner-enrollment"
-      }
-    },
-    "anthropicApiKey": {
-      "reference": {
-        "keyVault": {"id": "<key-vault-resource-id>"},
-        "secretName": "anthropic-api-key"
-      }
-    },
-    "openaiApiKey": {
-      "reference": {
-        "keyVault": {"id": "<key-vault-resource-id>"},
-        "secretName": "openai-api-key"
-      }
-    }
+    "runnerApiKey": {"reference": {"keyVault": {"id": "<key-vault-resource-id>"}, "secretName": "mbus-runner-sign-in"}},
+    "anthropicApiKey": {"reference": {"keyVault": {"id": "<key-vault-resource-id>"}, "secretName": "anthropic-api-key"}},
+    "openaiApiKey": {"reference": {"keyVault": {"id": "<key-vault-resource-id>"}, "secretName": "openai-api-key"}}
   }
 }
 ```
 
-The template also accepts `location` (defaults to the resource group region),
-`cpu` (defaults to 2) and `memoryInGB` (defaults to 4).
-The public image uses an empty `containerRegistryName` and requires no ACR.
+Never put key values in the file or on a command line.
 
-In Azure Cloud Shell, with the template and a parameter file containing secret references:
+Optional parameters:
+
+| Parameter | Default |
+| --- | --- |
+| `runnerImage` | `ghcr.io/unifinity-software/messagebus-runner:1.5.2`. To pin the exact image, use the **Digest pin** from the release notes. |
+| `machineName` | The `runnerName`. This is the name shown on Fleet. |
+| `cpu`, `memoryInGB` | 2 cores, 4 GiB |
+| `location` | The resource group's region |
+| `serverUrl` | `https://app.messagebus.ai` |
+| `containerRegistryName` | Empty. Set it only for your own image in a private Azure Container Registry in the same resource group. |
+
+## 2. Deploy
+
+In Azure Cloud Shell, or your pipeline:
 
 ```sh
-az deployment group create --subscription <subscription> --resource-group <group> \
+az deployment group create --resource-group <group> \
   --template-file infra/runner-aci.bicep --parameters @runner.parameters.json
 ```
 
-The template creates a user-assigned managed identity and a private storage account with one
-identity blob container. That identity gets Blob Data Contributor scoped to that container and,
-when a private ACR is selected, AcrPull on that registry. The account disables anonymous blob
-access and shared-key authentication. Identity data is encrypted at rest by Azure Storage.
-The bootstrap retries initial permission propagation for a bounded period and fails closed if
-it cannot access the identity store.
+The template creates:
+- the container group, with no public address
+- a managed identity
+- a private storage account for the runner's identity, with no anonymous or shared-key access
 
-## First start and later starts
+The identity can read and write only that storage, and pull from your registry if you set one.
 
-On first start the container obtains its Azure token through managed identity. It takes a blob
-lease, generates a machine key, and saves a pending checkpoint before sending the mbus enrollment
-request. It then uses the Sign in runners key to join your workspace and saves the completed
-machine identity before starting the runner. An interrupted enrollment reuses the checkpointed
-key, including when the service enrolled the machine but its response was lost.
+## 3. Approve it
 
-The new shared machine appears on Fleet. Approve it if required, assign its roles and confirm
-**Tasks at once** is one for the initial deployment. A credentials check (`mbus doctor`, runner
-startup or a Fleet scan) establishes that Codex can be offered work while model access is still
-unverified. When you can invoke mbus directly on the runner, `mbus doctor --smoke --agent codex`
-runs a bounded model-backed edit, build, test and commit in a scratch checkout.
+1. On **Fleet**, approve the new machine if your workspace asks for approval, then assign its roles.
+2. Keep **Tasks at once** at 1 to start with.
+3. Redeploy with `runnerApiKey` empty, and revoke the sign-in key once no other runner needs it. The runner signs in
+   with its own identity from now on. Keep the Anthropic and OpenAI keys.
 
-For ACI acceptance, run a small Claude Code task and a Codex task on this runner. For Codex, use a
-single read-only request without a checkout, such as “Reply with `codex-ready`,” with a five-minute
-role time limit. Verify the task succeeds, returns the requested reply and reports Codex output
-tokens. Stop and start the ACI group and repeat both tasks. Verify the machine ID and role
-assignments stayed the same. Keep key values out of task prompts, commands and logs.
+## Check it works
 
-If OpenAI reports missing authentication or rejects the key, check the configured secret and
-restart the runner. If OpenAI refuses Codex because of the organization's monthly API Credits
-benefit for ChatGPT subscriptions, ask the organization owner for a Codex-eligible sign-in or API
-project, then retry the task. Model access is verified by a completed model request.
+1. Send a small Claude Code task and a small Codex task to this runner. For Codex, a read-only request such as
+   "Reply with `codex-ready`" with a five-minute time limit is enough.
+2. Stop and start the container group in Azure, and send both again.
+3. On **Fleet**, the machine and its roles should be the same as before.
 
-On later starts the container restores the same identity into owner-only local files. It does
-not enroll again and does not need the enrollment API key. After the first successful enrollment,
-remove `runnerApiKey` from your deployment's secure values or redeploy it as empty. Revoke that
-key when you no longer need it to enroll other runners. Keep the agent API keys configured.
-Working copies and per-task state are ephemeral; the identity blob is the durable state.
+## Update
 
-The template reports its ACI target and ARM resource ID as setup hints. To enable automatic
-management, approve the shared runner, enable Azure runners in Integrations, verify the Azure
-pairing tag in runner Settings, and explicitly enable wake and idle stop. Reported metadata
-never authorizes Azure management. The template outputs the group ARM ID and identity storage
-account name.
+Redeploy with the new image tag or digest, using the same `runnerName` and resource group. Keep the storage account:
+it holds the runner's identity. Updating `mbus` inside an old image isn't enough, because the image also carries the
+runtime that keeps tasks apart.
 
-## Recover or retire
+## Let messagebus.ai start and stop it
 
-If storage access is revoked, the checkpoint is corrupt or another bootstrap owns the lease,
-the runner does not begin work. Restore access or the correct identity checkpoint and restart.
-A pending enrollment requires its original Sign in runners key. Preserve the storage account
-and blob when updating or replacing the ACI group; deleting them loses the persisted identity.
-An identity checkpoint cannot be used for a different ACI group or mbus server.
+This is optional. In messagebus.ai:
 
-Drain active tasks before stopping or retiring the runner. A stopped ACI group retains its
-deployment configuration; identity storage, registry storage and model usage are separate from
-ACI compute charges.
-[ACI lifecycle and billing](https://learn.microsoft.com/en-us/azure/container-instances/container-instances-stop-start).
-To retire it, remove its mbus lifecycle binding and machine registration, delete the ACI group,
-its managed identity and role assignments, and its dedicated identity storage. A dedicated
-resource group can be deleted after the runner has drained. Retire deployment-held model keys
-and revoke enrollment keys that are no longer needed.
+1. Turn on Azure runners in **Integrations**.
+2. In the machine's settings on **Fleet**, add the pairing tag it shows to the container group, and verify it.
+3. Turn on **Wake for eligible queued work** and **Stop when idle**.
+
+The runner reporting its Azure address never grants control by itself.
+
+## If something is wrong
+
+| What you see | What to do |
+| --- | --- |
+| Claude Code or Codex shows as unavailable | The container didn't allow the isolation the runner needs. The runner won't run tasks without it. Check you deployed the public image or one built from it. |
+| OpenAI says the key is missing or wrong | Check the secret in Key Vault, then restart the container group. |
+| OpenAI refuses Codex because of the organization's API Credits for ChatGPT subscriptions | Ask the organization owner for an API project that allows Codex, then retry. |
+| The runner never starts work | It can't read its identity storage, or another copy holds it. Restore access to the storage account, or stop the other container group, then restart. A first sign-in that was interrupted needs the original sign-in key. |
+
+An identity belongs to one container group and one server. It can't be moved to another.
+
+## Remove it
+
+1. Let running tasks finish.
+2. On **Fleet**, remove the machine.
+3. In Azure, delete the container group, its managed identity and its storage account. If you used a resource group
+   just for this runner, delete that instead.
+4. Delete the model keys from Key Vault if nothing else uses them.
+
+A stopped container group costs nothing for compute. Storage and model use are billed separately
+([stop and start in Azure](https://learn.microsoft.com/en-us/azure/container-instances/container-instances-stop-start)).
+
+## How tasks are kept apart
+
+The runner checks this at startup, and won't offer an agent whose check fails.
+
+- **Files.** Each task gets its own home, working copy and temporary folders. The runner's settings, machine key and
+  other tasks' copies aren't visible. Tools in the image are read-only. Read-only roles get a read-only copy.
+- **Processes.** Each task runs in its own process space. On Azure, Codex runs inside a user-space kernel bundled in the image
+  ([gVisor](https://gvisor.dev), Apache 2.0). It needs no privileged container.
+- **Network.** Each task goes through a proxy that allows only public HTTPS and SSH addresses the role permits. It blocks private, local and
+  Azure platform addresses, and the runner's identity storage. An upstream proxy or a model on the host isn't
+  supported.
+- **Sign-ins.** Agents start with a fresh home and only the keys you deployed. Resuming an agent's earlier session
+  isn't supported.
+- **Clean-up.** The runner confirms a task's processes have ended before taking the next one. If it can't confirm
+  that, it stops taking work and keeps the evidence.
