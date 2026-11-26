@@ -52,9 +52,11 @@ internal sealed record RunServices(
 internal sealed class AgentRun
 {
     private readonly RunServices _s;
-    private IAgentAdapter _adapter;
+    private IAgentAdapter? _adapter;
+    private IAgentAdapter Adapter => _adapter ?? throw new InvalidOperationException("This run has no agent.");
     private readonly string _executable;
-    private readonly PermissionProfile _profile;
+    private readonly PermissionProfile? _profile;
+    private PermissionProfile Profile => _profile ?? throw new InvalidOperationException("This run has no permission profile.");
     private readonly bool _restricted;
     private readonly CancellationTokenSource _stop = new();
     private CancellationTokenSource? _timeout;
@@ -73,7 +75,7 @@ internal sealed class AgentRun
     private System.Diagnostics.Activity? _span;
     private RunToolsSession? _tools;
     private string? _lastRefusal;
-    private readonly string? _alreadyHandled;
+    private readonly SettleResult? _immediateResult;
     private SettleInput? _verifiedAgentSettle;
     private VerificationResult? _verification;
     private int _resourceRoot;
@@ -118,7 +120,8 @@ internal sealed class AgentRun
         _restricted = restricted;
         Resume = resume;
         ProposalAuthority = proposalAuthority;
-        _alreadyHandled = alreadyHandled;
+        if (alreadyHandled is not null)
+            _immediateResult = new SettleResult { Status = SettleStatus.Succeeded, Summary = alreadyHandled };
         LeaseExpiresAt = delivery.LeaseExpiresAt;
         // Started now, on the caller's thread, so the clock starts when the delivery is accepted; for a run that needs its
         // machine owner's approval (the original issue), once it is approved, so the wait doesn't use up the role's time limit.
@@ -126,6 +129,15 @@ internal sealed class AgentRun
         {
             StartClock();
         }
+    }
+
+    public AgentRun(RunServices services, TaskDelivery delivery, SettleResult refusal)
+    {
+        _s = services;
+        Delivery = delivery;
+        LeaseExpiresAt = delivery.LeaseExpiresAt;
+        _immediateResult = refusal;
+        _executable = string.Empty;
     }
 
     /// <summary>Starts the role's time limit.</summary>
@@ -146,7 +158,7 @@ internal sealed class AgentRun
     public string DeliveryId => Delivery.DeliveryId;
 
     /// <summary>The coding agent running this task, for the runner's update waiting log.</summary>
-    public AgentKind AgentKind => _adapter.Kind;
+    public AgentKind? RunningAgentKind => _adapter?.Kind;
 
     public DateTimeOffset LeaseExpiresAt { get; set; }
 
@@ -176,11 +188,13 @@ internal sealed class AgentRun
     {
         var started = _s.Time.GetTimestamp();
         // The run's span (the original issue), continuing the delivery's trace; progress and settle calls are made under it.
-        using var span = _span = Telemetry.RunnerTelemetry.StartRun(Delivery, _s.Host.MachineId, _s.Host.MachineName, _adapter.Kind);
-        if (_alreadyHandled is { } handled)
+        using var span = _span = RunningAgentKind is { } agentKind
+            ? Telemetry.RunnerTelemetry.StartRun(Delivery, _s.Host.MachineId, _s.Host.MachineName, agentKind)
+            : null;
+        if (_immediateResult is { } done)
         {
-            var done = new SettleResult { Status = SettleStatus.Succeeded, Summary = handled };
-            Telemetry.RunnerTelemetry.Finish(span, Delivery, _adapter.Kind, done, _s.Time.GetElapsedTime(started));
+            if (RunningAgentKind is { } kind)
+                Telemetry.RunnerTelemetry.Finish(span, Delivery, kind, done, _s.Time.GetElapsedTime(started));
             await SettleAsync(done).ConfigureAwait(false);
             _timeout?.Dispose();
             return done;
@@ -207,7 +221,7 @@ internal sealed class AgentRun
             var cannotKeep = kept.Count == 0 ? null
                 : _s.Options.AgentTools == "refuse"
                     ? $"This computer's owner doesn't let runs keep extra agent tools, and this role's runs keep {names}. Run this role on another computer, or ask the owner to allow it (MBUS_RUNNER_AGENT_TOOLS)."
-                : _adapter.Kind switch
+                : Adapter.Kind switch
                 {
                     AgentKind.Codex => (_adapter as CodexAdapter)?.CannotKeepTools(kept),
                     AgentKind.ClaudeCode => (_adapter as ClaudeCodeAdapter)?.CannotKeepTools(kept, Resume?.Folder), // the original issue
@@ -261,7 +275,7 @@ internal sealed class AgentRun
         {
             // the original issue: a resumed session works in its own folder; the run's directory holds only the run's files.
             workspace = RunWorkspace.Create(_s.Options.WorkRoot, DeliveryId, Delivery.Attempt, Resume?.Folder);
-            workspace.AgentKind = _adapter.Kind;
+            workspace.AgentKind = Adapter.Kind;
             workspace.LocalModelEndpoint = (_adapter as OpenCodeAdapter)?.LocalEndpoint;
             await File.WriteAllTextAsync(workspace.DeliveryFile, MessageBusJson.Serialize(Delivery)).ConfigureAwait(false);
             var prompt = Resume is null ? TaskPrompt.Build(Delivery, _s.Host.MachineName, _restricted) : TaskPrompt.BuildResume(Delivery, _s.Host.MachineName);
@@ -270,9 +284,9 @@ internal sealed class AgentRun
                     + "Keep the approved package manifest, lockfile and Git attributes unchanged. Settle with your reply. The runner returns the checked commit.";
             await File.WriteAllTextAsync(workspace.PromptFile, prompt).ConfigureAwait(false);
 
-            await _s.Sandbox.PrepareAsync(workspace, Delivery, _profile, _stop.Token).ConfigureAwait(false);
+            await _s.Sandbox.PrepareAsync(workspace, Delivery, Profile, _stop.Token).ConfigureAwait(false);
             var sandboxed = workspace;
-            ProcessLaunch Sandboxed(ProcessLaunch launch) => _s.Sandbox.Wrap(launch, sandboxed, _profile);
+            ProcessLaunch Sandboxed(ProcessLaunch launch) => _s.Sandbox.Wrap(launch, sandboxed, Profile);
 
             if (verifier is not null)
             {
@@ -327,7 +341,7 @@ internal sealed class AgentRun
             if (failure is null && _s.Tools is { } tools)
             {
                 // the original issue: the agent's mbus tools are served from here, with a credential for this run only.
-                _tools = await tools.StartAsync(new RunToolsRequest(workspace, Delivery, _profile, Sandboxed)
+                _tools = await tools.StartAsync(new RunToolsRequest(workspace, Delivery, Profile, Sandboxed)
                 {
                     Session = Resume,
                     ProposalAuthority = ProposalAuthority,
@@ -353,13 +367,13 @@ internal sealed class AgentRun
             if (failure is null && !_stop.IsCancellationRequested)
             {
                 // the original issue: a role that may run the repository's tests but no other commands gets those test commands.
-                var profile = TestCommands.Apply(_profile, workspace.WorkTree);
+                var profile = TestCommands.Apply(Profile, workspace.WorkTree);
                 string? modeNote = null;
                 string? cannotStart = null;
-                var process = AgentProcessLaunch(_adapter, _s.Sandbox, _executable, workspace, _profile,
+                var process = AgentProcessLaunch(Adapter, _s.Sandbox, _executable, workspace, Profile,
                     new AgentLaunchContext(prompt, workspace.PromptFile, profile, workspace.WorkTree, McpEnvironment(environment), Resume?.SessionId, Delivery.Model,
                         CodexOnWindows: Delivery.RunEnvironment.CodexOnWindows, KeepAgentTools: Delivery.RunEnvironment.KeepAgentTools ?? []),
-                    AgentEnvironment(environment, _adapter, new SignInEnvironment(_s.Host.GetEnvironmentVariable, _s.Host.AgentEnvironment()),
+                    AgentEnvironment(environment, Adapter, new SignInEnvironment(_s.Host.GetEnvironmentVariable, _s.Host.AgentEnvironment()),
                         windowsService: _s.Options.WindowsService), launch =>
                     {
                         cannotStart = launch.CannotStart;
@@ -379,19 +393,19 @@ internal sealed class AgentRun
                 if (process.StandardInput is { } launchPrompt && launchPrompt != prompt)
                     await File.WriteAllTextAsync(workspace.PromptFile, launchPrompt).ConfigureAwait(false);
 
-                var parser = _adapter.Kind == AgentKind.ClaudeCode && Resume?.SessionId is { } sessionId
+                var parser = Adapter.Kind == AgentKind.ClaudeCode && Resume?.SessionId is { } sessionId
                     ? await ClaudeOutputParser.ForResumeAsync(MessageBus.Mcp.SessionUsage.ClaudeHome(name =>
                         process.Environment.TryGetValue(name, out var value) ? value : _s.Host.GetEnvironmentVariable(name)),
                         workspace.WorkTree, sessionId, _stop.Token).ConfigureAwait(false)
-                    : _adapter.CreateParser(Delivery.Model);
-                Note($"Started {AgentKinds.DisplayName(_adapter.Kind)}"
+                    : Adapter.CreateParser(Delivery.Model);
+                Note($"Started {AgentKinds.DisplayName(Adapter.Kind)}"
                     + (Delivery.Model is not { } model ? ""
                         : Delivery.EconomyModel ? $" with {model}, the role's cheaper model (its daily budget is used)"
                         : $" with {model}"));
-                if (Delivery.CostCap is { } cap && !_adapter.ReportsUsageAsItGoes)
+                if (Delivery.CostCap is { } cap && !Adapter.ReportsUsageAsItGoes)
                 {
                     // the original issue, said plainly: this CLI's usage arrives only at the end, so the cap can't stop it early.
-                    Note($"{AgentKinds.DisplayName(_adapter.Kind)} reports what it used only when it finishes, so the role's "
+                    Note($"{AgentKinds.DisplayName(Adapter.Kind)} reports what it used only when it finishes, so the role's "
                         + $"{Money(cap.MaxUsd)} most per run can't stop this run early");
                 }
                 // A long step (a build, a test run, a slow model turn) prints nothing for minutes: say it is still going (the original issue).
@@ -412,7 +426,7 @@ internal sealed class AgentRun
                 QueueCapacity(parser.Capacity);
                 await _capacityChain.ConfigureAwait(false);
                 tail = agent.Tail();
-                if (_adapter.Kind == AgentKind.Codex && (exitCode != 0 || outcome.ReportedError)
+                if (Adapter.Kind == AgentKind.Codex && (exitCode != 0 || outcome.ReportedError)
                     && CodexAuthentication.Refusal(outcome, tail) is { } refusal)
                 {
                     outcome = outcome with { ReportedError = true, ErrorText = refusal };
@@ -499,7 +513,7 @@ internal sealed class AgentRun
                 }
                 if (!returned) keptBecause ??= "commits may not have been returned";
             }
-            Telemetry.RunnerTelemetry.Finish(span, Delivery, _adapter.Kind, result, _s.Time.GetElapsedTime(started));
+            Telemetry.RunnerTelemetry.Finish(span, Delivery, Adapter.Kind, result, _s.Time.GetElapsedTime(started));
             if (verifier is null && workspace is not null && Delivery.RunEnvironment.Logs != LogCapture.None)
             {
                 // Upload (encrypted, to the run-logs container) needs the original issue; until then it is kept locally too.
@@ -826,7 +840,7 @@ internal sealed class AgentRun
             // settle tool records the agent's result for this runner to read after the agent exits.
             ["MBUS_DELIVERY_FILE"] = workspace.DeliveryFile,
             ["MBUS_SETTLE_FILE"] = workspace.SettleFile,
-            ["MBUS_PERMISSION_PROFILE"] = _profile.Name,
+            ["MBUS_PERMISSION_PROFILE"] = Profile.Name,
         };
         foreach (var (name, value) in _tools?.Variables ?? new Dictionary<string, string>())
         {
@@ -980,7 +994,7 @@ internal sealed class AgentRun
                 QueueCapacity(capacity);
             }
         }
-        if (Delivery.CostCap is { } cap && _adapter.ReportsUsageAsItGoes)
+        if (Delivery.CostCap is { } cap && Adapter.ReportsUsageAsItGoes)
         {
             CheckCost(parser, cap);
         }

@@ -1003,3 +1003,24 @@ assistant calls supply token counts; total and per-model cost stay unknown. Tran
 failures do not prevent the agent from running, and cancellation still stops the run.
 Codex `turn.completed` usage is already per turn and is summed only within the current process.
 This normalization changes no wire fields and requires no server feature negotiation.
+
+## Workflow task contracts
+
+The service advertises `workflows` in the `GET /api/server` capabilities array.
+Clients check the configured service for this token before sending workflow fields.
+The service only dispatches workflow payloads when this feature is enabled.
+
+- `SettleResult.outcome` is the optional outcome word selected for the step.
+- `TaskDelivery.stepContext` is optional service-provided metadata with
+  `jobId`, `stepId`, `stepName`, `round`, `allowedOutcomes`, and `inputs`.
+  Each input contains `fromStep`, `threadId`, and `what`.
+- `TaskDelivery.runnerAction` is an optional request to the runner. Its `kind`
+  identifies the corresponding parameters object:
+  `run-command` uses `runCommand` with `command`;
+  `open-pull-request` uses `openPullRequest` with `branchFrom`, `base`, and optional `autoMerge`;
+  `record-walkthrough` uses `recordWalkthrough` with `url`;
+  `roll-back` uses `rollBack` with `deploymentId`.
+  For an unsupported kind, the runner accepts the delivery and settles it as
+  failed with `failureCategory: "refused"`, without starting an agent.
+- A `Ref` of kind `exhibit` carries an `exhibit` object with `name`,
+  `mediaType`, `size` in bytes, and optional `caption`.
