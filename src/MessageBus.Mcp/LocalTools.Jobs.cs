@@ -67,6 +67,24 @@ internal sealed partial class LocalTools
         };
     }
 
+    /// <summary>The service's own refusal text (a JSON <c>message</c> or a short plain-text body), shown unchanged.</summary>
+    private static async Task<string?> ServiceMessageAsync(HttpResponseMessage response, CancellationToken ct)
+    {
+        var text = (await response.Content.ReadAsStringAsync(ct)).Trim();
+        if (text.Length == 0) return null;
+        try
+        {
+            using var doc = JsonDocument.Parse(text);
+            return doc.RootElement.ValueKind == JsonValueKind.Object
+                && doc.RootElement.TryGetProperty("message", out var message) && message.ValueKind == JsonValueKind.String
+                && !string.IsNullOrWhiteSpace(message.GetString()) ? message.GetString() : null;
+        }
+        catch (JsonException)
+        {
+            return text.Length <= 500 && !text.StartsWith('<') ? text : null;
+        }
+    }
+
     private string JobUrl(string id) => $"{_o.Http.BaseAddress!.AbsoluteUri.TrimEnd('/')}/jobs/{Uri.EscapeDataString(id)}";
 
     private async Task<T> SendWorkflowRequestAsync<T>(HttpRequestMessage request, JsonTypeInfo<T> type, CancellationToken ct)
@@ -87,7 +105,7 @@ internal sealed partial class LocalTools
             throw new McpToolException(new McpError
             {
                 Code = code,
-                Message = $"The workflow endpoint returned HTTP {(int)response.StatusCode}.",
+                Message = await ServiceMessageAsync(response, ct) ?? $"The workflow endpoint returned HTTP {(int)response.StatusCode}.",
                 Retryable = response.StatusCode == HttpStatusCode.TooManyRequests
                     || request.Method == HttpMethod.Get && (int)response.StatusCode >= 500,
             });
