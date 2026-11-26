@@ -141,6 +141,9 @@ public sealed record BodyRef
 /// </summary>
 public sealed record Ref
 {
+    /// <summary>Display metadata when <see cref="Kind"/> is <see cref="RefKinds.Exhibit"/>.</summary>
+    public ExhibitRef? Exhibit { get; init; }
+
     /// <summary>The kind, for example <c>github.pr</c>.</summary>
     public required string Kind { get; init; }
 
@@ -169,6 +172,9 @@ public sealed record Ref
 /// <summary>Well-known <see cref="Ref.Kind"/> values.</summary>
 public static class RefKinds
 {
+    /// <summary>An exhibit from a workflow step.</summary>
+    public const string Exhibit = "exhibit";
+
     /// <summary>An attachment a runner task tried to return but could not send.</summary>
     public const string AttachmentRefused = "attachment.refused";
 

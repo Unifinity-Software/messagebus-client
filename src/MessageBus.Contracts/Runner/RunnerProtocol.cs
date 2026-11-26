@@ -380,6 +380,12 @@ public sealed record DownloadLink
 /// <summary>A task pushed to a runner (<see cref="RunnerRoutes.Deliver"/>).</summary>
 public sealed record TaskDelivery
 {
+    /// <summary>Context supplied by the service for a workflow step.</summary>
+    public StepContext? StepContext { get; init; }
+
+    /// <summary>A workflow action for the runner itself.</summary>
+    public RunnerAction? RunnerAction { get; init; }
+
     /// <summary>The service-pinned verification definition, supplied only for required verification.</summary>
     public VerificationSnapshot? Verification { get; init; }
 
@@ -447,7 +453,7 @@ public sealed record TaskDelivery
 /// <summary>The runner's immediate answer to a delivery.</summary>
 public sealed record DeliveryDecision
 {
-    /// <summary>Whether it will run it.</summary>
+    /// <summary>Whether the runner accepted responsibility for settling the delivery.</summary>
     public required bool Accepted { get; init; }
 
     /// <summary>Why not, when declined. The message returns to the queue without counting an attempt.</summary>

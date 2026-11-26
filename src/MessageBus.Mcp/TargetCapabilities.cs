@@ -2,12 +2,17 @@ using System.Net.Http.Headers;
 using System.Text.Json;
 using MessageBus.Contracts.Http;
 using MessageBus.Contracts.Json;
+using MessageBus.Contracts.Messaging;
 
 namespace MessageBus.Mcp;
 
 /// <summary>Fresh protocol discovery through the same authenticated HTTP client used for the operation.</summary>
 public static class TargetCapabilities
 {
+    /// <summary>Whether the configured service runs workflows; nothing workflow-specific is sent until it does.</summary>
+    public static Task<bool> SupportsWorkflowsAsync(HttpClient http, CancellationToken ct) =>
+        SupportsAsync(http, WorkflowCapabilities.Workflows, ct);
+
     /// <summary>Reads the actual configured target with no positive cache. Failed or unrecognized discovery gives no support; caller cancellation is preserved.</summary>
     public static async Task<bool> SupportsAsync(HttpClient http, string capability, CancellationToken ct)
     {
