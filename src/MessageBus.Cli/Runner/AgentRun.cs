@@ -1,3 +1,4 @@
+using MessageBus.Cli.Runner.Actions;
 using MessageBus.Cli.Agents;
 using MessageBus.Cli.Runner.Agents;
 using MessageBus.Contracts.Json;
@@ -76,6 +77,7 @@ internal sealed class AgentRun
     private RunToolsSession? _tools;
     private string? _lastRefusal;
     private readonly SettleResult? _immediateResult;
+    private readonly IRunnerAction? _action;
     private SettleInput? _verifiedAgentSettle;
     private VerificationResult? _verification;
     private int _resourceRoot;
@@ -83,13 +85,21 @@ internal sealed class AgentRun
     // Zero means no live process; -1 means the protected task root is outside the runner's view.
     internal int ResourceRoot => Volatile.Read(ref _resourceRoot);
 
-    private async Task<int> WaitForOwnedProcessAsync(RunWorkspace workspace, AgentProcess process)
+    private async Task<int> WaitForOwnedProcessAsync(RunWorkspace workspace, AgentProcess process, CancellationToken? cancellationToken = null)
     {
         Volatile.Write(ref _resourceRoot, _s.Sandbox.UsesPrivateHome ? -1 : process.Id);
         try
         {
-            _s.Sandbox.Started(workspace, process.Id);
-            using var stop = _stop.Token.Register(process.Kill);
+            using var stop = (cancellationToken ?? _stop.Token).Register(process.Kill);
+            try
+            {
+                _s.Sandbox.Started(workspace, process.Id);
+            }
+            catch
+            {
+                process.Kill();
+                throw;
+            }
             return await process.WaitForExitAsync(ClearResourceRoot).ConfigureAwait(false);
         }
         finally
@@ -138,6 +148,16 @@ internal sealed class AgentRun
         LeaseExpiresAt = delivery.LeaseExpiresAt;
         _immediateResult = refusal;
         _executable = string.Empty;
+    }
+
+    internal AgentRun(RunServices services, TaskDelivery delivery, IRunnerAction action, PermissionProfile profile)
+    {
+        _s = services;
+        Delivery = delivery;
+        LeaseExpiresAt = delivery.LeaseExpiresAt;
+        _executable = string.Empty;
+        _action = action;
+        _profile = profile;
     }
 
     /// <summary>Starts the role's time limit.</summary>
@@ -208,6 +228,7 @@ internal sealed class AgentRun
         RunWorkspace? verificationWorkspace = null;
         RunCommits? commits = null;
         AgentOutcome? outcome = null;
+        SettleResult? actionResult = null;
         SettleInput? agentSettle = null;
         IReadOnlyList<string> tail = [];
         int? exitCode = null;
@@ -216,7 +237,7 @@ internal sealed class AgentRun
 
         try
         {
-            var kept = Delivery.RunEnvironment.KeepAgentTools ?? [];
+            var kept = _action is null ? Delivery.RunEnvironment.KeepAgentTools ?? [] : [];
             var names = string.Join(", ", kept);
             var cannotKeep = kept.Count == 0 ? null
                 : _s.Options.AgentTools == "refuse"
@@ -275,14 +296,18 @@ internal sealed class AgentRun
         {
             // the original issue: a resumed session works in its own folder; the run's directory holds only the run's files.
             workspace = RunWorkspace.Create(_s.Options.WorkRoot, DeliveryId, Delivery.Attempt, Resume?.Folder);
-            workspace.AgentKind = Adapter.Kind;
+            workspace.AgentKind = _adapter?.Kind;
             workspace.LocalModelEndpoint = (_adapter as OpenCodeAdapter)?.LocalEndpoint;
             await File.WriteAllTextAsync(workspace.DeliveryFile, MessageBusJson.Serialize(Delivery)).ConfigureAwait(false);
-            var prompt = Resume is null ? TaskPrompt.Build(Delivery, _s.Host.MachineName, _restricted) : TaskPrompt.BuildResume(Delivery, _s.Host.MachineName);
-            if (verifier is not null && !NodeVerification.IsReview(Delivery))
-                prompt += $"\n\nFor required verification, commit your result on the current {NodeVerification.Branch} branch. "
-                    + "Keep the approved package manifest, lockfile and Git attributes unchanged. Settle with your reply. The runner returns the checked commit.";
-            await File.WriteAllTextAsync(workspace.PromptFile, prompt).ConfigureAwait(false);
+            var prompt = "";
+            if (_action is null)
+            {
+                prompt = Resume is null ? TaskPrompt.Build(Delivery, _s.Host.MachineName, _restricted) : TaskPrompt.BuildResume(Delivery, _s.Host.MachineName);
+                if (verifier is not null && !NodeVerification.IsReview(Delivery))
+                    prompt += $"\n\nFor required verification, commit your result on the current {NodeVerification.Branch} branch. "
+                        + "Keep the approved package manifest, lockfile and Git attributes unchanged. Settle with your reply. The runner returns the checked commit.";
+                await File.WriteAllTextAsync(workspace.PromptFile, prompt).ConfigureAwait(false);
+            }
 
             await _s.Sandbox.PrepareAsync(workspace, Delivery, Profile, _stop.Token).ConfigureAwait(false);
             var sandboxed = workspace;
@@ -330,6 +355,34 @@ internal sealed class AgentRun
                 {
                     Note("Received the code from the sender");
                 }
+            }
+
+            if (_action is not null)
+            {
+                if (failure is null)
+                {
+                    // Prepare workflow step inputs here before dispatch when the input materializer is available.
+                    actionResult = await _action.RunAsync(new RunnerActionContext
+                    {
+                        Delivery = Delivery,
+                        RunDirectory = workspace.Root,
+                        WorkDirectory = workspace.WorkTree,
+                        Log = _s.Log,
+                        RunProcessAsync = async (launch, ct) =>
+                        {
+                            ct.ThrowIfCancellationRequested();
+                            using var process = AgentProcess.Start(Sandboxed(launch with
+                            {
+                                Environment = RunEnvironmentVariables(sandboxed),
+                            }), tailLines: 60);
+                            var code = await WaitForOwnedProcessAsync(sandboxed, process, ct).ConfigureAwait(false);
+                            tail = process.Tail();
+                            return (code, tail);
+                        },
+                    }, _stop.Token).ConfigureAwait(false);
+                    exitCode = actionResult.ExitCode;
+                }
+                return;
             }
 
             if (verifier is null)
@@ -446,7 +499,9 @@ internal sealed class AgentRun
         try
         {
             var refusal = Volatile.Read(ref _lastRefusal);
-            SettleResult CurrentResult() => Compose(Reason, _stopDetail, failure, exitCode, outcome, agentSettle, tail,
+            SettleResult CurrentResult() => Reason == StopReason.None && failure is null && actionResult is not null
+                ? actionResult
+                : Compose(Reason, _stopDetail, failure, exitCode, outcome, agentSettle, tail,
                 _s.Time.GetElapsedTime(started), workspace?.WorkTree,
                 // A message to a session inbox is an answer the session reads; there is nothing for it to settle.
                 answerExpected: Delivery.Envelope.Target is not InboxTarget, runnerNote: sandboxSettleNote, refusal: refusal);
@@ -513,7 +568,8 @@ internal sealed class AgentRun
                 }
                 if (!returned) keptBecause ??= "commits may not have been returned";
             }
-            Telemetry.RunnerTelemetry.Finish(span, Delivery, Adapter.Kind, result, _s.Time.GetElapsedTime(started));
+            if (RunningAgentKind is { } kind)
+                Telemetry.RunnerTelemetry.Finish(span, Delivery, kind, result, _s.Time.GetElapsedTime(started));
             if (verifier is null && workspace is not null && Delivery.RunEnvironment.Logs != LogCapture.None)
             {
                 // Upload (encrypted, to the run-logs container) needs the original issue; until then it is kept locally too.
@@ -1089,7 +1145,7 @@ internal sealed class AgentRun
                 {
                     case RunApprovalStatus.Approved:
                         Note(state.Detail ?? "Approved to run here");
-                        StartClock();
+                        if (_action is null) StartClock();
                         return null;
                     case RunApprovalStatus.Declined:
                         return state.Detail ?? "This machine's owner declined to run it here.";

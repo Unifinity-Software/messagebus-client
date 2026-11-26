@@ -174,6 +174,9 @@ public sealed partial class RunWorkspace : IDisposable
             var file = bundle is null || bundles is null ? null : await bundles.FetchAsync(delivery, bundle, Root, cancellationToken).ConfigureAwait(false);
             if (file is null)
             {
+                if (delivery.RunnerAction is not null)
+                    return "The workflow action could not check out the task's code bundle.";
+
                 // With no decrypted bundle here, start from an empty
                 // repository; the agent pulls the bundle in with the mbus tools.
                 return await GitAsync(git, ["init", "--quiet", WorkTree], wrap, cancellationToken).ConfigureAwait(false);
