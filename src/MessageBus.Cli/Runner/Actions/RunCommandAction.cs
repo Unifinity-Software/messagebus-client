@@ -26,29 +26,43 @@ internal sealed class RunCommandAction(TimeProvider time) : IRunnerAction
             return Failed("The command folder must be a directory inside the checkout without symbolic links or junctions.");
 
         var run = context.RunProcessAsync ?? throw new InvalidOperationException("The action has no sandboxed process runner.");
+        var exhibitsFolder = context.Delivery.StepContext is null ? null
+            : Directory.CreateDirectory(Path.Combine(context.WorkDirectory, ".mbus", "exhibits")).FullName;
+        var environment = new Dictionary<string, string?>();
+        if (exhibitsFolder is not null) environment["MBUS_EXHIBITS_DIR"] = exhibitsFolder;
         using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(minutes), time);
         using var stop = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeout.Token);
-        (int ExitCode, IReadOnlyList<string> Tail) result;
+        SettleResult settled;
         try
         {
-            result = await run(AgentProcess.Shell(parameters.Command, folder), stop.Token).ConfigureAwait(false);
+            var result = await run(AgentProcess.Shell(parameters.Command, folder, environment), stop.Token).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+            settled = timeout.IsCancellationRequested ? TimedOut(minutes) : new SettleResult
+            {
+                Status = SettleStatus.Succeeded,
+                Outcome = result.ExitCode == 0 ? "passed" : "failed",
+                ExitCode = result.ExitCode,
+                Summary = OutputTail(result.Tail),
+            };
         }
         catch (OperationCanceledException) when (timeout.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
         {
-            return TimedOut(minutes);
+            settled = TimedOut(minutes);
         }
 
         cancellationToken.ThrowIfCancellationRequested();
-        if (timeout.IsCancellationRequested)
-            return TimedOut(minutes);
-
-        return new SettleResult
+        if (exhibitsFolder is not null && context.Exhibits is { } exhibits)
         {
-            Status = SettleStatus.Succeeded,
-            Outcome = result.ExitCode == 0 ? "passed" : "failed",
-            ExitCode = result.ExitCode,
-            Summary = OutputTail(result.Tail),
-        };
+            var refusals = new List<string>();
+            var references = await exhibits.UploadFolderAsync(exhibitsFolder,
+                (name, message) => refusals.Add($"Exhibit {name}: {message.ReplaceLineEndings(" ")}"), cancellationToken).ConfigureAwait(false);
+            settled = settled with
+            {
+                Refs = [.. settled.Refs, .. references],
+                Summary = string.Join('\n', new[] { settled.Summary }.Concat(refusals).Where(line => !string.IsNullOrEmpty(line))),
+            };
+        }
+        return settled;
     }
 
     private static SettleResult Failed(string summary) => new()

@@ -384,12 +384,15 @@ internal sealed class AgentRun
                         WorkDirectory = workspace.WorkTree,
                         InputBranches = workspace.PreparedInputs?.InputBranches ?? new Dictionary<string, string>(),
                         Log = _s.Log,
+                        Exhibits = Delivery.StepContext is null ? null : _s.Tools?.CreateExhibits(workspace, Delivery),
                         RunProcessAsync = async (launch, ct) =>
                         {
                             ct.ThrowIfCancellationRequested();
+                            var environment = RunEnvironmentVariables(sandboxed);
+                            foreach (var pair in launch.Environment) environment[pair.Key] = pair.Value;
                             using var process = AgentProcess.Start(Sandboxed(launch with
                             {
-                                Environment = RunEnvironmentVariables(sandboxed),
+                                Environment = environment,
                             }), tailLines: 60);
                             var code = await WaitForOwnedProcessAsync(sandboxed, process, ct).ConfigureAwait(false);
                             tail = process.Tail();

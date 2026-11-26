@@ -30,6 +30,14 @@ public sealed class Exhibits(HttpClient http, string workspaceId, StepContext st
     /// <summary>The successfully uploaded exhibits to include in the step's settle refs.</summary>
     public IReadOnlyList<Ref> References { get { lock (_references) return _references.ToArray(); } }
 
+    internal static Exhibits? Create(LocalServerOptions options, StepContext? step, string workingDirectory) =>
+        step is null ? null : new Exhibits(options.Http, options.WorkspaceId!, step, workingDirectory, async ct =>
+        {
+            using var keys = new MachineKeys(options.Http, options.WorkspaceId!, options.MachineId,
+                options.ConfigDirectory, options.Log, options.Time, options.MachineKeyPem);
+            return await keys.RecipientAsync(null, ct).ConfigureAwait(false);
+        }, options.TempDirectory!);
+
     /// <summary>Uploads one file immediately, returning its stored id and display metadata.</summary>
     public async Task<Ref> UploadAsync(string path, string? caption = null, string? kind = null, CancellationToken ct = default)
     {
@@ -99,7 +107,10 @@ public sealed class Exhibits(HttpClient http, string workspaceId, StepContext st
     }
 
     /// <summary>Uploads every file left in a command's exhibits folder, using each file name as its caption.</summary>
-    public async Task<IReadOnlyList<Ref>> UploadFolderAsync(string folder, CancellationToken ct = default)
+    public Task<IReadOnlyList<Ref>> UploadFolderAsync(string folder, CancellationToken ct = default) =>
+        UploadFolderAsync(folder, null, ct);
+
+    internal async Task<IReadOnlyList<Ref>> UploadFolderAsync(string folder, Action<string, string>? refused, CancellationToken ct)
     {
         var full = Path.GetFullPath(folder, workingDirectory);
         if (!RunToolScope.IsInside(workingDirectory, full))
@@ -107,7 +118,13 @@ public sealed class Exhibits(HttpClient http, string workspaceId, StepContext st
         if (!Directory.Exists(full)) return [];
         var uploaded = new List<Ref>();
         foreach (var file in Directory.EnumerateFiles(full, "*", new EnumerationOptions { RecurseSubdirectories = true, AttributesToSkip = FileAttributes.ReparsePoint }).Order(StringComparer.Ordinal))
-            uploaded.Add(await UploadAsync(file, Path.GetFileName(file), ct: ct).ConfigureAwait(false));
+        {
+            try { uploaded.Add(await UploadAsync(file, Path.GetFileName(file), ct: ct).ConfigureAwait(false)); }
+            catch (Exception ex) when (refused is not null && ex is McpToolException or IOException or HttpRequestException or JsonException)
+            {
+                refused(Path.GetFileName(file), ex.Message);
+            }
+        }
         return uploaded;
     }
 

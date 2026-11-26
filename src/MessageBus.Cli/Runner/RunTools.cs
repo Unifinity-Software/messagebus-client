@@ -23,13 +23,7 @@ public sealed record RunToolsRequest(RunWorkspace Workspace, TaskDelivery Delive
         using var schema = JsonDocument.Parse("""{"type":"object","properties":{"path":{"type":"string"},"caption":{"type":"string"},"kind":{"type":"string","enum":["document","diagram","plan","screenshot","video","trace","file"]}},"required":["path"],"additionalProperties":false}""");
         lock (_exhibitGate)
         {
-            if (Delivery.StepContext is { } step)
-                _exhibits ??= new Exhibits(options.Http, options.WorkspaceId!, step, Workspace.WorkTree, async ct =>
-                {
-                    using var keys = new MessageBus.Mcp.MachineKeys(options.Http, options.WorkspaceId!, options.MachineId,
-                        options.ConfigDirectory, options.Log, options.Time, options.MachineKeyPem);
-                    return await keys.RecipientAsync(null, ct).ConfigureAwait(false);
-                }, options.TempDirectory!);
+            _exhibits ??= Exhibits.Create(options, Delivery.StepContext, Workspace.WorkTree);
         }
         return options with
         {
@@ -74,6 +68,9 @@ public sealed record RunToolsRequest(RunWorkspace Workspace, TaskDelivery Delive
 /// </summary>
 public interface IRunTools
 {
+    /// <summary>Creates the machine-authenticated exhibit uploader for a workflow action, when supported.</summary>
+    Exhibits? CreateExhibits(RunWorkspace workspace, TaskDelivery delivery) => null;
+
     /// <summary>Starts serving the run's tools; disposing the session ends them and the credential with them.</summary>
     Task<RunToolsSession> StartAsync(RunToolsRequest request, CancellationToken cancellationToken);
 }
@@ -108,8 +105,13 @@ public static class RunToolsVariables
 /// </summary>
 /// <param name="serve">Serves MCP on an accepted, authenticated connection until it closes.</param>
 /// <param name="log">Runner log.</param>
-public sealed class PipeRunTools(Func<RunToolsRequest, Stream, CancellationToken, Task> serve, TextWriter log) : IRunTools
+/// <param name="exhibits">Creates workflow action uploaders with the runner's machine credentials.</param>
+public sealed class PipeRunTools(Func<RunToolsRequest, Stream, CancellationToken, Task> serve, TextWriter log,
+    Func<RunWorkspace, TaskDelivery, Exhibits?>? exhibits = null) : IRunTools
 {
+    /// <inheritdoc />
+    public Exhibits? CreateExhibits(RunWorkspace workspace, TaskDelivery delivery) => exhibits?.Invoke(workspace, delivery);
+
     /// <summary>Calls the runner's authenticated tools pipe from a CLI command inside a run, without machine credentials.</summary>
     public static async Task<MessageBus.Mcp.ScriptResult> CallAsync(string file, string tool, JsonObject arguments, CancellationToken ct)
     {

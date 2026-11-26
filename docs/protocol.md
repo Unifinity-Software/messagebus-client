@@ -1082,3 +1082,9 @@ before upload. Locked content is `mbus-sealed-exhibit/1\n`, one line of compact
 `EncryptionInfo` JSON and `\n`, then the `MessageCrypto.SealAsync` stream sealed to
 the workspace public key. Commands leave files in `<working folder>/.mbus/exhibits/`
 (`MBUS_EXHIBITS_DIR`); folder pickup captions each file with its name.
+For a delivered workflow step, `run-command` creates this folder before starting
+and uploads its files after the command ends, including a nonzero exit or time limit.
+Cancellation skips pickup. Uploaded refs are included in the action's settlement;
+individual refusals add the filename and refusal message to its summary, leave the
+command's outcome unchanged, and allow the other files to upload. Without step
+context the runner does not create the folder, set the variable, or upload files.

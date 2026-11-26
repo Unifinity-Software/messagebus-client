@@ -9,6 +9,7 @@ using MessageBus.Contracts.Json;
 using MessageBus.Contracts.Mcp;
 using MessageBus.Contracts.Messaging;
 using MessageBus.Contracts.Roles;
+using MessageBus.Contracts.Runner;
 using MessageBus.Contracts.Security;
 using MessageBus.Crypto;
 using MessageBus.Mcp;
@@ -25,6 +26,64 @@ public sealed class ExhibitsTests
         JobId = "job_test", StepId = "design", StepName = "Design", Round = 2,
         Inputs = [], AllowedOutcomes = ["done"], KeepExhibitsLocked = locked,
     };
+
+    [Theory]
+    [InlineData(0, true)]
+    [InlineData(7, true)]
+    [InlineData(0, false)]
+    public async Task Command_picks_up_exhibits_only_for_workflow_steps_and_keeps_its_outcome_when_a_file_is_refused(int exit, bool workflow)
+    {
+        using var h = new ApprovalImpactTests.Harness();
+        Support(h.Machine.Server);
+        const string refusal = "This step allows exhibits up to 12 bytes.";
+        h.Machine.Server.On(HttpMethod.Post, Route, request =>
+        {
+            using var metadata = Metadata(request);
+            return metadata.RootElement.GetProperty("name").GetString() == "a-refused.txt"
+                ? new(HttpStatusCode.RequestEntityTooLarge) { Content = new StringContent(refusal) }
+                : new(HttpStatusCode.Created) { Content = new StringContent("""{"id":"ex_test"}""") };
+        });
+        var tools = new PipeRunTools((_, _, _) => throw new InvalidOperationException("Commands do not start agent tools."),
+            TextWriter.Null, (run, delivery) => Exhibits.Create(h.Options with { TempDirectory = run.Root }, delivery.StepContext, run.WorkTree));
+        await using var runner = new RunnerHarness(sandbox: _ => new CommandSandbox(), extensions: extensions => extensions with { Tools = tools });
+        var command = workflow
+            ? OperatingSystem.IsWindows()
+                ? $"(echo Refused document)>\"%MBUS_EXHIBITS_DIR%\\a-refused.txt\" & (echo Accepted document)>\"%MBUS_EXHIBITS_DIR%\\z-report.txt\" & exit /b {exit}"
+                : $"printf 'Refused document' > \"$MBUS_EXHIBITS_DIR/a-refused.txt\"; printf 'Accepted document' > \"$MBUS_EXHIBITS_DIR/z-report.txt\"; exit {exit}"
+            : "echo no exhibits";
+        var task = runner.Task("dlv_command_exhibits", agent: "missing-agent") with
+        {
+            StepContext = workflow ? Step() : null,
+            RunnerAction = new RunnerAction { Kind = RunnerActionKinds.RunCommand,
+                RunCommand = new RunCommandParameters { Command = command } },
+        };
+
+        var decision = await runner.DeliverAsync(task);
+        Assert.True(decision.Accepted, decision.Detail);
+        var result = (await runner.Service.SettledAsync(task.DeliveryId)).Result;
+        Assert.Equal(SettleStatus.Succeeded, result.Status);
+        Assert.Equal(exit == 0 ? "passed" : "failed", result.Outcome);
+        Assert.Equal(exit, result.ExitCode);
+        Assert.Equal(workflow, Directory.Exists(Path.Combine(runner.WorkTreeOf(task.DeliveryId), ".mbus", "exhibits")));
+        if (workflow)
+        {
+            var reference = Assert.Single(result.Refs);
+            Assert.Equal(RefKinds.Exhibit, reference.Kind);
+            Assert.Equal("ex_test", reference.Id);
+            Assert.Equal("z-report.txt", reference.Exhibit!.Name);
+            Assert.Equal("z-report.txt", reference.Exhibit.Caption);
+            Assert.Contains("a-refused.txt: " + refusal, result.Summary);
+            var uploads = h.Machine.Server.Requests.Where(request => request.Uri.AbsolutePath == Route).ToArray();
+            Assert.Equal(2, uploads.Length);
+            Assert.Equal("MbusKey test", uploads[1].Header("Authorization"));
+            Assert.Equal("Accepted document", Encoding.UTF8.GetString(Content(uploads[1])).Trim());
+        }
+        else
+        {
+            Assert.Empty(result.Refs);
+            Assert.Empty(h.Machine.Server.Requests);
+        }
+    }
 
     [Fact]
     public async Task Tool_uploads_captioned_file_and_carries_ref_across_connections_into_settle()
@@ -168,6 +227,11 @@ public sealed class ExhibitsTests
         server.On(HttpMethod.Get, "/api/server", _ => FakeServer.Json(new ServerCapabilitiesResponse
         { Product = "messagebus.ai", Capabilities = [WorkflowCapabilities.Workflows] }));
         server.On(HttpMethod.Post, Route, _ => new(HttpStatusCode.Created) { Content = new StringContent("""{"id":"ex_test"}""") });
+    }
+
+    private sealed class CommandSandbox : IRunSandbox
+    {
+        public ProcessLaunch Wrap(ProcessLaunch launch, RunWorkspace workspace, PermissionProfile profile) => launch;
     }
 
     private static JsonDocument Metadata(RecordedRequest request)

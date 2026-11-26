@@ -11,6 +11,7 @@ internal sealed record RunnerActionContext
     public string InputsDirectory => Path.Combine(WorkDirectory, ".mbus", "inputs");
     public IReadOnlyDictionary<string, string> InputBranches { get; init; } = new Dictionary<string, string>();
     public required TextWriter Log { get; init; }
+    internal Exhibits? Exhibits { get; init; }
 
     internal Func<ProcessLaunch, CancellationToken, Task<(int ExitCode, IReadOnlyList<string> Tail)>>? RunProcessAsync { get; init; }
 }
