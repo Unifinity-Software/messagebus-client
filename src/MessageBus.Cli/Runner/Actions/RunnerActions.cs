@@ -19,6 +19,7 @@ internal sealed record RunnerActionContext
 internal interface IRunnerAction
 {
     string Kind { get; }
+    bool IsAvailable() => true;
 
     Task<SettleResult> RunAsync(RunnerActionContext context, CancellationToken cancellationToken);
 }
@@ -27,6 +28,9 @@ internal sealed class RunnerActions(IEnumerable<IRunnerAction> actions)
 {
     private readonly Dictionary<string, IRunnerAction> _actions =
         actions.ToDictionary(action => action.Kind, StringComparer.Ordinal);
+
+    public IEnumerable<string> AvailableKinds() =>
+        _actions.Values.Where(action => action.IsAvailable()).Select(action => action.Kind);
 
     public IRunnerAction? Find(RunnerAction action) => _actions.GetValueOrDefault(action.Kind);
 

@@ -6,7 +6,8 @@ using MessageBus.Mcp;
 
 namespace MessageBus.Cli.Runner.Actions;
 
-internal sealed class RecordWalkthroughAction(Func<string, string?> locateCommand) : IRunnerAction
+internal sealed class RecordWalkthroughAction(Func<string, string?> locateCommand,
+    Func<string, string?>? getEnvironmentVariable = null, string? homeDirectory = null) : IRunnerAction
 {
     private static readonly string[] ConfigExtensions = [".ts", ".js", ".mts", ".mjs", ".cts", ".cjs"];
     private const string PlaywrightCli = """
@@ -17,6 +18,39 @@ internal sealed class RecordWalkthroughAction(Func<string, string?> locateComman
         """;
 
     public string Kind => RunnerActionKinds.RecordWalkthrough;
+
+    public bool IsAvailable()
+    {
+        if (locateCommand("node") is null) return false;
+
+        var get = getEnvironmentVariable ?? Environment.GetEnvironmentVariable;
+        var home = homeDirectory ?? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        var browsers = get("PLAYWRIGHT_BROWSERS_PATH");
+        if (browsers == "0") return false; // Playwright installs into the individual checkout in this mode.
+        if (string.IsNullOrEmpty(browsers))
+        {
+            var cache = OperatingSystem.IsWindows()
+                ? get("LOCALAPPDATA") ?? Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)
+                : OperatingSystem.IsMacOS()
+                    ? Path.Combine(home, "Library", "Caches")
+                    : get("XDG_CACHE_HOME") is { Length: > 0 } xdg ? xdg : Path.Combine(home, ".cache");
+            browsers = Path.Combine(cache, "ms-playwright");
+        }
+
+        try
+        {
+            return Directory.Exists(browsers) && Directory.EnumerateDirectories(browsers).Any(directory =>
+                Path.GetFileName(directory) is var name &&
+                (name.StartsWith("chromium-", StringComparison.Ordinal)
+                    || name.StartsWith("chromium_headless_shell-", StringComparison.Ordinal)
+                    || name.StartsWith("firefox-", StringComparison.Ordinal)
+                    || name.StartsWith("webkit-", StringComparison.Ordinal)));
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
 
     public async Task<SettleResult> RunAsync(RunnerActionContext context, CancellationToken cancellationToken)
     {

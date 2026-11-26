@@ -29,7 +29,8 @@ internal sealed class RunnerHarness : IAsyncDisposable
         IReadOnlyDictionary<string, string>? environment = null, IToolSetupRequests? toolSetup = null,
         IReadOnlyDictionary<string, string>? agentEnvironment = null, Func<RunnerExtensions, RunnerExtensions>? extensions = null,
         bool agentsInstalled = false, IReadOnlyDictionary<string, bool>? roleKeysReadable = null, TextWriter? log = null, TimeSpan? heartbeat = null, bool keepRunFolders = true,
-        string? openCodeCommand = null, (int CpuCount, long MemoryBytes)? machineSize = null)
+        string? openCodeCommand = null, (int CpuCount, long MemoryBytes)? machineSize = null,
+        Func<string, string?>? locateCommand = null)
     {
         Directory.CreateDirectory(_root);
         _http = new HttpClient(Service) { BaseAddress = new Uri("http://127.0.0.1:9/") };
@@ -48,7 +49,7 @@ internal sealed class RunnerHarness : IAsyncDisposable
         };
         if (openCodeCommand is not null) ((Dictionary<AgentKind, string>)options.AgentCommands)[AgentKind.OpenCode] = openCodeCommand;
         var (cpuCount, memoryBytes) = machineSize ?? (Environment.ProcessorCount, GC.GetGCMemoryInfo().TotalAvailableMemoryBytes);
-        Engine = new RunnerEngine(options, new TestHost(policy ?? RunnerPolicy.Workspace, Home, environment, agentEnvironment, agentsInstalled, roleKeysReadable), new HttpRunnerServiceClient(_http), Time, log ?? TextWriter.Null,
+        Engine = new RunnerEngine(options, new TestHost(policy ?? RunnerPolicy.Workspace, Home, environment, agentEnvironment, agentsInstalled, roleKeysReadable, locateCommand), new HttpRunnerServiceClient(_http), Time, log ?? TextWriter.Null,
             (extensions ?? (e => e)).Invoke(new RunnerExtensions
             {
                 Bundles = bundles, Sandbox = sandbox?.Invoke(WorkRoot) ?? new NoSandbox(), Sessions = Sessions, ToolSetup = toolSetup,
@@ -175,7 +176,7 @@ internal sealed class RunnerHarness : IAsyncDisposable
     /// <param name="agentsInstalled">Every agent counts as installed (the fake agent), whatever this machine's PATH has; otherwise
     /// the scan finds what is really installed, which differs between a developer's machine and CI.</param>
     private sealed class TestHost(RunnerPolicy policy, string home, IReadOnlyDictionary<string, string>? environment,
-        IReadOnlyDictionary<string, string>? agentEnvironment, bool agentsInstalled, IReadOnlyDictionary<string, bool>? roleKeysReadable) : IRunnerHostContext
+        IReadOnlyDictionary<string, string>? agentEnvironment, bool agentsInstalled, IReadOnlyDictionary<string, bool>? roleKeysReadable, Func<string, string?>? locateCommand) : IRunnerHostContext
     {
         public Uri ServerUrl { get; } = new("http://127.0.0.1:9");
         public string? MachineId => "mch_test";
@@ -187,6 +188,7 @@ internal sealed class RunnerHarness : IAsyncDisposable
         public HttpClient CreateServiceClient() => throw new NotSupportedException();
         public IReadOnlyList<KeyValuePair<string, string>> CreateConnectHeaders(string method, string pathAndQuery) => [];
         public string? LocateCommand(string command) =>
+            locateCommand is not null ? locateCommand(command) :
             agentsInstalled && new[] { AgentKind.ClaudeCode, AgentKind.Codex }.Any(k => MessageBus.Cli.Runner.Agents.AgentKinds.Command(k) == command)
                 ? FakeAgentPath
                 : CommandLocator.Find(command, Environment.GetEnvironmentVariable, []);

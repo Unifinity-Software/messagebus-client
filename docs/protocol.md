@@ -1014,6 +1014,14 @@ This normalization changes no wire fields and requires no server feature negotia
 The service advertises `workflows` in the `GET /api/server` capabilities array.
 Clients check the configured service for this token before sending workflow fields.
 The service only dispatches workflow payloads when this feature is enabled.
+On each inventory scan, the runner refreshes its `action:<name>` capabilities
+when the configured service advertises `workflows`. It reports
+`action:run-command` and `action:open-pull-request`, and adds
+`action:record-walkthrough` when Node.js and a Playwright browser cache entry
+are present. The runner checks `PLAYWRIGHT_BROWSERS_PATH` or the platform's
+default Playwright cache without launching a browser or downloading files.
+If the service does not advertise `workflows`, the inventory omits all
+`action:` entries.
 
 - `SettleResult.outcome` is the optional outcome word selected for the step.
   The runner's local `settle` tool accepts a top-level `outcome` argument.
