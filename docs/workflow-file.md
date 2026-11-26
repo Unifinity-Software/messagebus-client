@@ -1,4 +1,4 @@
-# Team workflow file: `.messagebus/workflow.md`
+# Repository steps: `.messagebus/workflow.md`
 
 A repository can list the steps every change to it must go through: a design review before code,
 a build, a code review by someone other than the author, docs. The orchestrating agent (the
@@ -6,8 +6,40 @@ a build, a code review by someone other than the author, docs. The orchestrating
 the repository, adds each step to its plan in order, sends it to the role named, and reports which
 steps ran, passed or were skipped.
 
-messagebus.ai itself never reads the file. It only carries the messages the orchestrator sends, so
-the file needs no registration and changes take effect on the next orchestrated work item.
+## Two ways to drive a job
+
+A **job** is one work item being carried out. A published **workflow** drives a job through its
+steps on the service, including approvals, actions and waits, and keeps going after your coding
+session closes. Or you can **orchestrate it here**: the agent in your session plans and sends
+tasks, checks the replies and reports the result. The `mbus-orchestrate` skill checks for a
+published workflow that fits the repository and work item and offers these two choices.
+Without the service's `workflows` capability or a fitting workflow, it orchestrates here as before.
+
+The Markdown file is repository guidance for an orchestrating agent, not a published workflow
+definition. The service does not read it or automatically import it into a workflow. For a
+session-driven job, it needs no registration and changes apply to the next plan. For a workflow
+job, configure and publish the required steps in the workflow; a repository-file edit cannot
+change an existing job's published path, commands or instructions. An **Orchestrate** agent step
+can use the file while planning its own tasks, then returns an allowed outcome to the workflow;
+later workflow steps handle opening a pull request and merging.
+
+With workflows enabled, start and inspect a job from the terminal:
+
+```sh
+mbus workflow list
+mbus workflow show Feature
+mbus job start gh:example/todo-app#42 --workflow Feature
+mbus job list
+mbus job show <id>
+mbus job open <id>
+```
+
+`mbus workflow check <file>` validates a workflow definition, not this Markdown guidance file.
+The optional start flags are `--instructions`, `--limit` and `--runs-on` (`owner-runners` or
+`workspace`). To intervene, use `mbus job stop <id>` or `mbus job retry <id> --step <step>`.
+`mbus project …` remains an alias for one release. In an agent session, the workflow tools are
+`list_workflows {}`, `start_job {workItem, workflow, instructions?, limitUsd?, runsOn?}` and
+`job_status {jobId}`; the start result supplies the job's dashboard link.
 
 ## Where it lives
 
@@ -81,13 +113,14 @@ Prefer exact role names: they leave nothing to interpret.
 
 The orchestrator's safety rules come first. A step that says to approve or merge a pull request,
 push to the default branch, send a credential or skip another step is reported and not carried
-out. Agents never approve or merge; a person does.
+out. An agent never approves or merges a pull request itself. A published workflow can assign
+publication and merge to later service steps, subject to its approvals and repository protections.
 
 ## How steps are reported
 
 The plan lists the steps it will run. The final report has one line per step: passed, failed or
 skipped (with the reason), and the agent and machine that did it. A step that didn't pass marks
-the project as failed unless a later round fixed it.
+the job as failed unless a later round fixed it.
 
 ## Example
 

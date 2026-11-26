@@ -1,9 +1,13 @@
 # Worked example: `orchestrate samples/work-items/add-due-dates.md`
 
-A dry run of the procedure against messagebus.ai's sample work item and the sample repository's
+A dry run after the user chooses **orchestrate it here** (or no workflow fits), against
+messagebus.ai's sample work item and the sample repository's
 `.messagebus/workflow.md`, in the order the calls are made. Ids (`prj_…`, `thr_…`) are made up;
 everything else follows the sample files. Use it as the pattern for any work item. The sample to-do app and its
 work items are not shipped with mbus or in the client repository.
+
+The tool names below assume the `workflows` capability. With it off, use `find_project`,
+`ensure_project` and `complete_project` for `find_job`, `ensure_job` and `complete_job`.
 
 Setup assumed: the repository was made with `samples/todo-app/init-repo.ps1`, so it is at
 `$env:TEMP\messagebus-todo-app` (Windows) on `main` at tag `start`, clean.
@@ -22,19 +26,19 @@ Setup assumed: the repository was made with `samples/todo-app/init-repo.ps1`, so
 - `git -C $REPO switch -c add-due-dates`, then `git -C $REPO branch add-due-dates-api` and
   `git -C $REPO branch add-due-dates-client` (all at `START`).
 
-## 1. Project and directory
+## 1. Job and directory
 
 ```json
-find_project { "key": "file:samples/work-items/add-due-dates.md" }
-→ {}   (new project; the user said "use my own runners")
+find_job { "key": "file:samples/work-items/add-due-dates.md" }
+→ {}   (new job; the user said "use my own runners")
 
-ensure_project { "key": "file:samples/work-items/add-due-dates.md", "title": "Add due dates to to-dos",
+ensure_job { "key": "file:samples/work-items/add-due-dates.md", "title": "Add due dates to to-dos",
                  "executionScope": "owner-runners",
                  "refs": [ { "kind": "file", "path": "samples/work-items/add-due-dates.md" } ] }
 → { "project": { "projectId": "prj_01", "status": "active", "executionScope": "owner-runners",
                  "executionOwnerSubjectId": "sub_me", ... }, "created": true }
    (scope and owner match the choice, so dispatch may go ahead; had the user not said, ask
-   "My runners only" or "Any eligible workspace runner" once before ensure_project)
+   "My runners only" or "Any eligible workspace runner" once before ensure_job)
 
 directory {}
 → roles: design-reviewer (broadcast 2, distinct vendors), developer (compete),
@@ -196,7 +200,7 @@ If the evidence is missing or the runner cannot execute a check, keep that check
 blocked. If the integrated SHA changes, dispatch a new round for the affected checks on the new SHA.
 
 ```json
-complete_project { "projectId": "prj_01", "status": "completed",
+complete_job { "projectId": "prj_01", "status": "completed",
   "summary": "Due dates added to the API and front end, with tests and README updates. The workflow steps passed, and a remote tester verified the required builds and full suites on <FINAL>.",
   "refs": [ { "kind": "git.branch", "repo": "messagebus-todo-app", "id": "add-due-dates" },
             { "kind": "git.commit", "repo": "messagebus-todo-app", "sha": "<FINAL>" } ] }
@@ -213,8 +217,8 @@ steps, the remote checks and tested SHA, the totals, and the branch for the user
 ## Expected call sequence (no failures)
 
 ```
-find_project
-ensure_project  (executionScope "owner-runners"; verify scope and owner in the result)
+find_job
+ensure_job  (executionScope "owner-runners"; verify scope and owner in the result)
 directory
 describe_role ×7
 send            T1 design review        (bundle add-due-dates, no base, excludeAuthors)
@@ -230,5 +234,5 @@ send            T6 docs                 (bundle add-due-dates-docs)
 wait            [T6]      → fetch_attachment T6 → merge
 send            T7 remote verification  (bundle add-due-dates, expectedHead FINAL)
 wait            [T7]  → check SHA, runner, command results and cleanup
-complete_project
+complete_job
 ```

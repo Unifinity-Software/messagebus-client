@@ -1,7 +1,7 @@
 # What the user sees
 
 Short plain lines, in this order. Numbers come from tool results only (`wait`, `status`,
-`complete_project`); never estimate them yourself. Name machines and agents the way `directory`
+`complete_job`); never estimate them yourself. Name machines and agents the way `directory`
 does (`kind@machine`, plus the location when it has one).
 
 ## The rule: quiet unless it matters
@@ -82,17 +82,18 @@ Workflow steps: design review passed · build passed · code review passed (1 fi
 Remote verification on <full commit SHA> by codex@linux-runner
 dotnet build, dotnet test (24 passed), npm ci, npm test (9 passed), npm run build. All exited 0.
 Wall time 52 min · agent time 1 h 10 min · 186k tokens · est. cost $1.42 · 2 machines, 2 models.
-Project: <projectId> (dashboard, Projects page).
+Job: <projectId> (dashboard, Jobs page).
 ```
 
 - Time per task: `result.usage.activeSeconds`. Tokens: `tokensIn + tokensOut`. Cost:
   `estimatedCostUsd`, or "unknown" when absent. Machine: `machineId` mapped through `directory`.
 - Report the tested SHA and runner for verification. Name any blocked check and its concrete
   blocker. Mark smoke checks by name when reporting them alongside full suites.
-- Totals: the `totals` from `complete_project` (`wallSeconds`, `agentSeconds`, tokens,
+- Totals: the `totals` from `complete_job` (`wallSeconds`, `agentSeconds`, tokens,
   `estimatedCostUsd`, `tasksCostUnknown`, `machines`, `models`). They include this session's own
-  line when `complete_project` had a `usage`; if it had none, say the orchestrator isn't counted.
+  line when `complete_job` had a `usage`; if it had none, say the orchestrator isn't counted.
 - If the dashboard address is known (the `MBUS_SERVER` environment variable), link
-  `<server>/projects?project=<projectId>`.
-- Read each batch's decrypted answers' `body.friction` and each copy's `result.frictionKinds`. Include a short friction line in the report with counts by kind and role (project `totals.friction` and `totals.frictionByRole`), and summarize the notes with task links when they explain a problem. Omitted friction means no report, not proof nothing was hard. Never print secrets from a note.
+  `<server>/jobs/<projectId>` with workflows enabled; with capability off, keep the existing
+  `<server>/projects?project=<projectId>` link. For `start_job`, always use its returned `url`.
+- Read each batch's decrypted answers' `body.friction` and each copy's `result.frictionKinds`. Include a short friction line in the report with counts by kind and role (job `totals.friction` and `totals.frictionByRole`), and summarize the notes with task links when they explain a problem. Omitted friction means no report, not proof nothing was hard. Never print secrets from a note.
 - A failed or partial run gets the same summary, with what didn't pass first.

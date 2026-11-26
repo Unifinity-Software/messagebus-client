@@ -3,12 +3,41 @@
 Argument names are exactly as the tools take them (camelCase JSON). Targets are text:
 `role:<name>`, `agent:<agt_id>`, `capabilities:<cap>,<cap>`.
 
-## Project
+## Start with a workflow
+
+Only with the service's `workflows` capability. Choose a published workflow that fits the
+repository and tracker item, and get the user's choice of workflow or session orchestration
+before starting. For a user who chose Feature and their own runners:
 
 ```json
-find_project { "key": "file:samples/work-items/add-due-dates.md" }
+list_workflows {}
+→ { "workflows": [ { "id": "wf_feature", "name": "Feature", "description": "Build and review a feature",
+                     "state": "published", "publishedVersion": 3, "settings": { "runsOn": "owner-runners" } } ] }
 
-ensure_project { "key": "file:samples/work-items/add-due-dates.md",
+start_job { "workItem": "gh:example/todo-app#42", "workflow": "wf_feature", "runsOn": "owner-runners" }
+→ { "jobId": "job_example", "url": "https://app.messagebus.ai/jobs/job_example", "state": "running",
+    "workflow": { "id": "wf_feature", "name": "Feature", "version": 3 } }
+
+job_status { "jobId": "job_example" }
+→ { "jobId": "job_example", "url": "https://app.messagebus.ai/jobs/job_example", "state": "running",
+    "spentUsd": 0, "activeStepIds": ["code"], "steps": [ { "stepId": "code", "round": 1, "state": "running" } ] }
+```
+
+`start_job` also accepts optional `instructions` and `limitUsd`. Report the returned `url` and
+let the service drive the steps. On an uncertain start, inspect existing work before retrying;
+never assume a second call is harmless. Don't fall back after a refusal without the user's choice.
+
+The session examples below use `find_job`, `ensure_job`, `complete_job`. With capability off,
+use `find_project`, `ensure_project`, `complete_project` instead; arguments and result fields
+are unchanged (`projectId`, `project`, `executionScope`, `claimedWorkItems`). Workflow tools
+are unavailable while capability is off or the workspace has not enabled workflows.
+
+## Job
+
+```json
+find_job { "key": "file:samples/work-items/add-due-dates.md" }
+
+ensure_job { "key": "file:samples/work-items/add-due-dates.md",
                  "title": "Add due dates to to-dos",
                  "executionScope": "owner-runners",
                  "refs": [ { "kind": "file", "path": "samples/work-items/add-due-dates.md" } ] }
@@ -19,9 +48,9 @@ ensure_project { "key": "file:samples/work-items/add-due-dates.md",
   totals, ...}, created}`. Keep `projectId`; every `send` defaults to it, but pass it explicitly
   anyway.
 - `executionScope`: `"owner-runners"` (only the owner's personal runners) or `"workspace"`. Always
-  pass it: the stored value for an existing project (from `find_project`), otherwise the user's
-  choice. Omitted, a new project gets `workspace`. The other scope for an existing project is a
-  `conflict` on field `executionScope`: that needs a new project.
+  pass it: the stored value for an existing job (from `find_job`), otherwise the user's
+  choice. Omitted, a new job gets `workspace`. The other scope for an existing job is a
+  `conflict` on field `executionScope`: that needs a new job.
 - Before any send, check the returned `executionScope` equals your choice and, for
   `owner-runners`, `executionOwnerSubjectId` is set. Otherwise stop: the server needs an upgrade.
   Rules: [coordination.md](coordination.md#execution-scope).
@@ -37,8 +66,8 @@ compete, broadcast; `count`; `distinctVendors`), `requiredCapabilities`, `agents
 
 - `agentsOnline: 0` with agents listed: the task waits until one connects. Say so in the plan.
 - No agents at all: a send dead-letters at once. Don't send; tell the user.
-- The directory is the role's whole capacity and is not filtered by project scope. For an
-  `owner-runners` project, don't describe every online agent as eligible; `send`'s
+- The directory is the role's whole capacity and is not filtered by job scope. For an
+  `owner-runners` job, don't describe every online agent as eligible; `send`'s
   `availableAgents` and waiting reasons decide.
 
 ## Verified send and provenance
@@ -113,7 +142,7 @@ For verification-only tasks, use the return instructions below and omit `returns
   requires capabilities the target lacks; it still sends. No role label means no role notice.
   Follow-ups to an agent that held the referenced task suppress this notice when that task's
   role is absent or matches the labelled role.
-- `dedupeKey`: `<project key>/<task>/<round>`. A resumed session that sends the same task again
+- `dedupeKey`: `<job key>/<task>/<round>`. A resumed session that sends the same task again
   gets the earlier thread back (`deduplicated: true`) instead of a second task. `retry` moves it to
   the next round for you.
 - Don't attach a bundle whose history holds secrets or large build output. Bundles carry
@@ -126,7 +155,7 @@ For verification-only tasks, use the return instructions below and omit `returns
 
 ## Remote verification tasks
 
-- Use `directory` and `describe_role` to find a remote tester within the project's execution
+- Use `directory` and `describe_role` to find a remote tester within the job's execution
   scope. Confirm the runner has the required OS, toolchain, dependencies and access, and that
   its role profile and sandbox allow the commands. Check any required host or release gate.
   Use a role send when the eligible pool meets the check's requirements. If the check needs a
@@ -164,7 +193,7 @@ send { "to": "role:code-reviewer", "type": "task.review.code", "projectId": "prj
        "excludeAuthors": true, … }
 ```
 
-The service then keeps every agent that finished a non-review task of the project (or of
+The service then keeps every agent that finished a non-review task of the job (or of
 `parentThreadId`) from getting a copy; add `excludeAgents: ["agt_…"]` for anyone else who must not
 review it. The result lists `excludedAgents`.
 Route reviews to the reviewer role too; vendor preferences belong in its settings, not an
@@ -214,7 +243,7 @@ Thread statuses: `replied` / `settled` (done; check `result.status`), `failed`, 
 
 For live progress between results, `watch {projectId, after: <cursor>, timeoutSeconds: 60}`
 returns at most 50 events (each thread's latest progress only), a new cursor, and `more: true`
-when there are more to read. `status {projectId}` returns the project totals and `tasks`: one
+when there are more to read. `status {projectId}` returns the job totals and `tasks`: one
 short line per thread (status, agent, machine, summary or latest progress, usage, `lastError`),
 newest first, 50 at most. `status {threadIds: [...]}` returns those threads in full.
 
@@ -249,7 +278,7 @@ request_approval { "title": "Run the migration that drops the archived_tasks tab
 
 - `title` says exactly what will happen; `detail` why, and what you will do if it is rejected. The
   approver reads it in the dashboard, unencrypted: no secrets (it is refused if it looks like one).
-- `approver` defaults to the person who started the project (the user). Pass `member:<email>` or
+- `approver` defaults to the person who started the job (the user). Pass `member:<email>` or
   `role:<name>` only when the work item or workflow names someone else. `highRisk: true` makes the
   approver sign in again first.
 - Returns `{approvalId, status: "pending", approvers, expiresAt}`. Tell the user in one line that it
@@ -312,7 +341,7 @@ retry { "threadId": "thr_…", "note": "The Mac now has the .NET SDK; run the ch
 
 It sends the original task again as a new thread (same role, body, refs and exclusions; the note
 goes first in the details; the next dedupe round; its bundles packaged again from their branches in
-`repository`, the project's execution scope) and returns it like `send`. Retry keeps the local branch when it exists, with a notice if it is behind the fetched copy. Only when the local branch is missing does it send `refs/remotes/mbus/<branch>`, with a notice explaining that choice. Track the new `threadId` instead of the old one and mark
+`repository`, the job's execution scope) and returns it like `send`. Retry keeps the local branch when it exists, with a notice if it is behind the fetched copy. Only when the local branch is missing does it send `refs/remotes/mbus/<branch>`, with a notice explaining that choice. Track the new `threadId` instead of the old one and mark
 the checklist line `round 2`. Retrying the same thread twice returns the first retry
 (`deduplicated: true`); retrying a thread that is still open fails with `conflict`. Never re-send a
 task body by hand with a bumped dedupe key.
@@ -327,7 +356,7 @@ example git, the .NET SDK, Node.js, or a signed-in agent CLI). Tell the user, in
 machine and what to install or fix there; don't try to fix their machine with a task. When they say
 it is fixed, `retry` the task (or let it be offered again if it is still queued) and keep waiting.
 
-A waiting reason `owner-runners` on an `owner-runners` project means none of the project owner's
+A waiting reason `owner-runners` on an `owner-runners` job means none of the job owner's
 personal runners matches the target. Tell the user in one line to give one of their own machines
 the required role or capabilities; don't resend to other machines or widen the scope. Owned holders that are only offline
 or busy just keep the task queued.
@@ -336,7 +365,7 @@ or busy just keep the task queued.
 
 A follow-up bundle gets a notice when its tip lacks the parent's returned commits: call `fetch_attachment` for the attachment it names and send `mbus/<branch>`.
 
-Send a new task in the same project to the original author. Use the original implementation thread
+Send a new task in the same job to the original author. Use the original implementation thread
 as `parentThreadId` so the author keeps the role settings, and include the review findings in the task body.
 This example fixes back-end work.
 
@@ -350,7 +379,7 @@ send { "to": "agent:agt_…", "type": "task.fix", "parentThreadId": "thr_<origin
 ## Finishing
 
 ```json
-complete_project { "projectId": "prj_…", "status": "completed",
+complete_job { "projectId": "prj_…", "status": "completed",
                    "summary": "<what was done, which checks passed, where the result is>",
                    "refs": [ { "kind": "git.branch", "repo": "<repo name>", "id": "<work item branch>" } ],
                    "usage": { "model": "<your model>", "tokensIn": 0, "tokensOut": 0, "activeSeconds": 0 } }
@@ -358,10 +387,10 @@ complete_project { "projectId": "prj_…", "status": "completed",
 
 `usage` is this orchestrating session's own tokens and time. Pass it only with numbers your client
 showed you; never estimate them. Leave it out otherwise: under Claude Code the local server reads
-them from this session's log. The project shows it as its own line ("Orchestrator session") and
+them from this session's log. The job shows it as its own line ("Orchestrator session") and
 adds it to the tokens and cost, not to the task count.
 
-Returns the project with final `totals` (`tasks`, `tasksDone`, `tasksFailed`, `tasksCancelled`
+Returns the job with final `totals` (`tasks`, `tasksDone`, `tasksFailed`, `tasksCancelled`
 (tasks you or someone cancelled; not failures), `wallSeconds`, `agentSeconds`, `tokensIn`, `tokensOut`, `estimatedCostUsd`, `tasksCostUnknown`, `agents`,
 `machines`, `models`). Use `status: "failed"` when a required step or check didn't pass.
 
@@ -372,7 +401,7 @@ A failed call returns `{code, message, retryable, retryAfterSeconds?, field?}`.
 | Code | Do this |
 |---|---|
 | `invalid-input` | Fix `field` as `message` says and call once more. A secret finding: take the secret out. |
-| `not-found` | The role, thread or project doesn't exist. Re-read `directory` or `status`; don't guess ids. |
+| `not-found` | The role, thread or job doesn't exist. Re-read `directory` or `status`; don't guess ids. |
 | `forbidden` | Stop that action and tell the user (missing permission, or this machine can't decrypt a key it holds no grant for). |
 | `conflict` | It changed underneath you: `status` the thread, then decide. From `retry`: the thread is still open; wait for it or cancel it first. |
 | `too-large` | Move the long content into a file attachment and send a shorter body. |
@@ -383,6 +412,6 @@ A failed call returns `{code, message, retryable, retryAfterSeconds?, field?}`.
 Never loop on an error. Stop gracefully: say what finished, what is still running (the user can
 see it in the dashboard), and what you would do next.
 
-A task sent under the wrong project is moved with `move {threadId, projectId}` instead of resent; use `projectId: null` for no project and `dryRun: true` to preview.
+A task sent under the wrong job is moved with `move {threadId, projectId}` instead of resent; use `projectId: null` for no job and `dryRun: true` to preview.
 
-A send without `projectId` uses the project this MCP session last ensured (or its assigned runner task’s project). With neither, it sends without a project and returns a notice. Other sessions on the same machine do not supply a default. This also applies to `send_many`; an item’s `projectId` takes precedence over the batch’s.
+A send without `projectId` uses the job this MCP session last ensured (or its assigned runner task’s job). With neither, it sends without a job and returns a notice. Other sessions on the same machine do not supply a default. This also applies to `send_many`; an item’s `projectId` takes precedence over the batch’s.
