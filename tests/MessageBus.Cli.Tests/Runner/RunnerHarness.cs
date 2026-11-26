@@ -29,7 +29,7 @@ internal sealed class RunnerHarness : IAsyncDisposable
         IReadOnlyDictionary<string, string>? environment = null, IToolSetupRequests? toolSetup = null,
         IReadOnlyDictionary<string, string>? agentEnvironment = null, Func<RunnerExtensions, RunnerExtensions>? extensions = null,
         bool agentsInstalled = false, IReadOnlyDictionary<string, bool>? roleKeysReadable = null, TextWriter? log = null, TimeSpan? heartbeat = null, bool keepRunFolders = true,
-        string? openCodeCommand = null)
+        string? openCodeCommand = null, (int CpuCount, long MemoryBytes)? machineSize = null)
     {
         Directory.CreateDirectory(_root);
         _http = new HttpClient(Service) { BaseAddress = new Uri("http://127.0.0.1:9/") };
@@ -47,11 +47,12 @@ internal sealed class RunnerHarness : IAsyncDisposable
             },
         };
         if (openCodeCommand is not null) ((Dictionary<AgentKind, string>)options.AgentCommands)[AgentKind.OpenCode] = openCodeCommand;
+        var (cpuCount, memoryBytes) = machineSize ?? (Environment.ProcessorCount, GC.GetGCMemoryInfo().TotalAvailableMemoryBytes);
         Engine = new RunnerEngine(options, new TestHost(policy ?? RunnerPolicy.Workspace, Home, environment, agentEnvironment, agentsInstalled, roleKeysReadable), new HttpRunnerServiceClient(_http), Time, log ?? TextWriter.Null,
             (extensions ?? (e => e)).Invoke(new RunnerExtensions
             {
                 Bundles = bundles, Sandbox = sandbox?.Invoke(WorkRoot) ?? new NoSandbox(), Sessions = Sessions, ToolSetup = toolSetup,
-            }));
+            }), cpuCount, memoryBytes);
         Routes = new RunnerRouteDispatcher(Engine, TextWriter.Null);
     }
 

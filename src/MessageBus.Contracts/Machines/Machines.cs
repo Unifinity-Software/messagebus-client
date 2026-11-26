@@ -242,15 +242,12 @@ public sealed record MachineInventory
     public int Slots { get; init; }
 
     /// <summary>
-    /// The most tasks at once the runner allows (the original issue): <see cref="SlotMachineMax"/> (the original issue; a runner older than that may
-    /// report a lower cap its owner set on the machine); null when no runner reported it.
+    /// The runner's configured concurrency limit. Current runners report <see cref="SlotAdvice.SlotCeiling"/>;
+    /// older runners may report a machine-dependent limit. Null until reported.
     /// </summary>
     public int? SlotCeiling { get; init; }
 
-    /// <summary>
-    /// The most tasks at once the runner allows on this machine's size (<see cref="SlotAdvice.MostForMachine"/>, the original issue);
-    /// null from a runner older than that.
-    /// </summary>
+    /// <summary>Size-based concurrency advice from <see cref="SlotAdvice.MostForMachine"/>; null until reported.</summary>
     public int? SlotMachineMax { get; init; }
 
     /// <summary>Logical processors, reported by the runner (the original issue).</summary>
@@ -352,14 +349,12 @@ public sealed record MachineInfo
     public int? SlotSetting { get; init; }
 
     /// <summary>
-    /// The most tasks at once its runner allows: <see cref="SlotMachineMax"/> (the original issue; a runner older than that may report
-    /// a lower cap its owner set on the machine); null until a runner reports it.
+    /// The runner's configured concurrency limit. Current runners report <see cref="SlotAdvice.SlotCeiling"/>;
+    /// older runners may report a machine-dependent limit. Null until reported.
     /// </summary>
     public int? SlotCeiling { get; init; }
 
-    /// <summary>
-    /// The most its runner allows on this machine's size (the original issue); null until a runner that knows reports it.
-    /// </summary>
+    /// <summary>Size-based concurrency advice from <see cref="SlotAdvice.MostForMachine"/>; null until reported.</summary>
     public int? SlotMachineMax { get; init; }
 
     /// <summary>Logical processors, as its runner reported.</summary>
@@ -452,15 +447,15 @@ public static class SlotAdvice
             ? Math.Max(1, (int)Math.Min(cpus / ProcessorsPerTask, (memory - MemoryReserved) / MemoryPerTask))
             : null;
 
-    /// <summary>The firm upper bound on tasks at once for a machine whose owner set no cap (the original issue).</summary>
+    /// <summary>The maximum number of tasks a runner supports at once, regardless of machine size.</summary>
+    public const int SlotCeiling = 64;
+
+    /// <summary>The upper bound on the size-based advice returned by <see cref="MostForMachine"/>.</summary>
     public const int MostForMachineBound = 16;
 
     /// <summary>
-    /// The most tasks at once the dashboard may choose for a machine (the original issue): twice the
-    /// suggestion, at least 2, never more than <see cref="MostForMachineBound"/>. The suggestion allows for builds
-    /// and tests on every task at once, while an agent mostly waits for its model, so twice it still works; the
-    /// dashboard warns above the suggestion. The bound keeps a large machine from opening more agent sessions
-    /// than a person can follow or a model account allows.
+    /// Size-based concurrency advice reported as <c>slotMachineMax</c>: twice the suggestion,
+    /// bounded by 2 and <see cref="MostForMachineBound"/>. Older runners used this value to set their ceiling.
     /// </summary>
     /// <param name="cpuCount">Logical processors.</param>
     /// <param name="memoryBytes">Memory, in bytes.</param>

@@ -138,20 +138,27 @@ public sealed class RunnerEngine : IAsyncDisposable
     // the original issue: the workspace's release settings (channel, pinned version, mirror), for updates the runner starts itself.
     private Contracts.Releases.RunnerReleasePolicy? _releases;
     private string? _workspaceName;
-    // the original issue: tasks at once now, as set from the dashboard; never above _ceiling.
+    // Tasks at once, as set from the dashboard.
     private int _slots;
-    // the original issue, the original issue: the most the dashboard may set: the most for this machine's size.
-    private readonly int _ceiling;
+    private readonly int _cpuCount;
+    private readonly long _memoryBytes;
     private readonly int _machineMax;
 
     /// <summary>Creates the engine.</summary>
     public RunnerEngine(RunnerOptions options, IRunnerHostContext host, IRunnerServiceClient service, TimeProvider time, TextWriter log, RunnerExtensions? extensions = null)
+        : this(options, host, service, time, log, extensions, Environment.ProcessorCount, GC.GetGCMemoryInfo().TotalAvailableMemoryBytes)
+    {
+    }
+
+    internal RunnerEngine(RunnerOptions options, IRunnerHostContext host, IRunnerServiceClient service, TimeProvider time,
+        TextWriter log, RunnerExtensions? extensions, int cpuCount, long memoryBytes)
     {
         options = options with { AgentTools = RunnerOptions.ParseAgentTools(options.AgentTools ?? host.GetEnvironmentVariable(RunnerOptions.AgentToolsVariable)) };
         _options = options;
-        _machineMax = SlotAdvice.MostForMachine(Environment.ProcessorCount, GC.GetGCMemoryInfo().TotalAvailableMemoryBytes);
-        _ceiling = Math.Max(options.Slots, _machineMax);
-        _slots = Math.Min(options.Slots, _ceiling);
+        _cpuCount = cpuCount;
+        _memoryBytes = memoryBytes;
+        _machineMax = SlotAdvice.MostForMachine(cpuCount, memoryBytes);
+        _slots = Math.Clamp(options.Slots, 1, SlotAdvice.SlotCeiling);
         _host = host;
         _time = time;
         _log = TextWriter.Synchronized(log);
@@ -488,8 +495,8 @@ public sealed class RunnerEngine : IAsyncDisposable
     }
 
     /// <summary>
-    /// Sets how many tasks run at once (the original issue, from the dashboard), up to the most for this machine's size (the original issue, the original issue);
-    /// null goes back to the number it started with. Raising lets new
+    /// Sets how many tasks run at once, up to <see cref="SlotAdvice.SlotCeiling"/>.
+    /// Null restores the startup setting. Raising lets new
     /// tasks in at once; lowering stops nothing that is running, it only holds back new tasks until fewer are running
     /// than the new number.
     /// </summary>
@@ -497,7 +504,7 @@ public sealed class RunnerEngine : IAsyncDisposable
     {
         lock (_gate)
         {
-            _slots = Math.Clamp(request.Slots ?? _options.Slots, 1, _ceiling);
+            _slots = Math.Clamp(request.Slots ?? _options.Slots, 1, SlotAdvice.SlotCeiling);
         }
         return GetStatus();
     }
@@ -524,10 +531,10 @@ public sealed class RunnerEngine : IAsyncDisposable
                 ? [.. inventory.Capabilities.Where(c => c != CapabilityNames.NodeVerificationV1), CapabilityNames.NodeVerificationV1]
                 : [.. inventory.Capabilities.Where(c => c != CapabilityNames.NodeVerificationV1)],
             Slots = slots,
-            SlotCeiling = _ceiling,
+            SlotCeiling = SlotAdvice.SlotCeiling,
             SlotMachineMax = _machineMax,
-            CpuCount = inventory.CpuCount ?? Environment.ProcessorCount,
-            MemoryBytes = inventory.MemoryBytes ?? GC.GetGCMemoryInfo().TotalAvailableMemoryBytes,
+            CpuCount = inventory.CpuCount ?? _cpuCount,
+            MemoryBytes = inventory.MemoryBytes ?? _memoryBytes,
         };
         // the original issue: how runs are kept apart here, for the Runners page.
         inventory = inventory with { Isolation = inventory.Isolation ?? _ext.Sandbox.Report };
@@ -715,7 +722,7 @@ public sealed class RunnerEngine : IAsyncDisposable
                 Draining = IsDraining || _settingUp || _ext.ToolSetup?.BlocksWork == true,
                 SupportsManagedDrain = true,
                 ManagedDrainId = _managedDrainId,
-                SlotCeiling = _ceiling,
+                SlotCeiling = SlotAdvice.SlotCeiling,
                 SlotMachineMax = _machineMax,
             };
         }

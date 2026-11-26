@@ -236,6 +236,33 @@ public sealed class RunnerTaskTests
         Assert.DoesNotContain(key, File.ReadAllText(logFile));
     }
 
+    [Theory]
+    [InlineData(10, 10)]
+    [InlineData(100, 64)]
+    public async Task Dashboard_slots_are_bounded_by_runner_capacity(int requested, int expected)
+    {
+        const long memoryBytes = 16L << 30;
+        await using var h = new RunnerHarness(machineSize: (4, memoryBytes));
+        var cancellationToken = TestContext.Current.CancellationToken;
+
+        var response = await h.Routes.HandleAsync("POST", RunnerRoutes.Slots,
+            MessageBusJson.Serialize(new SlotsRequest { Slots = requested }), cancellationToken);
+
+        Assert.Equal(200, response.StatusCode);
+        var status = MessageBusJson.Deserialize<RunnerStatus>(response.Json!)!;
+        Assert.Equal(expected, status.Slots);
+        Assert.Equal(64, status.SlotCeiling);
+        Assert.Equal(4, status.SlotMachineMax);
+
+        await h.Engine.RescanAsync(cancellationToken);
+        var inventory = await h.Service.NextInventoryAsync();
+        Assert.Equal(expected, inventory.Slots);
+        Assert.Equal(64, inventory.SlotCeiling);
+        Assert.Equal(4, inventory.SlotMachineMax);
+        Assert.Equal(4, inventory.CpuCount);
+        Assert.Equal(memoryBytes, inventory.MemoryBytes);
+    }
+
     [Fact]
     public async Task Two_tasks_run_at_once_in_separate_worktrees_and_settle_with_usage()
     {

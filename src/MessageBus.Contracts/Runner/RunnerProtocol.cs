@@ -580,12 +580,12 @@ public sealed record RunnerStatus
     public bool Draining { get; init; }
 
     /// <summary>
-    /// The most slots the runner allows (the original issue): <see cref="SlotMachineMax"/> (the original issue; a runner older than that may report a
-    /// lower cap its owner set on the machine); null from older runners.
+    /// The runner's configured concurrency limit. Current runners report <see cref="Machines.SlotAdvice.SlotCeiling"/>;
+    /// older runners may report a machine-dependent limit or omit it.
     /// </summary>
     public int? SlotCeiling { get; init; }
 
-    /// <summary>The most slots it allows on this machine's size (<see cref="Machines.SlotAdvice.MostForMachine"/>, the original issue); null from older runners.</summary>
+    /// <summary>Size-based concurrency advice from <see cref="Machines.SlotAdvice.MostForMachine"/>; null when omitted.</summary>
     public int? SlotMachineMax { get; init; }
 }
 

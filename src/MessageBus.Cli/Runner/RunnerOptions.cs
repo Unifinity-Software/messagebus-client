@@ -12,8 +12,8 @@ public sealed record RunnerOptions
     internal bool WindowsService { get; init; }
 
     /// <summary>
-    /// How many tasks run at once when it starts, until the dashboard's setting arrives (the original issue). Only the dashboard
-    /// changes it, up to <see cref="SlotAdvice.MostForMachine"/> for this machine (the original issue).
+    /// How many tasks run at once on startup, until the dashboard applies a setting.
+    /// The runner clamps both settings to <see cref="SlotAdvice.SlotCeiling"/>.
     /// </summary>
     public int Slots { get; init; } = 1;
 
