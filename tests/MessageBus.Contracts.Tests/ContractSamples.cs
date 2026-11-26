@@ -33,6 +33,25 @@ internal static class ContractSamples
     private static readonly JsonElement Data = JsonDocument.Parse("""{"area":"api","files":["TodoItem.cs"]}""").RootElement.Clone();
 
     public static readonly RoleTarget RoleTo = new() { Role = "developer" };
+    private static readonly ExhibitRef Exhibit = new()
+    {
+        Name = "Walkthrough", MediaType = "video/mp4", Size = 4000, Caption = "Creating a task",
+    };
+    private static readonly StepInput ReviewInput = new() { FromStep = "code", ThreadId = Thr, What = "branch" };
+    private static readonly StepContext ReviewContext = new()
+    {
+        JobId = "job_demo", StepId = "review", StepName = "Review", Round = 2,
+        AllowedOutcomes = ["approved", "changes-needed"], Inputs = [ReviewInput],
+    };
+    private static readonly RunCommandParameters CommandAction = new() { Command = "dotnet build" };
+    private static readonly OpenPullRequestParameters PullRequestAction = new() { BranchFrom = "code", Base = "main", AutoMerge = true };
+    private static readonly RecordWalkthroughParameters WalkthroughAction = new() { Url = "https://example.com/demo" };
+    private static readonly RollBackParameters RollBackAction = new() { DeploymentId = "deployment_demo" };
+    private static readonly RunnerAction Action = new()
+    {
+        Kind = RunnerActionKinds.OpenPullRequest, RunCommand = CommandAction, OpenPullRequest = PullRequestAction,
+        RecordWalkthrough = WalkthroughAction, RollBack = RollBackAction,
+    };
     public static readonly Ref PrRef = new()
     {
         Kind = RefKinds.GitHubPullRequest, Url = "https://github.com/acme/todo/pull/42", Repo = "acme/todo",
@@ -71,8 +90,8 @@ internal static class ContractSamples
     };
     public static readonly SettleResult Result = new()
     {
-        Status = SettleStatus.Succeeded, Summary = "Added DueDate and tests.", Refs = [PrRef], Usage = RunUsage,
-        ExitCode = 0, FailureCategory = "refused", Error = "none", FrictionKinds = ["missing-context"],
+        Status = SettleStatus.Succeeded, Summary = "Added DueDate and tests.", Refs = [PrRef, new Ref { Kind = RefKinds.Exhibit, Exhibit = Exhibit }], Usage = RunUsage,
+        Outcome = "approved", ExitCode = 0, FailureCategory = "refused", Error = "none", FrictionKinds = ["missing-context"],
     };
     public static readonly JoinSpec Join = new() { Mode = WaitMode.All, ThreadIds = [Thr], To = RoleTo, TimeoutSeconds = 3600 };
 
@@ -325,7 +344,7 @@ internal static class ContractSamples
         PlainBody,
         Friction,
         Body,
-        PrRef,
+        PrRef with { Kind = RefKinds.Exhibit, Exhibit = Exhibit },
         Attachment,
         Enc,
         Sender,
@@ -438,14 +457,22 @@ internal static class ContractSamples
         BuildCheck,
         Verification,
         VerificationDefinition,
+        Exhibit,
+        ReviewInput,
+        ReviewContext,
+        CommandAction,
+        PullRequestAction,
+        WalkthroughAction,
+        RollBackAction,
+        Action,
         new TaskDelivery
         {
-            Verification = VerificationDefinition,
+            Verification = VerificationDefinition, StepContext = ReviewContext, RunnerAction = Action,
             DeliveryId = Dlv, Attempt = 1, LeaseExpiresAt = T.AddMinutes(30), AgentId = Agt, Envelope = Envelope, Role = "developer",
             Instructions = Instructions, RunEnvironment = RunEnv, HeartbeatSeconds = 60, Links = [Link], ProjectKey = "ado:contoso/web#123", ProjectOwner = Subject, InboxOwner = Subject,
             RequireRunApproval = true, Model = "claude-haiku-4-5", EconomyModel = true, CostCap = CostCap,
         },
-        new DeliveryDecision { Accepted = false, Reason = DeclineReason.NotAccepted, Detail = "own projects only" },
+        new DeliveryDecision { Accepted = false, Reason = DeclineReason.NotAccepted, Detail = "own projects only", Result = Result },
         new CancelDelivery { DeliveryId = Dlv, ThreadId = Thr, Reason = "project cancelled" },
         new DrainRequest { Reason = "update", Deadline = T.AddHours(1), ManagedDrainId = "aci-operation", Resume = true },
         new RescanRequest { RequestedBy = Subject },
@@ -565,7 +592,7 @@ internal static class ContractSamples
             ApprovalId = "apr_01jcz7m2v1g3x4y5z6a7b8c9dn", Status = ApprovalState.Approved, Title = "Drop the archived_tasks table", Approvers = ["Ada"],
             ExpiresAt = T.AddHours(1), DecidedBy = "Ada", DecidedAt = T.AddMinutes(5), Comment = "After the backup.", RequestDigest = "ab12", TimedOut = true,
         },
-        new MessageBus.Contracts.Http.ServerCapabilitiesResponse { Product = "messagebus.ai", Capabilities = ["approvalAffectedV1", "settleAttemptV1", "roleProposalsV1"],
+        new MessageBus.Contracts.Http.ServerCapabilitiesResponse { Product = "messagebus.ai", Capabilities = ["approvalAffectedV1", "settleAttemptV1", "roleProposalsV1", WorkflowCapabilities.Workflows],
             RoleProposals = new RoleProposalsCapability { Version = 1, BaselineVersion = "role-proposal-readonly-v1", NormalizerVersion = "role-definition-v1" } },
     }.ToDictionary(o => o.GetType());
 

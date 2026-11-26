@@ -49,6 +49,22 @@ public class JsonContractTests
     }
 
     [Fact]
+    public void Older_workflow_free_payloads_still_read()
+    {
+        var deliveryJson = JsonNode.Parse(MessageBusJson.Serialize((TaskDelivery)ContractSamples.All[typeof(TaskDelivery)]))!.AsObject();
+        deliveryJson.Remove("stepContext");
+        deliveryJson.Remove("runnerAction");
+        var delivery = MessageBusJson.Deserialize<TaskDelivery>(deliveryJson.ToJsonString())!;
+        Assert.Null(delivery.StepContext);
+        Assert.Null(delivery.RunnerAction);
+
+        var result = MessageBusJson.Deserialize<SettleResult>("""{"status":"succeeded","refs":[{"kind":"git.branch","id":"feature"}]}""")!;
+        Assert.Null(result.Outcome);
+        Assert.Null(Assert.Single(result.Refs).Exhibit);
+        Assert.Null(MessageBusJson.Deserialize<DeliveryDecision>("""{"accepted":true}""")!.Result);
+    }
+
+    [Fact]
     public void Older_heartbeat_ack_does_not_enable_resource_samples()
     {
         var ack = MessageBusJson.Deserialize<HeartbeatAck>("""{"leases":[],"runnerConnected":true}""")!;

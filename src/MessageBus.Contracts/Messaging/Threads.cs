@@ -165,6 +165,9 @@ public sealed record ThreadCopy
 /// </summary>
 public sealed record SettleResult
 {
+    /// <summary>The outcome word selected for a workflow step.</summary>
+    public string? Outcome { get; init; }
+
     /// <summary>Plain friction metadata (one kind per encrypted note); no note text.</summary>
     public IReadOnlyList<string> FrictionKinds { get; set; } = [];
 

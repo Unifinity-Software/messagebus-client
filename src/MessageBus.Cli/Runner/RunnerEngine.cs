@@ -1,4 +1,5 @@
 using MessageBus.Cli.Update;
+using MessageBus.Cli.Runner.Actions;
 using MessageBus.Cli.Runner.Agents;
 using MessageBus.Cli.Runner.Resources;
 using MessageBus.Contracts.Machines;
@@ -97,6 +98,7 @@ public sealed record RunnerExtensions
 /// </summary>
 public sealed class RunnerEngine : IAsyncDisposable
 {
+    private readonly RunnerActions _actions = new([]);
     private readonly RunnerOptions _options;
     private readonly IRunnerHostContext _host;
     private readonly IRunnerServiceClient _service;
@@ -215,6 +217,9 @@ public sealed class RunnerEngine : IAsyncDisposable
     /// <summary>Answers a delivery at once: accepted (the run starts) or declined (it goes back to the queue).</summary>
     public DeliveryDecision Deliver(TaskDelivery delivery)
     {
+        if (delivery.RunnerAction is { } action && _actions.Refusal(action) is { } refusalResult)
+            return new DeliveryDecision { Accepted = false, Result = refusalResult };
+
         if (delivery.Verification is not null || delivery.Envelope.Verification is not null)
         {
             if (_ext.Verification is not { } verifier)
