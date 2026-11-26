@@ -15,6 +15,40 @@ namespace MessageBus.Cli.Runner;
 /// <param name="Sandboxed">Wraps a process the tools start (git) in the run's sandbox and environment.</param>
 public sealed record RunToolsRequest(RunWorkspace Workspace, TaskDelivery Delivery, PermissionProfile Profile, Func<ProcessLaunch, ProcessLaunch> Sandboxed)
 {
+    private readonly object _exhibitGate = new();
+    private Exhibits? _exhibits;
+
+    internal MessageBus.Mcp.LocalServerOptions WithExhibits(MessageBus.Mcp.LocalServerOptions options)
+    {
+        using var schema = JsonDocument.Parse("""{"type":"object","properties":{"path":{"type":"string"},"caption":{"type":"string"},"kind":{"type":"string","enum":["document","diagram","plan","screenshot","video","trace","file"]}},"required":["path"],"additionalProperties":false}""");
+        lock (_exhibitGate)
+        {
+            _exhibits ??= Exhibits.Create(options, Delivery.StepContext, Workspace.WorkTree);
+        }
+        return options with
+        {
+            AdditionalRunTool = _exhibits is null ? null : new ModelContextProtocol.Protocol.Tool
+            {
+                Name = "add_exhibit",
+                Description = "Upload a file from this run's working folder for people to view on the workflow step. Text is scanned for secrets; the step decides whether to encrypt it.",
+                InputSchema = schema.RootElement.Clone(),
+            },
+            CallRunTool = async (arguments, ct) =>
+            {
+                if (_exhibits is null) throw MessageBus.Contracts.Mcp.McpToolException.Invalid("path", "Exhibits belong to workflow steps.");
+                string? Text(string name) => arguments is not null && arguments.TryGetValue(name, out var value)
+                    && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
+                var path = Text("path");
+                if (string.IsNullOrWhiteSpace(path)) throw MessageBus.Contracts.Mcp.McpToolException.Invalid("path", "Give the exhibit file's path.");
+                foreach (var name in new[] { "caption", "kind" })
+                    if (arguments!.TryGetValue(name, out var value) && value.ValueKind is not (JsonValueKind.String or JsonValueKind.Null))
+                        throw MessageBus.Contracts.Mcp.McpToolException.Invalid(name, "Give text.");
+                return MessageBus.Contracts.Mcp.McpToolCatalog.Ok(await _exhibits.UploadAsync(path, Text("caption"), Text("kind"), ct).ConfigureAwait(false));
+            },
+            ExhibitRefs = () => _exhibits?.References ?? [],
+        };
+    }
+
     /// <summary>The session the run resumes for a reply to its inbox (the original issue), or null.</summary>
     public MessageBus.Mcp.SessionRecord? Session { get; init; }
 
@@ -34,6 +68,9 @@ public sealed record RunToolsRequest(RunWorkspace Workspace, TaskDelivery Delive
 /// </summary>
 public interface IRunTools
 {
+    /// <summary>Creates the machine-authenticated exhibit uploader for a workflow action, when supported.</summary>
+    Exhibits? CreateExhibits(RunWorkspace workspace, TaskDelivery delivery) => null;
+
     /// <summary>Starts serving the run's tools; disposing the session ends them and the credential with them.</summary>
     Task<RunToolsSession> StartAsync(RunToolsRequest request, CancellationToken cancellationToken);
 }
@@ -68,8 +105,13 @@ public static class RunToolsVariables
 /// </summary>
 /// <param name="serve">Serves MCP on an accepted, authenticated connection until it closes.</param>
 /// <param name="log">Runner log.</param>
-public sealed class PipeRunTools(Func<RunToolsRequest, Stream, CancellationToken, Task> serve, TextWriter log) : IRunTools
+/// <param name="exhibits">Creates workflow action uploaders with the runner's machine credentials.</param>
+public sealed class PipeRunTools(Func<RunToolsRequest, Stream, CancellationToken, Task> serve, TextWriter log,
+    Func<RunWorkspace, TaskDelivery, Exhibits?>? exhibits = null) : IRunTools
 {
+    /// <inheritdoc />
+    public Exhibits? CreateExhibits(RunWorkspace workspace, TaskDelivery delivery) => exhibits?.Invoke(workspace, delivery);
+
     /// <summary>Calls the runner's authenticated tools pipe from a CLI command inside a run, without machine credentials.</summary>
     public static async Task<MessageBus.Mcp.ScriptResult> CallAsync(string file, string tool, JsonObject arguments, CancellationToken ct)
     {

@@ -52,7 +52,7 @@ internal static class ContractSamples
     private static readonly StepContext ReviewContext = new()
     {
         JobId = "job_demo", StepId = "review", StepName = "Review", Round = 2,
-        AllowedOutcomes = ["approved", "changes-needed"], Inputs = [ReviewInput],
+        AllowedOutcomes = ["approved", "changes-needed"], Inputs = [ReviewInput], KeepExhibitsLocked = true,
     };
     private static readonly RunCommandParameters CommandAction = new() { Command = "dotnet build", Folder = "src", TimeLimitMinutes = 10 };
     private static readonly OpenPullRequestParameters PullRequestAction = new() { BranchFrom = "code", Base = "main", AutoMerge = true };

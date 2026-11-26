@@ -1019,6 +1019,7 @@ The service only dispatches workflow payloads when this feature is enabled.
 - `TaskDelivery.stepContext` is optional service-provided metadata with
   `jobId`, `stepId`, `stepName`, `round`, `allowedOutcomes`, and `inputs`.
   Each input contains `fromStep`, `threadId`, and `what`.
+  Optional `keepExhibitsLocked` requires workspace-key encryption of exhibits; missing means false.
   Before launching an agent, a runner reads each `result` or `branch` input's latest
   `.reply` message through the existing thread-messages route, opens its body with
   the machine's keys, and downloads attachments through the existing attachment
@@ -1069,3 +1070,23 @@ switched on for this workspace.”
   results and handlers as `find_project`, `ensure_project`, and
   `complete_project`, respectively. The project names stay available as
   aliases for one release, including on servers without the capability.
+
+### Exhibits from workflow steps
+
+The runner offers `add_exhibit { path, caption?, kind? }` only for workflow steps.
+It uploads a file inside the working folder and adds the returned exhibit ref to settle.
+`POST /api/w/{ws}/jobs/{jobId}/steps/{stepId}/exhibits` uses the runner's machine
+credentials and multipart parts `exhibit` (JSON: `round`, `kind`, `name`, `caption?`,
+`mediaType`, plaintext `size`, `locked`) and `content` (application/octet-stream).
+Success (200/201) returns the stored exhibit, including its `id`. Refusals preserve
+the service's JSON `message` or plain-text body. Text files are scanned for secrets
+before upload. Locked content is `mbus-sealed-exhibit/1\n`, one line of compact
+`EncryptionInfo` JSON and `\n`, then the `MessageCrypto.SealAsync` stream sealed to
+the workspace public key. Commands leave files in `<working folder>/.mbus/exhibits/`
+(`MBUS_EXHIBITS_DIR`); folder pickup captions each file with its name.
+For a delivered workflow step, `run-command` creates this folder before starting
+and uploads its files after the command ends, including a nonzero exit or time limit.
+Cancellation skips pickup. Uploaded refs are included in the action's settlement;
+individual refusals add the filename and refusal message to its summary, leave the
+command's outcome unchanged, and allow the other files to upload. Without step
+context the runner does not create the folder, set the variable, or upload files.

@@ -27,31 +27,36 @@ internal static class RunToolsServer
         // One client for every run's tools, signed as this machine (the runner process's lifetime).
         var http = ServerConnection.CreateAuthenticatedClient(host, context.Settings, context.Store, "mcp");
         var git = ExecutableLocator.Find(host, "git")?.Path;
+        LocalServerOptions Options(RunWorkspace run) => LocalServer.Options(http, workspace, context.Settings.Stored.MachineId,
+            context.Store.Directory, Stream.Null, Stream.Null, host.Error, CliHost.Version, host.GetEnvironmentVariable) with
+        {
+            Links = Links,
+            MachineKeyPem = context.Store.LoadKeyPem,
+            WorkingDirectory = run.WorkTree,
+            Time = host.Time,
+            TempDirectory = Directory.CreateDirectory(Path.Combine(run.Root, "tmp")).FullName,
+        };
         return new PipeRunTools(async (request, stream, ct) =>
         {
             var run = request.Workspace;
             // The runner's environment for the session logs and call limits; the task's own files and folders on top.
-            var options = LocalServer.Options(http, workspace, context.Settings.Stored.MachineId, context.Store.Directory,
-                stream, stream, host.Error, CliHost.Version, host.GetEnvironmentVariable) with
+            var options = Options(run) with
             {
-                Links = Links,
-                MachineKeyPem = context.Store.LoadKeyPem,
+                Input = stream,
+                Output = stream,
                 DeliveryFile = run.DeliveryFile,
                 Delivery = request.Delivery,
                 SettleFile = run.SettleFile,
                 Agent = request.Delivery.AgentId,
-                WorkingDirectory = run.WorkTree,
-                Time = host.Time,
                 Scope = RunToolScope.For(request.Delivery, run.Root) with { ProposalAuthority = request.ProposalAuthority },
                 ProposalAuthority = request.ProposalAuthority,
                 Refused = request.Refused,
                 RecordVerifiedTaskSettle = request.RecordVerifiedTaskSettle,
-                TempDirectory = Directory.CreateDirectory(Path.Combine(run.Root, "tmp")).FullName,
                 PrepareGit = start => InRun(start, request, git),
                 Session = request.Session,
             };
-            await LocalServer.RunAsync(options, ct).ConfigureAwait(false);
-        }, host.Error);
+            await LocalServer.RunAsync(request.WithExhibits(options), ct).ConfigureAwait(false);
+        }, host.Error, (run, delivery) => Exhibits.Create(Options(run), delivery.StepContext, run.WorkTree));
     }
 
     /// <summary>

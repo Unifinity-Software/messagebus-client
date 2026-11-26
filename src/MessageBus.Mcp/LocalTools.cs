@@ -93,6 +93,8 @@ internal sealed partial class LocalTools : IAsyncDisposable
 
     private Task<CallToolResult> CallCoreAsync(string? clientName, string name, IDictionary<string, JsonElement>? arguments, CancellationToken ct)
     {
+        if (name == "add_exhibit" && _o.CallRunTool is { } runTool)
+            return GuardAsync(name, () => runTool(arguments, ct));
         if (McpToolNames.IsRoleProposal(name) && !HasProposalAuthority)
             return Task.FromResult(McpToolCatalog.Error(new McpError { Code = McpErrorCodes.Forbidden, Message = "This host has no original coordinator authority for role proposals." }));
         // The runner's task scope (the original issue): only its tools and threads; git inside its sandbox.
@@ -1265,6 +1267,14 @@ internal sealed partial class LocalTools : IAsyncDisposable
     private async Task<SettleOutput> SettleCoreAsync(SettleInput input, bool runnerTask, CancellationToken ct)
     {
         input = input with { Attempt = TrustedAttempt(input) };
+        if (IsRunnerTask(input.ThreadId, input.DeliveryId) && _o.ExhibitRefs?.Invoke() is { Count: > 0 } exhibits)
+        {
+            var refs = input.Result.Refs ?? [];
+            input = input with { Result = input.Result with
+            {
+                Refs = [.. refs.Where(r => !exhibits.Any(e => r.Kind == RefKinds.Exhibit && r.Id == e.Id)), .. exhibits],
+            } };
+        }
         var pinned = input.Attach?.Any(spec => spec is { Format: AttachmentFormat.GitBundle, ExpectedHead: not null }) == true;
         if (runnerTask && pinned)
             File.Delete(KeptAnswer.KeptFile(_o.SettleFile!));
