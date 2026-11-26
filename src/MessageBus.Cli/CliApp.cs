@@ -59,6 +59,8 @@ public static partial class CliApp
         root.Subcommands.Add(Keys.KeysCommand.Create(host, options));
         root.Subcommands.Add(Keys.DeadLettersCommand.Create(host, options));
         Scripts.ScriptCommands.AddTo(root, host, options);
+        root.Subcommands.Add(JobCommand.Create(host, options));
+        root.Subcommands.Add(WorkflowCommand.Create(host, options));
         Approvals.ApprovalsCommand.AddTo(root, host, options);
         AddRunnerCommands(root, host, options);
         return root;
