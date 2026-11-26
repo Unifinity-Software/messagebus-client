@@ -202,7 +202,7 @@ public sealed class RoleProposalTests
     [InlineData(ProposalAuthority.Worker, false)]
     [InlineData(ProposalAuthority.Worker, true)]
     [InlineData(ProposalAuthority.Unknown, true)]
-    public async Task Worker_and_unknown_hosts_refuse_discovery_and_forced_calls_before_network(ProposalAuthority authority, bool wildcard)
+    public async Task Worker_and_unknown_hosts_hide_role_proposals_and_refuse_forced_calls_before_network(ProposalAuthority authority, bool wildcard)
     {
         using var machine = new TestMachine();
         using var http = Client(machine);
@@ -210,13 +210,15 @@ public sealed class RoleProposalTests
             Tools = wildcard ? null : McpToolNames.All.ToHashSet(), ProposalAuthority = authority };
         await using var tools = new LocalTools(Options(machine, http) with { ProposalAuthority = authority, Scope = scope });
         Assert.DoesNotContain(await tools.ListToolsAsync(null, Ct), t => McpToolNames.IsRoleProposal(t.Name));
+        var discoveryRequests = machine.Server.Requests.Count;
+        Assert.All(machine.Server.Requests, request => Assert.Equal("/api/server", request.Uri.AbsolutePath));
         foreach (var name in new[] { McpToolNames.ProposeRole, McpToolNames.GetRoleProposal, McpToolNames.WaitRoleProposal })
         {
             Assert.Equal(McpErrorCodes.Forbidden, scope.Check(name, null, new HashSet<string>())?.Code);
             var result = await tools.CallAsync("codex", name, null, Ct);
             Assert.Equal(McpErrorCodes.Forbidden, Error(result).Code);
         }
-        Assert.Empty(machine.Server.Requests);
+        Assert.Equal(discoveryRequests, machine.Server.Requests.Count);
     }
 
     [Theory]

@@ -14,4 +14,6 @@ public enum McpCatalogFeatures
     [JsonStringEnumMemberName("retarget")] Retarget = 2,
     /// <summary>Reserved for role proposal integration.</summary>
     [JsonStringEnumMemberName("role-proposals")] RoleProposals = 4,
+    /// <summary>Local workflow and job tools.</summary>
+    [JsonStringEnumMemberName("workflows")] Workflows = 8,
 }
