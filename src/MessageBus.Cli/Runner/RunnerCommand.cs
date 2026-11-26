@@ -85,6 +85,7 @@ public static class RunnerCommand
                     () => Readiness.ToolPaths.RunVariables(host.HomeDirectory, host.GetEnvironmentVariable)),
                 Readiness = readiness,
                 Verification = verification,
+                RepoCredentials = isolation.Credentials,
                 WorkActivityChanged = working => sleep?.SetWorking(working),
                 // Isolation off: runs inherit this machine's environment, its mbus sign-in included.
                 Tools = sandbox is NoSandbox ? null : parts.Tools,
