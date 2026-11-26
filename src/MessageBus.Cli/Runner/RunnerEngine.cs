@@ -18,6 +18,9 @@ public sealed record RunnerExtensions
     internal ISystemResourceSampler? ResourceSampler { get; init; }
 
     internal NodeVerification? Verification { get; init; }
+
+    // Issues the per-task repository token the open-pull-request action pushes with; null: none.
+    internal Sandbox.IRepoCredentialSource? RepoCredentials { get; init; }
     internal INodeVerificationReadiness? VerificationReadiness { get; init; }
 
     /// <summary>Wraps agent commands in a sandbox (the original issue).</summary>
@@ -163,9 +166,9 @@ public sealed class RunnerEngine : IAsyncDisposable
         _slots = Math.Clamp(options.Slots, 1, SlotAdvice.SlotCeiling);
         _host = host;
         _time = time;
-        _actions = new([new RunCommandAction(time)]);
         _log = TextWriter.Synchronized(log);
         _ext = extensions ?? new RunnerExtensions();
+        _actions = new([new RunCommandAction(time), new OpenPullRequestAction(_ext.RepoCredentials ?? new Sandbox.NoRepoCredentials())]);
         _service = _ext.Readiness?.Watch(service) ?? service;
         _acceptance = new WorkAcceptance(host.Policy);
         _services = new RunServices(options, host, _service, time, _log, _ext.Sandbox, _ext.Bundles, _stopping.Token, _ext.Tools, _ext.RunApprovals, _ext.SendKeptAnswer, _ext.ReturnCommits, _ext.Verification);
