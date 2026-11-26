@@ -8,6 +8,7 @@ using MessageBus.Cli.Server;
 using MessageBus.Contracts.Http;
 using MessageBus.Contracts.Machines;
 using MessageBus.Contracts.Messaging;
+using MessageBus.Contracts.Mcp;
 using MessageBus.Contracts.Runner;
 using MessageBus.Runner.Transport;
 using Microsoft.AspNetCore.Builder;
@@ -489,6 +490,12 @@ namespace MessageBus.Cli.Runner
 
         public Task<string?> FetchAsync(TaskDelivery delivery, AttachmentRef bundle, string runDirectory, CancellationToken cancellationToken) =>
             bundles.FetchAsync(delivery, bundle, runDirectory, cancellationToken);
+
+        public Task<ReceivedMessage?> ReadStepResultAsync(TaskDelivery delivery, StepInput input, CancellationToken cancellationToken) =>
+            bundles.ReadStepResultAsync(delivery, input, cancellationToken);
+
+        public Task<string?> FetchStepAttachmentAsync(AttachmentRef attachment, string path, CancellationToken cancellationToken) =>
+            bundles.FetchStepAttachmentAsync(attachment, path, cancellationToken);
 
         public Task<string?> RequestHistoryAsync(TaskDelivery delivery, AttachmentRef bundle, string runDirectory,
             Func<ProgressRequest, CancellationToken, Task> ask, TimeSpan wait, CancellationToken cancellationToken) =>

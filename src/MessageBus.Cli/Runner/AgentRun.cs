@@ -233,6 +233,7 @@ internal sealed class AgentRun
         IReadOnlyList<string> tail = [];
         int? exitCode = null;
         string? sandboxSettleNote = null;
+        var unreadableInput = false;
         (SettleStatus Status, string Error)? failure = null;
 
         try
@@ -357,16 +358,31 @@ internal sealed class AgentRun
                 }
             }
 
+            // Runner actions use this same preparation point and consume PreparedInputs.InputBranches.
+            if (failure is null && Resume is null && Delivery.StepContext is not null)
+            {
+                try
+                {
+                    workspace.PreparedInputs = await StepInputs.PrepareAsync(Delivery, workspace, _s.Bundles,
+                        _s.Host.LocateCommand, Sandboxed, _stop.Token).ConfigureAwait(false);
+                }
+                catch (UnreadableStepInputException ex)
+                {
+                    unreadableInput = true;
+                    failure = (SettleStatus.Failed, ex.Message);
+                }
+            }
+
             if (_action is not null)
             {
                 if (failure is null)
                 {
-                    // Prepare workflow step inputs here before dispatch when the input materializer is available.
                     actionResult = await _action.RunAsync(new RunnerActionContext
                     {
                         Delivery = Delivery,
                         RunDirectory = workspace.Root,
                         WorkDirectory = workspace.WorkTree,
+                        InputBranches = workspace.PreparedInputs?.InputBranches ?? new Dictionary<string, string>(),
                         Log = _s.Log,
                         RunProcessAsync = async (launch, ct) =>
                         {
@@ -521,7 +537,7 @@ internal sealed class AgentRun
                     await _s.Log.WriteLineAsync($"Couldn't check role keys: {ex.Message}").ConfigureAwait(false);
                 }
             }
-            if (_unreadableRole is not null) result = result with { FailureCategory = "unreadable" };
+            if (unreadableInput || _unreadableRole is not null) result = result with { FailureCategory = "unreadable" };
             else if (_declined is not null) result = result with { FailureCategory = "refused" };
             // The agent finished but its answer (and any code it sent back) never reached the service: its
             // work exists only in the worktree.
