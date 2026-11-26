@@ -41,7 +41,7 @@ public class JsonContractTests
         var node = JsonNode.Parse(json)!.AsObject();
         var missing = info.Properties.Select(p => p.Name).Where(name => !node.ContainsKey(name));
         Assert.Empty(missing);
-        AssertNothingEmpty(node, type.Name);
+        if (info.Properties.Count > 0) AssertNothingEmpty(node, type.Name);
 
         var back = JsonSerializer.Deserialize(json, info);
         Assert.IsType(type, back);

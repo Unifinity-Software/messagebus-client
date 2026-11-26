@@ -98,7 +98,10 @@ internal sealed partial class LocalTools
         try { supported = await RoleProposalsSupportedAsync(ct); }
         catch (Exception e) when (e is HttpRequestException or JsonException or TaskCanceledException && !ct.IsCancellationRequested) { }
         if (!supported) allowed.RemoveWhere(McpToolNames.IsRoleProposal);
-        return McpToolCatalog.Tools(local: true, allowed);
+        var features = allowed.Any(name => McpToolCatalog.Find(name)?.Features == McpCatalogFeatures.Workflows)
+            && await WorkflowsSupportedAsync(ct)
+            ? McpCatalogFeatures.Workflows : McpCatalogFeatures.None;
+        return McpToolCatalog.Tools(local: true, allowed, features);
     }
 
     internal async Task<bool> RoleProposalsSupportedAsync(CancellationToken ct)

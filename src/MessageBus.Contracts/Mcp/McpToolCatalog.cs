@@ -158,6 +158,18 @@ public static class McpToolCatalog
             "Send one role-targeted task with `verification` {environment, requiredChecks}.") { Features = McpCatalogFeatures.VerifiedTasks },
         new(McpToolNames.SendManyVerified, typeof(SendManyInput), typeof(SendManyResult), "Send tasks with required verification",
             "Send a batch containing required verification. Each item of `messages` takes send's arguments.") { Features = McpCatalogFeatures.VerifiedTasks },
+        new(McpToolNames.ListWorkflows, typeof(ListWorkflowsInput), typeof(ListWorkflowsResult), "List workflows",
+            "List the workspace's workflows, their published versions and settings.", ReadOnly: true) { Features = McpCatalogFeatures.Workflows },
+        new(McpToolNames.StartJob, typeof(StartJobInput), typeof(StartJobResult), "Start a workflow job",
+            "Start a job for workItem (such as gh:owner/repo#42) using a workflow id or name. Optional instructions, limitUsd and runsOn (workspace or owner-runners). Returns the job id and dashboard link immediately.") { Features = McpCatalogFeatures.Workflows },
+        new(McpToolNames.JobStatus, typeof(JobStatusInput), typeof(JobStatusResult), "Read job progress",
+            "Read the job's state, spending, active steps, step runs and dashboard link by jobId.", ReadOnly: true) { Features = McpCatalogFeatures.Workflows },
+        new(McpToolNames.FindJob, typeof(FindProjectInput), typeof(FindProjectResult), "Find existing work",
+            "Read-only lookup by job key or explicitly claimed tracker item (including HTTPS URLs). Returns a visible job or null. Use status for its tasks.", ReadOnly: true) { Features = McpCatalogFeatures.Workflows },
+        new(McpToolNames.EnsureJob, typeof(EnsureProjectInput), typeof(EnsureProjectResult), "Find or create a hands-on job",
+            "Give key and title on first use. executionScope is workspace (default) or owner-runners and stays fixed. Supply all explicit tracker keys or URLs in claimedWorkItems for this session inbox. Dispatch only on coordinationAcquired:true and stop on conflict. Resume with the same inbox and claims. Use the returned projectId when sending tasks.") { Features = McpCatalogFeatures.Workflows },
+        new(McpToolNames.CompleteJob, typeof(CompleteProjectInput), typeof(CompleteProjectResult), "Mark a hands-on job finished",
+            "Give the projectId, dashboard summary, status completed|failed, and refs. Include your session usage if known. Returns final totals to report.") { Features = McpCatalogFeatures.Workflows },
     ];
 
     /// <summary>
@@ -187,7 +199,9 @@ public static class McpToolCatalog
     /// </summary>
     public static IList<Tool> Tools(bool local, IReadOnlySet<string>? only, McpCatalogFeatures features) =>
     [
-        .. Specs.Where(s => (local || (features & s.Features) == s.Features) && (local ? !McpToolNames.ServiceOnly.Contains(s.Name) : !McpToolNames.LocalOnly.Contains(s.Name)) && (only is null || only.Contains(s.Name))).Select(s => new Tool
+        .. Specs.Where(s => (local
+            ? (s.Features & McpCatalogFeatures.Workflows & ~features) == 0
+            : (features & s.Features) == s.Features) && (local ? !McpToolNames.ServiceOnly.Contains(s.Name) : !McpToolNames.LocalOnly.Contains(s.Name)) && (only is null || only.Contains(s.Name))).Select(s => new Tool
         {
             Name = s.Name,
             Title = s.Title,
@@ -199,11 +213,25 @@ public static class McpToolCatalog
                         ? s.Description + " Supply verificationRepositoryId (github:<numeric-id>) to discover approved environments in the optional verification result."
                         : !local && (features & McpCatalogFeatures.VerifiedTasks) == 0
                             ? s.Description.Replace(VerificationSendDescription, "", StringComparison.Ordinal)
-                            : s.Description,
+                            : Describe(s, local, features),
             InputSchema = Schema(s.Input, local, features),
             Annotations = new ToolAnnotations { Title = s.Title, ReadOnlyHint = s.ReadOnly, DestructiveHint = s.Name == McpToolNames.Cancel, OpenWorldHint = false },
         }),
     ];
+
+    private static string Describe(McpToolSpec spec, bool local, McpCatalogFeatures features)
+    {
+        if (!local || (features & McpCatalogFeatures.Workflows) == 0) return spec.Description;
+        var replacement = spec.Name switch
+        {
+            McpToolNames.FindProject => McpToolNames.FindJob,
+            McpToolNames.EnsureProject => McpToolNames.EnsureJob,
+            McpToolNames.CompleteProject => McpToolNames.CompleteJob,
+            _ => null,
+        };
+        return replacement is null ? spec.Description
+            : $"Old name of {replacement}. This alias goes away in the next release. " + spec.Description;
+    }
 
     /// <summary>
     /// The JSON schema of a contract input type, as MessageBusJson reads it, kept small (the original issue): agents re-read every

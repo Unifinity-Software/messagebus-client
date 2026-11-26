@@ -81,16 +81,31 @@ public static class McpToolNames
     /// </summary>
     public const string OpenInbox = "open_inbox";
 
+    /// <summary>List the workspace's workflows.</summary>
+    public const string ListWorkflows = "list_workflows";
+    /// <summary>Start a service-driven workflow job.</summary>
+    public const string StartJob = "start_job";
+    /// <summary>Read a job's state and step runs.</summary>
+    public const string JobStatus = "job_status";
+    /// <summary>Find existing hands-on work.</summary>
+    public const string FindJob = "find_job";
+    /// <summary>Find or create a hands-on job.</summary>
+    public const string EnsureJob = "ensure_job";
+    /// <summary>Mark a hands-on job finished.</summary>
+    public const string CompleteJob = "complete_job";
+
     /// <summary>Every tool name.</summary>
     public static IReadOnlyList<string> All { get; } =
     [
         Send, SendMany, Wait, Watch, Inbox, Progress, Settle, Status, Cancel, Retarget, Move,
         EnsureProject, FindProject, CompleteProject, Directory, DescribeRole, Subscribe, FetchAttachment, Retry,
         RequestApproval, WaitApproval, OpenInbox, SendVerified, SendManyVerified, ProposeRole, GetRoleProposal, WaitRoleProposal,
+        ListWorkflows, StartJob, JobStatus, FindJob, EnsureJob, CompleteJob,
     ];
 
     /// <summary>Tools only the local <c>mbus mcp</c> server has (the remote endpoint can't decrypt or touch this machine's files).</summary>
-    public static IReadOnlyList<string> LocalOnly { get; } = [FetchAttachment, Retry, ProposeRole, GetRoleProposal, WaitRoleProposal];
+    public static IReadOnlyList<string> LocalOnly { get; } =
+        [FetchAttachment, Retry, ProposeRole, GetRoleProposal, WaitRoleProposal, ListWorkflows, StartJob, JobStatus, FindJob, EnsureJob, CompleteJob];
 
     /// <summary>Tools that require a hosted service implementation and are never exposed by the local server.</summary>
     public static IReadOnlyList<string> ServiceOnly { get; } = [SendVerified, SendManyVerified];

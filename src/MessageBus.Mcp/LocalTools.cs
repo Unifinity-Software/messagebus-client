@@ -100,6 +100,9 @@ internal sealed partial class LocalTools : IAsyncDisposable
             return Task.FromResult(McpToolCatalog.Error(refused));
         return GuardAsync(name, async () =>
         {
+            if (McpToolCatalog.Find(name)?.Features == McpCatalogFeatures.Workflows
+                && !await WorkflowsSupportedAsync(ct))
+                return McpToolCatalog.Error(new McpError { Code = McpErrorCodes.Unsupported, Message = WorkflowsUnavailable });
             using var git = Git.PrepareWith(_o.PrepareGit);
             _clientKind ??= AgentKindOf(clientName);
             _agent ??= _o.Agent ?? _o.Session?.AgentId ?? Delivery?.AgentId ?? _clientKind;
@@ -115,11 +118,15 @@ internal sealed partial class LocalTools : IAsyncDisposable
                 McpToolNames.Inbox => Ok(await InboxAsync(Read<InboxInput>(arguments), ct)),
                 McpToolNames.Progress => Ok(await ProgressAsync(Read<ProgressInput>(arguments), ct)),
                 McpToolNames.Settle => Ok(await SettleAsync(Read<SettleInput>(arguments), ct)),
-                McpToolNames.EnsureProject => Ok(await EnsureProjectAsync(Read<EnsureProjectInput>(arguments), ct)),
+                McpToolNames.ListWorkflows => Ok(await ListWorkflowsAsync(ct)),
+                McpToolNames.StartJob => Ok(await StartJobAsync(Read<StartJobInput>(arguments), ct)),
+                McpToolNames.JobStatus => Ok(await JobStatusAsync(Read<JobStatusInput>(arguments), ct)),
+                McpToolNames.FindJob => await PassThroughAsync(McpToolNames.FindProject, arguments, ct),
+                McpToolNames.EnsureProject or McpToolNames.EnsureJob => Ok(await EnsureProjectAsync(Read<EnsureProjectInput>(arguments), ct)),
                 McpToolNames.FetchAttachment => Ok(await FetchAttachmentAsync(Read<FetchAttachmentInput>(arguments), ct)),
                 McpToolNames.Retry => Ok(await RetryAsync(Read<RetryInput>(arguments), ct)),
                 McpToolNames.Retarget => Ok(await RetargetAsync(Read<RetargetInput>(arguments), ct)),
-                McpToolNames.CompleteProject => Ok(await CompleteProjectAsync(Read<CompleteProjectInput>(arguments), ct)),
+                McpToolNames.CompleteProject or McpToolNames.CompleteJob => Ok(await CompleteProjectAsync(Read<CompleteProjectInput>(arguments), ct)),
                 McpToolNames.RequestApproval => Ok(await RequestApprovalAsync(ReadApproval(arguments), ct)),
                 McpToolNames.WaitApproval => Ok(await WaitApprovalAsync(Read<WaitApprovalInput>(arguments), ct)),
                 McpToolNames.OpenInbox => Ok(await OpenInboxAsync(Read<OpenInboxInput>(arguments), ct)),

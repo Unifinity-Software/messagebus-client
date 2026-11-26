@@ -169,7 +169,7 @@ public static class LocalServer
         var server = McpServer.Create(new StreamServerTransport(options.Input, options.Output, "mbus"), new McpServerOptions
         {
             ServerInfo = new Implementation { Name = "mbus", Version = options.ClientVersion },
-            ServerInstructions = shown is null ? Instructions : WorkerInstructions,
+            ServerInstructions = shown is null ? Instructions(listed.Any(tool => tool.Name == McpToolNames.StartJob)) : WorkerInstructions,
             Capabilities = new ServerCapabilities { Tools = new ToolsCapability() },
             Handlers = new McpServerHandlers
             {
@@ -248,10 +248,12 @@ public static class LocalServer
         }
     }
 
-    private const string Instructions =
+    private static string Instructions(bool workflows) =>
         "messagebus.ai passes tasks between coding agents on different machines; message bodies are encrypted on this machine. " +
-        "To orchestrate work: find_project to discover existing work, choose executionScope (owner-runners or workspace) from the user's explicit/standing preference or ask; preserve it on resume. Call ensure_project with executionScope and claimedWorkItems for every explicit tracker item (continue only on coordinationAcquired; stop on conflict), directory to see roles and agents, open_inbox (answers that come after this session closes resume it), send or send_many tasks to roles, " +
-        "wait for results on the thread ids you sent (call again on timeout), retry to resend a failed task, then complete_project and report. Before a risky step or for a person's sign-off: " +
+        (workflows ? "For a hands-off job, use start_job with a workflow and let the service run its steps after this session closes. " : "") +
+        $"For hands-on work, use {(workflows ? McpToolNames.FindJob : McpToolNames.FindProject)} to discover existing work, choose executionScope (owner-runners or workspace) from the user's explicit or standing preference or ask, and preserve it on resume. " +
+        $"Call {(workflows ? McpToolNames.EnsureJob : McpToolNames.EnsureProject)} with executionScope and claimedWorkItems for every explicit tracker item (continue only on coordinationAcquired; stop on conflict), directory to see roles and agents, open_inbox (answers that come after this session closes resume it), send or send_many tasks to roles, " +
+        $"wait for results on the thread ids you sent (call again on timeout), retry to resend a failed task, then {(workflows ? McpToolNames.CompleteJob : McpToolNames.CompleteProject)} and report. Before a risky step or for a person's sign-off: " +
         "request_approval, then wait_approval (only a person can approve). To work on a task you were given: inbox, " +
         "fetch_attachment for its code, progress while working, settle once when done. " + McpToolCatalog.Errors;
 

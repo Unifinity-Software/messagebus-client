@@ -1044,3 +1044,28 @@ The service only dispatches workflow payloads when this feature is enabled.
   failed with `failureCategory: "refused"`, without starting an agent.
 - A `Ref` of kind `exhibit` carries an `exhibit` object with `name`,
   `mediaType`, `size` in bytes, and optional `caption`.
+
+### Local workflow and job tools
+
+The local MCP server offers these six names when `GET /api/server` advertises
+`workflows`. The backing REST routes are scoped to `/api/w/{workspaceId}`.
+If a workflow route returns HTTP 404, the tool reports “Workflows are not
+switched on for this workspace.”
+
+- `list_workflows {}` reads `GET workflows` and returns `{workflows}`, with
+  each workflow's `id`, `name`, `description`, `state`, optional
+  `publishedVersion`, and `settings`.
+- `start_job {workItem, workflow, instructions?, limitUsd?, runsOn?}` resolves
+  `workflow` as a case-insensitive id or name using `GET workflows` and
+  posts the resolved `workflowId` with the other fields to `POST jobs`.
+  It returns `{jobId, url, state, workflow}` as soon as the job is created.
+  The service runs the job after the calling session closes.
+- `job_status {jobId}` reads `GET jobs/{id}` and returns `{jobId, url, state,
+  spentUsd, limitUsd?, activeStepIds, steps}`. Each run in `steps` contains
+  `stepId`, `round`, `state`, and optional `outcome`, `agent`, `machineId`
+  and `waitingOn`. Both job tools use `<server base URL>/jobs/<job id>` for
+  the dashboard link.
+- `find_job`, `ensure_job`, and `complete_job` use the same arguments,
+  results and handlers as `find_project`, `ensure_project`, and
+  `complete_project`, respectively. The project names stay available as
+  aliases for one release, including on servers without the capability.

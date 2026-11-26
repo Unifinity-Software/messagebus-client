@@ -1,5 +1,6 @@
 using System.Text.Json;
 using MessageBus.Contracts.Attachments;
+using MessageBus.Contracts.Json;
 using MessageBus.Contracts.Machines;
 using MessageBus.Contracts.Mcp;
 using MessageBus.Contracts.Messaging;
@@ -31,6 +32,16 @@ internal static class ContractSamples
     private const string Sha = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
 
     private static readonly JsonElement Data = JsonDocument.Parse("""{"area":"api","files":["TodoItem.cs"]}""").RootElement.Clone();
+    private static readonly WorkflowSummary Workflow = new()
+    {
+        Id = "wf_feature", Name = "Feature", Description = "Implement an issue", State = "published", PublishedVersion = 3,
+        Settings = MessageBusJson.Deserialize<JsonElement>("""{"runsOn":"workspace","spendingLimitUsd":25}"""),
+    };
+    private static readonly JobStepRun JobStep = new()
+    {
+        StepId = "review", Round = 2, State = "waiting", Outcome = "changes-needed", Agent = "reviewer", MachineId = "mch_example",
+        WaitingOn = MessageBusJson.Deserialize<JsonElement>("""{"kind":"agent","role":"reviewer"}"""),
+    };
 
     public static readonly RoleTarget RoleTo = new() { Role = "developer" };
     private static readonly ExhibitRef Exhibit = new()
@@ -557,6 +568,22 @@ internal static class ContractSamples
             EstimatedCostUsd = 1, BudgetCapUsd = 2, CostAfterUsd = 3, OverBudgetCap = true, DryRun = true },
         new CancelInput { ThreadId = Thr, ProjectId = Prj, Reason = "superseded" },
         new CancelResult { CancelledThreadIds = [Thr], Message = "Thread thr_1 had already finished (failed); cancelled 1 task started from it." },
+        new ListWorkflowsInput(),
+        new ListWorkflowsResult { Workflows = [Workflow] },
+        Workflow,
+        new StartJobInput { WorkItem = "gh:owner/repo#42", Workflow = "Feature", Instructions = "Fix the list view.", LimitUsd = 25m, RunsOn = "workspace" },
+        new StartJobResult
+        {
+            JobId = "job_example", Url = "https://example.test/jobs/job_example", State = "running",
+            Workflow = MessageBusJson.Deserialize<JsonElement>("""{"id":"wf_feature","name":"Feature","version":3}"""),
+        },
+        new JobStatusInput { JobId = "job_example" },
+        new JobStatusResult
+        {
+            JobId = "job_example", Url = "https://example.test/jobs/job_example", State = "needs-you", SpentUsd = 2.5m,
+            LimitUsd = 25m, ActiveStepIds = ["review"], Steps = [JobStep],
+        },
+        JobStep,
         new FindProjectInput { Key = "gh:owner/repo#42" },
         new FindProjectResult { Project = Project },
         new EnsureProjectInput { ExecutionScope = ProjectExecutionScope.OwnerRunners, ClaimedWorkItems = ["ado:contoso/web#123"], CoordinatorInboxId = "inb_session", Key = "ado:contoso/web#123", Title = "Add due dates", Refs = [PrRef], BudgetCapUsd = 25m, MaxFanOut = 4 },
