@@ -1050,6 +1050,14 @@ The service only dispatches workflow payloads when this feature is enabled.
   `roll-back` uses `rollBack` with `deploymentId`.
   For an unsupported kind, the runner accepts the delivery and settles it as
   failed with `failureCategory: "refused"`, without starting an agent.
+- The `record-walkthrough` runner action runs the checkout's Playwright Test
+  configuration with the project's installed dependencies and the browsers on
+  the runner. It records video, screenshots, and traces and uploads them using
+  the existing exhibit route. Screenshot captions come from the Playwright
+  attachment name or the file name for screenshots written to the test's
+  output folder. The action settles with `recorded`, `tests-failed` (with
+  available exhibits), or `nothing-to-record` if the checkout has no Playwright
+  configuration. A missing required browser fails the action with an error.
 - A `Ref` of kind `exhibit` carries an `exhibit` object with `name`,
   `mediaType`, `size` in bytes, and optional `caption`.
 

@@ -168,7 +168,7 @@ public sealed class RunnerEngine : IAsyncDisposable
         _time = time;
         _log = TextWriter.Synchronized(log);
         _ext = extensions ?? new RunnerExtensions();
-        _actions = new([new RunCommandAction(time), new OpenPullRequestAction(_ext.RepoCredentials ?? new Sandbox.NoRepoCredentials())]);
+        _actions = new([new RunCommandAction(time), new RecordWalkthroughAction(host.LocateCommand), new OpenPullRequestAction(_ext.RepoCredentials ?? new Sandbox.NoRepoCredentials())]);
         _service = _ext.Readiness?.Watch(service) ?? service;
         _acceptance = new WorkAcceptance(host.Policy);
         _services = new RunServices(options, host, _service, time, _log, _ext.Sandbox, _ext.Bundles, _stopping.Token, _ext.Tools, _ext.RunApprovals, _ext.SendKeptAnswer, _ext.ReturnCommits, _ext.Verification);
