@@ -30,7 +30,7 @@ With the service's `workflows` capability enabled:
 mbus workflow list
 mbus workflow show Feature
 mbus workflow check workflow.json
-mbus job start example/todo-app#42 --workflow Feature
+mbus job start gh:example/todo-app#42 --workflow Feature
 mbus job list
 mbus job show <id>
 mbus job open <id>
