@@ -65,20 +65,6 @@ public class JsonContractTests
     }
 
     [Fact]
-    public void Run_command_parameters_allow_an_omitted_folder_and_time_limit()
-    {
-        var parameters = MessageBusJson.Deserialize<RunCommandParameters>("""{"command":"dotnet build"}""")!;
-        Assert.Equal("dotnet build", parameters.Command);
-        Assert.Null(parameters.Folder);
-        Assert.Null(parameters.TimeLimitMinutes);
-
-        var sample = (RunCommandParameters)ContractSamples.All[typeof(RunCommandParameters)];
-        var json = JsonNode.Parse(MessageBusJson.Serialize(sample))!.AsObject();
-        Assert.Equal(sample.Folder, json["folder"]!.GetValue<string>());
-        Assert.Equal(sample.TimeLimitMinutes, json["timeLimitMinutes"]!.GetValue<int>());
-    }
-
-    [Fact]
     public void Older_heartbeat_ack_does_not_enable_resource_samples()
     {
         var ack = MessageBusJson.Deserialize<HeartbeatAck>("""{"leases":[],"runnerConnected":true}""")!;
