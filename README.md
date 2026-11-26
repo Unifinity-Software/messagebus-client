@@ -145,6 +145,30 @@ progress/settle, elapsed time, tokens/costs, failures, and the chosen default wi
 configuration and restore any operator-authorized service/model changes afterwards. Automated fake-agent tests do
 not establish that live acceptance evidence.
 
+## Run a job
+
+A job carries out a work item. Start it with a published workflow for hands-off execution that
+continues after your coding session closes, or ask your agent to **orchestrate it here** for a
+session that plans, sends tasks to roles and checks their replies. The `mbus-orchestrate` skill
+looks for a workflow that fits the repository and work item and offers both ways. When workflows
+are unavailable or none fits, it orchestrates here as before.
+
+With the service's `workflows` capability enabled:
+
+```sh
+mbus workflow list
+mbus workflow show Feature
+mbus job start example/todo-app#42 --workflow Feature
+mbus job list
+mbus job show <id>
+mbus job open <id>
+```
+
+The start command reports a dashboard link. A workflow controls its steps, approvals and waits;
+the repository's [`.messagebus/workflow.md`](docs/workflow-file.md) guides an orchestrating agent
+and is not automatically imported into a published workflow. `mbus project …` remains an alias
+for one release.
+
 ## What is in this repository
 
 | Path | Package | What it is |

@@ -5,6 +5,10 @@ messagebus.ai's `docs/workflow-file.md`). If the target repository has one, ever
 "Required steps" section is part of your plan, in its order, on top of the work item's own tasks.
 A step can't be dropped because the work item doesn't mention it.
 
+This file guides session orchestration and tasks inside a workflow's Orchestrate step. It is
+not a published workflow definition, and cannot replace the service's path or change what its
+steps run. Configure required service steps in the published workflow separately.
+
 ## Reading a step
 
 Each step is a `### N. <Name>` heading with bullets:
@@ -68,8 +72,8 @@ it. Show it in the plan (as "will run") and in the final report.
    at revision 1 uses Node 24 and covers every required key. If discovery is missing or unsupported,
    no profile matches, or multiple profiles match, report the exact verification blocker and hold
    the affected task. Send even when the selected profile shows zero approved shared machines or the
-   role has no free agents. Keep the project's execution scope. The service evaluates runner
-   eligibility and can create a blocked task that appears in Projects.
+   role has no free agents. Keep the job's execution scope. The service evaluates runner
+   eligibility and can create a blocked task that appears in Jobs.
 4. Pin the input to a full commit SHA from the same authorized GitHub repository. For implementation
    use the starting commit, and for review use the commit to be reviewed. For example, use
    `gh api repos/{owner}/{repo}/commits/{ref}` and confirm its `sha` matches the local input.

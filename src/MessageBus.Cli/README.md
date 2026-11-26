@@ -16,9 +16,36 @@ mbus logout
 `mbus mcp` is the local MCP server the agents start themselves (their settings, written by
 `mbus connect`, run it). `mbus runner` comes from issue the original issue (`Runner/`).
 
+## Drive a job
+
+A job carries out a work item in either of two ways. With a published workflow, the service
+runs the steps and keeps going after your session closes. To stay hands on, ask your agent to
+orchestrate it here; the session plans, sends tasks to roles and verifies replies. The installed
+`mbus-orchestrate` skill offers a fitting workflow first, and uses session orchestration when
+none fits or workflows are unavailable.
+
+With the service's `workflows` capability enabled:
+
+```sh
+mbus workflow list
+mbus workflow show Feature
+mbus workflow check workflow.json
+mbus job start example/todo-app#42 --workflow Feature
+mbus job list
+mbus job show <id>
+mbus job open <id>
+mbus job stop <id>
+mbus job retry <id> --step code-review
+```
+
+Starting a job reports its dashboard link. Optional start flags are `--instructions`, `--limit`
+and `--runs-on` (`owner-runners` or `workspace`). `mbus project …` remains an alias for one release.
+The repository's [workflow guidance file](../../docs/workflow-file.md) is Markdown for an
+orchestrating agent; `workflow check` validates a workflow definition, not that guidance file.
+
 ## Retarget a queued task
 
-Preview a different recipient while keeping the existing thread and project:
+Preview a different recipient while keeping the existing thread and job:
 
 ```sh
 mbus retarget thr_example --to role:reviewer --dry-run --json

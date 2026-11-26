@@ -1,17 +1,59 @@
 ---
 name: mbus-orchestrate
-description: "Orchestrate a work item across coding agents on other machines with the mbus MCP tools (messagebus.ai). Use when the user types orchestrate followed by a work item: a Markdown file path, a GitHub issue or PR such as owner/repo#42, or an Azure DevOps item such as ADO PBI #123456. Plans the tasks, sends them to roles, tracks the replies, brings code back as git bundles, verifies the result and reports time, tokens and cost per task. Also tells an agent started for an mbus task how to do it."
+description: "Start a work item with a fitting messagebus.ai workflow, or orchestrate it here across coding agents on other machines. Use when the user types orchestrate followed by a Markdown file path, GitHub issue or PR, or Azure DevOps item. Also guides workers and coordinators of workflow Orchestrate steps."
 ---
 
 # Orchestrate a work item through messagebus.ai
 
-You are the orchestrator. messagebus.ai only carries messages: **you** read the work item, plan,
-send tasks to roles, react to results, verify and report. Workers on other machines do one task
+Two ways drive a job: a **workflow** runs its published steps on the service and keeps going after
+this session closes; **orchestrate it here** keeps planning, dispatch, review and verification in
+this session. Start by looking for a fitting workflow. Workers on other machines do one task
 each. All calls below are tools of the `mbus` MCP server (`mcp__mbus__…` in Claude Code, `mbus` in
 Codex). If those tools are missing, tell the user to run `mbus login` and `mbus connect`, and stop.
 
 **Started by the mbus runner for one task** (your prompt names a thread and delivery)? You are a
-worker, not the orchestrator: follow [reference/worker.md](reference/worker.md) instead.
+worker: follow [reference/worker.md](reference/worker.md) instead. If your service-provided
+`StepContext` identifies an **Orchestrate** step, use its coordinator section.
+
+## Choose how to drive the job
+
+If the user already asked to orchestrate here, go directly to the session procedure below.
+
+1. Read the work item and identify its repository ([reference/work-items.md](reference/work-items.md)).
+   Check for existing work before starting another job (`find_job {key}`, or `find_project {key}`
+   with capability off, then `status {projectId}`);
+   resume only with the original coordination context. Don't start a duplicate workflow on retry.
+2. Only when the service reports the `workflows` capability, use `list_workflows {}`. Its
+   `workflows` entries have `id`, `name`, `description`, `state`, `publishedVersion` and `settings`.
+   Match a published workflow to the repository and work item using those fields; don't assume
+   every published workflow fits. If more than one fits, ask which to use.
+3. With a fit, offer **"Start it with the workflow"** (hands off; continues after this session
+   closes) or **"Orchestrate it here"** (hands on; this session drives the tasks). Honor an explicit
+   choice already made; otherwise wait for the choice before starting. Resolve runner scope from the user's
+   explicit or standing preference, or ask: "My runners only" or "Any eligible workspace runner".
+   Pass it as `runsOn`; never silently widen a restriction.
+4. For the workflow choice, call `start_job` with the tracker key and workflow id or name. Pass
+   optional `instructions`, `limitUsd` and `runsOn` only as chosen by the user. Report the returned
+   `url`, `jobId`, `state` and selected `workflow` version, then hand control to the service.
+   Don't also claim a session job or dispatch its steps. Use `job_status {jobId}` when asked for
+   progress; it returns `url`, `state`, `spentUsd`, `limitUsd`, `activeStepIds` and `steps`.
+5. With no fitting workflow, capability off, workspace workflows unavailable, a file-only work
+   item (the start tool takes a tracker key), or the user's choice to orchestrate here, follow the
+   session procedure below exactly as before. When capability is off, don't call workflow tools:
+   use `find_project`, `ensure_project` and `complete_project` in place of the job aliases below.
+   Their arguments and result fields remain `projectId`, `project`, etc. A refusal, conflict,
+   spending limit or uncertain start is a blocker to report, never a reason to start a second job
+   or switch modes without the user's choice.
+
+For a user who chose a workflow and workspace runners:
+
+```json
+list_workflows {}
+start_job { "workItem": "gh:example/todo-app#42", "workflow": "Feature", "runsOn": "workspace" }
+```
+
+The start result is `{jobId, url, state, workflow?}`. Use that `jobId` in
+`job_status { "jobId": "<returned jobId>" }`; share the returned link rather than inventing one.
 
 ## Rules that always apply
 
@@ -30,10 +72,10 @@ worker, not the orchestrator: follow [reference/worker.md](reference/worker.md) 
 - **No secrets in messages.** Never put tokens, keys, passwords, connection strings or `.env`
   content in a body, title, label, ref or attachment. The local server refuses bodies that look
   like secrets; if it does, remove the secret, don't reword around the check.
-- **Heed budget notices.** `send`, `send_many` and `wait` repeat a `notice` once a project has
+- **Heed budget notices.** `send`, `send_many` and `wait` repeat a `notice` once a job has
   used 80% of its budget cap. Finish already planned work only if it fits what is left; don't
   start optional rounds (extra reviews, fix rounds). Tell the user the spend, the cap and the
-  percentage from the notice, and that they can raise the cap on the project's page (**Change**
+  percentage from the notice, and that they can raise the cap on the job's page (**Change**
   under **Est. cost**). A notice never overrides a refused send.
 - **Respect limits.** On `limit-reached` (budget, fan-out, rate) or `forbidden`, stop sending new
   work, let running tasks finish, and tell the user what limit was hit and what they can change.
@@ -50,29 +92,29 @@ worker, not the orchestrator: follow [reference/worker.md](reference/worker.md) 
   the plan changes, anything that needs them, and the final report. Asked for status, show the
   checklist then ([reference/terminal-output.md](reference/terminal-output.md)).
 
-## Procedure
+## Orchestrate it here
 
-1. **Read the work item** with your own tools and pick its project key
+1. **Read the work item** with your own tools and pick its job key
    ([reference/work-items.md](reference/work-items.md)): `file:<path>` (path as the user gave it,
    forward slashes), `gh:owner/repo#n`, or `ado:org/project#id`. Find the target repository it names
    and check it is a clean git repository; if it is missing, tell the user how to create it and stop.
 2. **Discover, choose where it runs, and claim before planning or dispatch.** Call
-   `find_project {key}` for the project key and for each tracker item the user explicitly wants
+   `find_job {key}` for the job key and for each tracker item the user explicitly wants
    implemented. This is read-only; inspect visible underway work with `status {projectId}`.
-   **Execution scope** decides which machines may run the project's tasks: `owner-runners` (only
-   personal runners registered in mbus to the person who starts the project) or `workspace` (any
-   eligible workspace runner). It is fixed when the project is created.
-   - Existing project: reuse its stored `executionScope`. If the user explicitly asks for a
-     different scope, stop and tell them that needs a new project; never widen it silently.
-   - New project: honor an explicit user request or standing instruction (such as `AGENTS.md`).
+   **Execution scope** decides which machines may run the job's tasks: `owner-runners` (only
+   personal runners registered in mbus to the person who starts the job) or `workspace` (any
+   eligible workspace runner). It is fixed when the job is created.
+   - Existing job: reuse its stored `executionScope`. If the user explicitly asks for a
+     different scope, stop and tell them that needs a new job; never widen it silently.
+   - New job: honor an explicit user request or standing instruction (such as `AGENTS.md`).
      Otherwise ask once: "My runners only" or "Any eligible workspace runner". Don't invent a
      saved preference from a previous session.
-   Then `ensure_project {key, title, refs, executionScope, claimedWorkItems: [key, ...]}`:
+   Then `ensure_job {key, title, refs, executionScope, claimedWorkItems: [key, ...]}`:
    list every explicitly implemented GitHub/ADO item in a batch, excluding merely related/parent refs.
    The local server opens a distinct coordinator inbox. Continue only on `coordinationAcquired: true`;
-   on `conflict` stop without dispatching (field `executionScope`: the project already has the
-   other scope). A matching project or account alone is not ownership.
-   **Fail closed:** before sending any work, check that the returned project's `executionScope` is
+   on `conflict` stop without dispatching (field `executionScope`: the job already has the
+   other scope). A matching job or account alone is not ownership.
+   **Fail closed:** before sending any work, check that the returned job's `executionScope` is
    the one you chose, and for `owner-runners` that `executionOwnerSubjectId` is set. If it is
    missing or different (an older server), stop and tell the user the server must be upgraded; never
    dispatch unrestricted, and never use tags or roles as a stand-in for ownership.
@@ -81,8 +123,8 @@ worker, not the orchestrator: follow [reference/worker.md](reference/worker.md) 
    [reference/coordination.md](reference/coordination.md).
 3. **`directory`** `{}`. Note each role's online agents, vendors, machines and free slots. Call
    `describe_role` once for each role you will use for the first time. The directory shows each
-   role's whole capacity, not what this project may use: for an `owner-runners` project only the
-   agents whose `ownerSubjectId` is the project's `executionOwnerSubjectId` on personal machines
+   role's whole capacity, not what this job may use: for an `owner-runners` job only the
+   agents whose `ownerSubjectId` is the job's `executionOwnerSubjectId` on personal machines
    count. Trust `send`'s available agents and waiting reasons over your own count.
 4. **Plan.** Split the work item into tasks (its own task list wins), and if the repository has
    `.messagebus/workflow.md`, add its required steps in its order
@@ -135,7 +177,7 @@ worker, not the orchestrator: follow [reference/worker.md](reference/worker.md) 
    because no independent agent holds the role, or its `notice` says fewer reviewers got it, tell
    the user ([reference/tool-calls.md](reference/tool-calls.md#reviews)). Include the planned verification
    requirements and pinned commit on the verified task's send. Keep each `threadId`.
-   A task sent under the wrong project is moved with `move` instead of resent.
+   A task sent under the wrong job is moved with `move` instead of resent.
 6. **Wait and react.** Loop `wait {threadIds: <the thread ids you sent and haven't handled>, mode:
    "any"}`, and before each call check whether the user has said anything (they come first). Always pass the thread ids, never `projectId` alone (it skips threads that finished
    between calls). Each call returns within the client's time limit (about 100 s); on `timedOut`
@@ -151,9 +193,9 @@ worker, not the orchestrator: follow [reference/worker.md](reference/worker.md) 
    on a task, stop that line of work and tell the user. A task that stays queued while its agents
    are online may have been declined: if `status` shows `machine-not-ready`, tell the user what to
    fix on which machine, then `retry` it ([reference/tool-calls.md](reference/tool-calls.md#declines)).
-   A waiting reason `owner-runners` means none of the project owner's personal runners matches
+   A waiting reason `owner-runners` means none of the job owner's personal runners matches
    the target: explain the missing runner, role or capability; don't resend elsewhere. Retries, fixes and
-   follow-ups keep the project's scope.
+   follow-ups keep the job's scope.
 7. **Verify the integrated commit on a remote runner by default.** When a change spans several
    parts or review finds a coverage gap, send `task.test` to `role:tester` to add tests that guard
    the combined behavior. Review and merge its bundle like any other. Prefer `excludeAuthors: true`
@@ -178,8 +220,8 @@ worker, not the orchestrator: follow [reference/worker.md](reference/worker.md) 
    If no authorized remote runner can execute a required check, report the check and concrete
    blocker. Ask the user before falling back to a heavy run on their PC. Use a fallback only if
    it satisfies the applicable requirements, and keep the check blocked until you have valid evidence.
-8. **`complete_project`** `{projectId, summary, status: "completed" | "failed", refs, usage?}`.
-   Mark the project completed only after the required checks pass and the evidence is verified.
+8. **`complete_job`** `{projectId, summary, status: "completed" | "failed", refs, usage?}`.
+   Mark the job completed only after the required checks pass and the evidence is verified.
    `usage` is this session's own tokens and time; give it if your client shows them to you,
    otherwise leave it out (under Claude Code and Codex the local server reads usage since the session's last automatic report, keeping a checkpoint across wake-ups; unavailable usage is omitted with a notice). Explicit usage is unchanged.
 9. **Report** to the user: per task the role, machine, agent, time, tokens and cost from the tool
