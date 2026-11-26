@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using MessageBus.Cli.Runner;
+using MessageBus.Cli.Runner.Actions;
 using MessageBus.Cli.Tests.Infrastructure;
 using MessageBus.Contracts.Http;
 using MessageBus.Contracts.Json;
@@ -220,6 +221,118 @@ public sealed class ExhibitsTests
         await File.WriteAllTextAsync(Path.Combine(run.Root, "outside.txt"), "Outside work folder", Ct);
         await Assert.ThrowsAsync<McpToolException>(() => exhibits.UploadAsync("../outside.txt", ct: Ct));
         Assert.Empty(h.Machine.Server.Requests);
+    }
+
+    [Theory]
+    [InlineData(null, "nothing-to-record")]
+    [InlineData(0, "recorded")]
+    [InlineData(1, "tests-failed")]
+    public async Task Walkthrough_uploads_named_recordings_for_both_test_outcomes(int? exit, string outcome)
+    {
+        using var h = new ApprovalImpactTests.Harness();
+        await using var runner = new RunnerHarness();
+        Support(h.Machine.Server);
+        var work = runner.Scratch;
+        if (exit is not null)
+        {
+            await File.WriteAllTextAsync(Path.Combine(work, "playwright.config.ts"),
+                "export default { testDir: './tests' };", Ct);
+            Directory.CreateDirectory(Path.Combine(work, "tests"));
+            await File.WriteAllTextAsync(Path.Combine(work, "tests", "walkthrough.spec.ts"), """
+                import { test } from '@playwright/test';
+                test('shows the list', async ({ page }, testInfo) => {
+                    const body = await page.screenshot();
+                    await testInfo.attach('Tasks in priority order', { body, contentType: 'image/png' });
+                    await page.screenshot({ path: testInfo.outputPath('list.png') });
+                });
+                """, Ct);
+        }
+
+        var step = Step();
+        var result = await new RecordWalkthroughAction(_ => "node").RunAsync(new RunnerActionContext
+        {
+            Delivery = runner.Task("dlv_walkthrough") with { StepContext = step },
+            WorkDirectory = work,
+            RunDirectory = runner.Scratch,
+            Log = TextWriter.Null,
+            Exhibits = new Exhibits(h.Http, "ws_test", step, work, _ => throw new InvalidOperationException(), work),
+            RunProcessAsync = async (launch, ct) =>
+            {
+                Assert.NotNull(exit);
+                Assert.Equal(work, launch.WorkingDirectory);
+                var config = await File.ReadAllTextAsync(launch.Arguments[launch.Arguments.ToList().IndexOf("--config") + 1], ct);
+                Assert.Contains("import original from './playwright.config.ts'", config);
+                Assert.Contains("video: 'on', screenshot: 'on', trace: 'on'", config);
+                var output = launch.Arguments[launch.Arguments.ToList().IndexOf("--output") + 1];
+                Directory.CreateDirectory(output);
+                foreach (var name in new[] { "list.png", "video.webm", "trace.zip", "notes.txt" })
+                    await File.WriteAllBytesAsync(Path.Combine(output, name), [0, 1, 2], ct);
+
+                var report = $$$"""
+                    {"suites":[{"suites":[{"specs":[{"tests":[{"results":[{"attachments":[
+                        {"name":"Tasks in priority order","contentType":"image/png","body":"AAEC"},
+                        {"name":"trace","contentType":"application/zip","path":{{{JsonSerializer.Serialize(Path.Combine(output, "trace.zip"))}}}},
+                        {"name":"video","contentType":"video/webm","path":{{{JsonSerializer.Serialize(Path.Combine(output, "video.webm"))}}}}
+                    ]}]}]}]}]}]}
+                    """;
+                await File.WriteAllTextAsync(launch.Environment["PLAYWRIGHT_JSON_OUTPUT_FILE"]!, report, ct);
+                return (exit.Value, []);
+            },
+        }, Ct);
+
+        Assert.Equal(SettleStatus.Succeeded, result.Status);
+        Assert.Equal(outcome, result.Outcome);
+        Assert.Equal(exit, result.ExitCode);
+        var uploads = h.Machine.Server.Requests.Where(request => request.Uri.AbsolutePath == Route).ToArray();
+        if (exit is null)
+        {
+            Assert.Empty(uploads);
+            Assert.Empty(result.Refs);
+            return;
+        }
+
+        Assert.Equal(4, result.Refs.Count);
+        Assert.Equal(4, uploads.Length);
+        AssertUpload(uploads[0], "screenshot", "Tasks in priority order");
+        AssertUpload(uploads[1], "trace", "trace");
+        AssertUpload(uploads[2], "video", "video");
+        AssertUpload(uploads[3], "screenshot", "list.png");
+        Assert.Empty(Directory.EnumerateFiles(work, ".mbus-walkthrough-*"));
+    }
+
+    [Fact]
+    public async Task Walkthrough_explains_when_the_required_browser_is_missing()
+    {
+        using var h = new ApprovalImpactTests.Harness();
+        await using var runner = new RunnerHarness();
+        var work = runner.Scratch;
+        await File.WriteAllTextAsync(Path.Combine(work, "playwright.config.cjs"), "module.exports = {};", Ct);
+        var step = Step();
+        var result = await new RecordWalkthroughAction(_ => "node").RunAsync(new RunnerActionContext
+        {
+            Delivery = runner.Task("dlv_walkthrough") with { StepContext = step },
+            WorkDirectory = work,
+            RunDirectory = runner.Scratch,
+            Log = TextWriter.Null,
+            Exhibits = new Exhibits(h.Http, "ws_test", step, work, _ => throw new InvalidOperationException(), work),
+            RunProcessAsync = async (launch, ct) =>
+            {
+                await File.WriteAllTextAsync(launch.Environment["PLAYWRIGHT_JSON_OUTPUT_FILE"]!, """
+                    {"errors":[{"message":"browserType.launch: Executable doesn't exist at chromium"}]}
+                    """, ct);
+                return (1, []);
+            },
+        }, Ct);
+
+        Assert.Equal(SettleStatus.Failed, result.Status);
+        Assert.Contains("browser required by this Playwright project is not installed", result.Error);
+    }
+
+    private static void AssertUpload(RecordedRequest request, string kind, string caption)
+    {
+        using var metadata = Metadata(request);
+        Assert.Equal(kind, metadata.RootElement.GetProperty("kind").GetString());
+        Assert.Equal(caption, metadata.RootElement.GetProperty("caption").GetString());
     }
 
     private static void Support(FakeServer server)
