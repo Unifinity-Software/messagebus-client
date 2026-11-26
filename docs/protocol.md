@@ -743,6 +743,11 @@ complete. Native runtime, old-server and combined review gates remain required b
 4. Queues are the durable record; the socket is the fast path. A runner that reconnects is offered whatever is still
    waiting for it.
 
+Runner status and machine inventory report `slotCeiling`, the maximum concurrency the runner
+accepts. Current runners report 64 and clamp startup and dashboard settings to the range 1–64.
+The service honors the ceiling reported by older runners. `slotMachineMax` continues to carry
+size-based advice from the runner.
+
 Timing and close codes come from the public `Groundhog.Protocol` package: the service pings every
 `RunnerProtocol.PingInterval`, drops a connection silent for `SilenceTimeout`, and the runner reconnects after 1, 2,
 4 … 30 seconds with jitter. Close codes (`RunnerCloseCodes`):
