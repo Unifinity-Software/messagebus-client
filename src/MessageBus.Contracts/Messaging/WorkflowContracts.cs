@@ -22,6 +22,9 @@ public sealed record StepContext
     /// <summary>The execution round of the step.</summary>
     public required int Round { get; init; }
 
+    /// <summary>Whether exhibits must be sealed to the workspace key; missing means false.</summary>
+    public bool? KeepExhibitsLocked { get; init; }
+
     /// <summary>The outcome words the step can report.</summary>
     public required IReadOnlyList<string> AllowedOutcomes { get; init; }
 

@@ -15,6 +15,46 @@ namespace MessageBus.Cli.Runner;
 /// <param name="Sandboxed">Wraps a process the tools start (git) in the run's sandbox and environment.</param>
 public sealed record RunToolsRequest(RunWorkspace Workspace, TaskDelivery Delivery, PermissionProfile Profile, Func<ProcessLaunch, ProcessLaunch> Sandboxed)
 {
+    private readonly object _exhibitGate = new();
+    private Exhibits? _exhibits;
+
+    internal MessageBus.Mcp.LocalServerOptions WithExhibits(MessageBus.Mcp.LocalServerOptions options)
+    {
+        using var schema = JsonDocument.Parse("""{"type":"object","properties":{"path":{"type":"string"},"caption":{"type":"string"},"kind":{"type":"string","enum":["document","diagram","plan","screenshot","video","trace","file"]}},"required":["path"],"additionalProperties":false}""");
+        lock (_exhibitGate)
+        {
+            if (Delivery.StepContext is { } step)
+                _exhibits ??= new Exhibits(options.Http, options.WorkspaceId!, step, Workspace.WorkTree, async ct =>
+                {
+                    using var keys = new MessageBus.Mcp.MachineKeys(options.Http, options.WorkspaceId!, options.MachineId,
+                        options.ConfigDirectory, options.Log, options.Time, options.MachineKeyPem);
+                    return await keys.RecipientAsync(null, ct).ConfigureAwait(false);
+                }, options.TempDirectory!);
+        }
+        return options with
+        {
+            AdditionalRunTool = _exhibits is null ? null : new ModelContextProtocol.Protocol.Tool
+            {
+                Name = "add_exhibit",
+                Description = "Upload a file from this run's working folder for people to view on the workflow step. Text is scanned for secrets; the step decides whether to encrypt it.",
+                InputSchema = schema.RootElement.Clone(),
+            },
+            CallRunTool = async (arguments, ct) =>
+            {
+                if (_exhibits is null) throw MessageBus.Contracts.Mcp.McpToolException.Invalid("path", "Exhibits belong to workflow steps.");
+                string? Text(string name) => arguments is not null && arguments.TryGetValue(name, out var value)
+                    && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
+                var path = Text("path");
+                if (string.IsNullOrWhiteSpace(path)) throw MessageBus.Contracts.Mcp.McpToolException.Invalid("path", "Give the exhibit file's path.");
+                foreach (var name in new[] { "caption", "kind" })
+                    if (arguments!.TryGetValue(name, out var value) && value.ValueKind is not (JsonValueKind.String or JsonValueKind.Null))
+                        throw MessageBus.Contracts.Mcp.McpToolException.Invalid(name, "Give text.");
+                return MessageBus.Contracts.Mcp.McpToolCatalog.Ok(await _exhibits.UploadAsync(path, Text("caption"), Text("kind"), ct).ConfigureAwait(false));
+            },
+            ExhibitRefs = () => _exhibits?.References ?? [],
+        };
+    }
+
     /// <summary>The session the run resumes for a reply to its inbox (the original issue), or null.</summary>
     public MessageBus.Mcp.SessionRecord? Session { get; init; }
 

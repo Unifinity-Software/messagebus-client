@@ -50,7 +50,7 @@ internal static class RunToolsServer
                 PrepareGit = start => InRun(start, request, git),
                 Session = request.Session,
             };
-            await LocalServer.RunAsync(options, ct).ConfigureAwait(false);
+            await LocalServer.RunAsync(request.WithExhibits(options), ct).ConfigureAwait(false);
         }, host.Error);
     }
 

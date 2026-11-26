@@ -11,6 +11,10 @@ namespace MessageBus.Mcp;
 /// <summary>What the local server needs; <see cref="LocalServer.Options"/> builds it from what <c>mbus mcp</c> prepared.</summary>
 public sealed record LocalServerOptions
 {
+    // Runner-owned tools use the existing authenticated transport without depending on the CLI.
+    internal Tool? AdditionalRunTool { get; init; }
+    internal Func<IDictionary<string, System.Text.Json.JsonElement>?, CancellationToken, Task<CallToolResult>>? CallRunTool { get; init; }
+    internal Func<IReadOnlyList<Ref>>? ExhibitRefs { get; init; }
     /// <summary>The service, authenticated as this machine; base address the server URL with a trailing slash.</summary>
     public required HttpClient Http { get; init; }
 
@@ -166,6 +170,7 @@ public static class LocalServer
         await using var tools = new LocalTools(options with { Links = options.Links ?? ownLinks });
         var shown = ShownTools(options.Delivery ?? ReadDelivery(options.DeliveryFile));
         var listed = await tools.ListToolsAsync(shown, ct);
+        if (options.AdditionalRunTool is { } runTool) listed.Add(runTool);
         var server = McpServer.Create(new StreamServerTransport(options.Input, options.Output, "mbus"), new McpServerOptions
         {
             ServerInfo = new Implementation { Name = "mbus", Version = options.ClientVersion },
