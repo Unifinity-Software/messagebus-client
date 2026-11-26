@@ -1071,6 +1071,8 @@ switched on for this workspace.”
   `complete_project`, respectively. The project names stay available as
   aliases for one release, including on servers without the capability.
 
+### Exhibits from workflow steps
+
 The runner offers `add_exhibit { path, caption?, kind? }` only for workflow steps.
 It uploads a file inside the working folder and adds the returned exhibit ref to settle.
 `POST /api/w/{ws}/jobs/{jobId}/steps/{stepId}/exhibits` uses the runner's machine
