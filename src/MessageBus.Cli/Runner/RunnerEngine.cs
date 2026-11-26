@@ -168,7 +168,7 @@ public sealed class RunnerEngine : IAsyncDisposable
         _time = time;
         _log = TextWriter.Synchronized(log);
         _ext = extensions ?? new RunnerExtensions();
-        _actions = new([new RunCommandAction(time), new RecordWalkthroughAction(host.LocateCommand), new OpenPullRequestAction(_ext.RepoCredentials ?? new Sandbox.NoRepoCredentials())]);
+        _actions = new([new RunCommandAction(time), new RecordWalkthroughAction(host.LocateCommand, host.GetEnvironmentVariable, host.HomeDirectory), new OpenPullRequestAction(_ext.RepoCredentials ?? new Sandbox.NoRepoCredentials())]);
         _service = _ext.Readiness?.Watch(service) ?? service;
         _acceptance = new WorkAcceptance(host.Policy);
         _services = new RunServices(options, host, _service, time, _log, _ext.Sandbox, _ext.Bundles, _stopping.Token, _ext.Tools, _ext.RunApprovals, _ext.SendKeptAnswer, _ext.ReturnCommits, _ext.Verification);
@@ -556,6 +556,15 @@ public sealed class RunnerEngine : IAsyncDisposable
                 .Select(agent => CapabilityNames.Format(CapabilityNames.AgentPrefix, AgentKinds.Name(agent.Kind))).ToHashSet(StringComparer.Ordinal);
             inventory = inventory with { Agents = found, Capabilities = [.. inventory.Capabilities.Where(capability => !unavailable.Contains(capability))] };
         }
+        const string actionPrefix = "action";
+        var actionCapabilities = await _service.SupportsWorkflowsAsync(cancellationToken).ConfigureAwait(false)
+            ? _actions.AvailableKinds().Select(kind => CapabilityNames.Format(actionPrefix, kind))
+            : [];
+        inventory = inventory with
+        {
+            Capabilities = [.. inventory.Capabilities.Where(capability =>
+                !capability.StartsWith(actionPrefix + ":", StringComparison.OrdinalIgnoreCase)), .. actionCapabilities],
+        };
         // the original issue: with the stored agent sign-ins, as the agents see them.
         inventory = _ext.Readiness?.Scanned(inventory, new MessageBus.Cli.Agents.SignInEnvironment(_host.GetEnvironmentVariable, _host.AgentEnvironment()).Get) ?? inventory;
         // the original issue: the ceiling and this machine's size, for the dashboard's slot setting and its suggestion.

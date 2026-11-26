@@ -27,6 +27,9 @@ public interface IRunnerServiceClient
     /// </summary>
     Task<IReadOnlyList<AgentInfo>> InventoryAsync(MachineInventory inventory, CancellationToken cancellationToken);
 
+    /// <summary>Whether the configured service advertises workflow support.</summary>
+    Task<bool> SupportsWorkflowsAsync(CancellationToken cancellationToken) => Task.FromResult(false);
+
     /// <summary>This machine's work policy (the original issue); null when the service doesn't say (one older than the original issue).</summary>
     Task<RunnerWorkPolicy?> PolicyAsync(CancellationToken cancellationToken) => Task.FromResult<RunnerWorkPolicy?>(null);
 
@@ -97,6 +100,10 @@ public sealed class HttpRunnerServiceClient(HttpClient http) : IRunnerServiceCli
             return [];
         }
     }
+
+    /// <inheritdoc />
+    public Task<bool> SupportsWorkflowsAsync(CancellationToken cancellationToken) =>
+        MessageBus.Mcp.TargetCapabilities.SupportsWorkflowsAsync(http, cancellationToken);
 
     /// <inheritdoc />
     public async Task<RunnerWorkPolicy?> PolicyAsync(CancellationToken cancellationToken)

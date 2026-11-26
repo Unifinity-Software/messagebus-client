@@ -212,6 +212,8 @@ public sealed class RunnerReadiness(TextWriter log, TimeProvider? time = null, F
 
         public Task<IReadOnlyList<AgentInfo>> InventoryAsync(MachineInventory inventory, CancellationToken cancellationToken) => inner.InventoryAsync(inventory, cancellationToken);
 
+        public Task<bool> SupportsWorkflowsAsync(CancellationToken cancellationToken) => inner.SupportsWorkflowsAsync(cancellationToken);
+
         public Task<RunnerWorkPolicy?> PolicyAsync(CancellationToken cancellationToken) => inner.PolicyAsync(cancellationToken);
 
         public Task<RunApprovalState?> RunApprovalAsync(RunApprovalRequest request, CancellationToken cancellationToken) =>
