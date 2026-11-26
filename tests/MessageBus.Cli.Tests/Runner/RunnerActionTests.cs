@@ -9,14 +9,15 @@ namespace MessageBus.Cli.Tests.Runner;
 public sealed class RunnerActionTests
 {
     [Fact]
-    public async Task An_unknown_action_is_accepted_and_settled_without_starting_an_agent()
+    public async Task An_action_the_runner_has_no_handler_for_is_accepted_and_settled_without_starting_an_agent()
     {
         var sandbox = new RecordingSandbox();
         await using var runner = new RunnerHarness(sandbox: _ => sandbox);
         runner.Service.OnRunApproval = _ => new RunApprovalState { ApprovalId = "apr_test", Status = RunApprovalStatus.Declined };
         var delivery = runner.Task("dlv_unknown_action") with
         {
-            RunnerAction = new RunnerAction { Kind = "future-action" },
+            // No runner handles roll-back yet, so it stands for any action this runner does not know.
+            RunnerAction = new RunnerAction { Kind = RunnerActionKinds.RollBack },
             RequireRunApproval = true,
         };
 
@@ -28,7 +29,7 @@ public sealed class RunnerActionTests
         Assert.Null(settle.Declined);
         Assert.Equal(SettleStatus.Failed, settle.Result.Status);
         Assert.Equal("refused", settle.Result.FailureCategory);
-        Assert.Contains("future-action", settle.Result.Error);
+        Assert.Contains(RunnerActionKinds.RollBack, settle.Result.Error);
         Assert.False(sandbox.ProcessStarted);
         Assert.False(Directory.Exists(runner.WorkTreeOf(delivery.DeliveryId)));
     }
