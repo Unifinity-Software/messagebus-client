@@ -218,7 +218,14 @@ public sealed class RunnerEngine : IAsyncDisposable
     public DeliveryDecision Deliver(TaskDelivery delivery)
     {
         if (delivery.RunnerAction is { } action && _actions.Refusal(action) is { } refusalResult)
-            return new DeliveryDecision { Accepted = false, Result = refusalResult };
+        {
+            lock (_gate)
+            {
+                if (!_runs.ContainsKey(delivery.DeliveryId))
+                    StartRun(new AgentRun(_services, delivery, refusalResult));
+            }
+            return new DeliveryDecision { Accepted = true };
+        }
 
         if (delivery.Verification is not null || delivery.Envelope.Verification is not null)
         {
@@ -294,17 +301,23 @@ public sealed class RunnerEngine : IAsyncDisposable
                     && resume.MachineId is not null && resume.MachineId == _host.MachineId
                     && resume.AgentId == delivery.AgentId && resume.InboxId == (delivery.Envelope.Target as InboxTarget)?.InboxId
                     ? MessageBus.Mcp.ProposalAuthority.ResumedCoordinator : MessageBus.Mcp.ProposalAuthority.Worker);
-            _runs[delivery.DeliveryId] = run;
-            _ext.WorkActivityChanged?.Invoke(true);
-            if (_runs.Count == 1) _resources.SetBusy(true);
-            ShortenHeartbeat();
-            run.Start();
+            StartRun(run);
             // the original issue: a line when a task starts, as there is when it finishes.
             _log.WriteLine($"{delivery.DeliveryId}: started{(delivery.Role is { Length: > 0 } role ? $" for {role}" : "")} with {AgentKinds.DisplayName(agent.Adapter.Kind)}"
                 + (delivery.Attempt > 1 ? $" (attempt {delivery.Attempt})." : "."));
         }
-        _ = run.Completion.ContinueWith(t => Finished(run, t), CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default);
         return new DeliveryDecision { Accepted = true };
+    }
+
+    // The caller holds _gate.
+    private void StartRun(AgentRun run)
+    {
+        _runs[run.DeliveryId] = run;
+        _ext.WorkActivityChanged?.Invoke(true);
+        if (_runs.Count == 1) _resources.SetBusy(true);
+        ShortenHeartbeat();
+        run.Start();
+        _ = run.Completion.ContinueWith(t => Finished(run, t), CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default);
     }
 
     /// <summary>Stops a run and settles it as cancelled. False when it isn't running here.</summary>
@@ -428,7 +441,7 @@ public sealed class RunnerEngine : IAsyncDisposable
             }
             _draining = true;
             tasks = _runs.Values.Select(run =>
-                $"{(run.Delivery.Envelope.Title ?? run.Delivery.Envelope.Type).ReplaceLineEndings(" ")} ({AgentKinds.DisplayName(run.AgentKind)})").ToArray();
+                $"{(run.Delivery.Envelope.Title ?? run.Delivery.Envelope.Type).ReplaceLineEndings(" ")} ({(run.RunningAgentKind is { } kind ? AgentKinds.DisplayName(kind) : run.Delivery.RunnerAction?.Kind)})").ToArray();
         }
         _log.WriteLine(tasks.Length == 0
             ? $"Update to {request.Version} requested; no running tasks to wait for."

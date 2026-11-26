@@ -472,7 +472,7 @@ internal static class ContractSamples
             Instructions = Instructions, RunEnvironment = RunEnv, HeartbeatSeconds = 60, Links = [Link], ProjectKey = "ado:contoso/web#123", ProjectOwner = Subject, InboxOwner = Subject,
             RequireRunApproval = true, Model = "claude-haiku-4-5", EconomyModel = true, CostCap = CostCap,
         },
-        new DeliveryDecision { Accepted = false, Reason = DeclineReason.NotAccepted, Detail = "own projects only", Result = Result },
+        new DeliveryDecision { Accepted = false, Reason = DeclineReason.NotAccepted, Detail = "own projects only" },
         new CancelDelivery { DeliveryId = Dlv, ThreadId = Thr, Reason = "project cancelled" },
         new DrainRequest { Reason = "update", Deadline = T.AddHours(1), ManagedDrainId = "aci-operation", Resume = true },
         new RescanRequest { RequestedBy = Subject },

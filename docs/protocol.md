@@ -1020,8 +1020,7 @@ The service only dispatches workflow payloads when this feature is enabled.
   `open-pull-request` uses `openPullRequest` with `branchFrom`, `base`, and optional `autoMerge`;
   `record-walkthrough` uses `recordWalkthrough` with `url`;
   `roll-back` uses `rollBack` with `deploymentId`.
-  For an unsupported kind, the runner returns `accepted: false` and a
-  `DeliveryDecision.result` with `status: "failed"` and `failureCategory: "refused"`.
-  The service can use the terminal result directly from the delivery response.
+  For an unsupported kind, the runner accepts the delivery and settles it as
+  failed with `failureCategory: "refused"`, without starting an agent.
 - A `Ref` of kind `exhibit` carries an `exhibit` object with `name`,
   `mediaType`, `size` in bytes, and optional `caption`.

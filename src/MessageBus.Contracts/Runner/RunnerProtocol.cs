@@ -453,10 +453,7 @@ public sealed record TaskDelivery
 /// <summary>The runner's immediate answer to a delivery.</summary>
 public sealed record DeliveryDecision
 {
-    /// <summary>A terminal refusal for an unsupported workflow action.</summary>
-    public SettleResult? Result { get; init; }
-
-    /// <summary>Whether it will run it.</summary>
+    /// <summary>Whether the runner accepted responsibility for settling the delivery.</summary>
     public required bool Accepted { get; init; }
 
     /// <summary>Why not, when declined. The message returns to the queue without counting an attempt.</summary>

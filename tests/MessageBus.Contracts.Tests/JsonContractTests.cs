@@ -61,7 +61,7 @@ public class JsonContractTests
         var result = MessageBusJson.Deserialize<SettleResult>("""{"status":"succeeded","refs":[{"kind":"git.branch","id":"feature"}]}""")!;
         Assert.Null(result.Outcome);
         Assert.Null(Assert.Single(result.Refs).Exhibit);
-        Assert.Null(MessageBusJson.Deserialize<DeliveryDecision>("""{"accepted":true}""")!.Result);
+        Assert.True(MessageBusJson.Deserialize<DeliveryDecision>("""{"accepted":true}""")!.Accepted);
     }
 
     [Fact]
