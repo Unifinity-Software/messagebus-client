@@ -98,7 +98,7 @@ public sealed record RunnerExtensions
 /// </summary>
 public sealed class RunnerEngine : IAsyncDisposable
 {
-    private readonly RunnerActions _actions = new([]);
+    private readonly RunnerActions _actions;
     private readonly RunnerOptions _options;
     private readonly IRunnerHostContext _host;
     private readonly IRunnerServiceClient _service;
@@ -163,6 +163,7 @@ public sealed class RunnerEngine : IAsyncDisposable
         _slots = Math.Clamp(options.Slots, 1, SlotAdvice.SlotCeiling);
         _host = host;
         _time = time;
+        _actions = new([new RunCommandAction(time)]);
         _log = TextWriter.Synchronized(log);
         _ext = extensions ?? new RunnerExtensions();
         _service = _ext.Readiness?.Watch(service) ?? service;
@@ -245,6 +246,9 @@ public sealed class RunnerEngine : IAsyncDisposable
         {
             return Decline(DeclineReason.MachineNotReady, "This dedicated runner accepts only required Node verification deliveries.");
         }
+        var handler = delivery.RunnerAction is { } requested ? _actions.Find(requested) : null;
+        if (handler is not null && (delivery.Verification is not null || delivery.Envelope.Verification is not null))
+            return Decline(DeclineReason.VerificationUnavailable, "Runner actions cannot perform required Node verification.");
         AgentRun run;
         if (delivery.Envelope.Target is InboxTarget && delivery.Envelope.Type == ProgressRequestKinds.GitHistoryMessageType)
         {
@@ -273,6 +277,15 @@ public sealed class RunnerEngine : IAsyncDisposable
             if (delivery.Instructions is { } instructions && _ext.Instructions.Verify(instructions) is { } bad)
             {
                 return Decline(DeclineReason.BadInstructions, bad);
+            }
+            if (handler is not null)
+            {
+                if (!_ext.Sandbox.IsolationEnabled)
+                    return Decline(DeclineReason.MachineNotReady, "Runner actions require run isolation.");
+                var (actionProfile, _) = EffectiveProfile(delivery);
+                StartRun(new AgentRun(_services, delivery, handler, actionProfile));
+                _log.WriteLine($"{delivery.DeliveryId}: started {handler.Kind}.");
+                return new DeliveryDecision { Accepted = true };
             }
             if (ResolveAgent(delivery.AgentId) is not { } agent)
             {

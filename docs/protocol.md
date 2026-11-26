@@ -1021,7 +1021,7 @@ The service only dispatches workflow payloads when this feature is enabled.
   Each input contains `fromStep`, `threadId`, and `what`.
 - `TaskDelivery.runnerAction` is an optional request to the runner. Its `kind`
   identifies the corresponding parameters object:
-  `run-command` uses `runCommand` with `command`;
+  `run-command` uses `runCommand` with `command`, optional checkout-relative `folder` (defaults to the root), and optional `timeLimitMinutes` (defaults to 30);
   `open-pull-request` uses `openPullRequest` with `branchFrom`, `base`, and optional `autoMerge`;
   `record-walkthrough` uses `recordWalkthrough` with `url`;
   `roll-back` uses `rollBack` with `deploymentId`.

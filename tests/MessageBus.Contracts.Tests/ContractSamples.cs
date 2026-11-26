@@ -43,7 +43,7 @@ internal static class ContractSamples
         JobId = "job_demo", StepId = "review", StepName = "Review", Round = 2,
         AllowedOutcomes = ["approved", "changes-needed"], Inputs = [ReviewInput],
     };
-    private static readonly RunCommandParameters CommandAction = new() { Command = "dotnet build" };
+    private static readonly RunCommandParameters CommandAction = new() { Command = "dotnet build", Folder = "src", TimeLimitMinutes = 10 };
     private static readonly OpenPullRequestParameters PullRequestAction = new() { BranchFrom = "code", Base = "main", AutoMerge = true };
     private static readonly RecordWalkthroughParameters WalkthroughAction = new() { Url = "https://example.com/demo" };
     private static readonly RollBackParameters RollBackAction = new() { DeploymentId = "deployment_demo" };

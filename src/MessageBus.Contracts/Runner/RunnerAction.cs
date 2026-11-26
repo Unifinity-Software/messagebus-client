@@ -40,6 +40,12 @@ public sealed record RunCommandParameters
 {
     /// <summary>The command specified by the published workflow.</summary>
     public required string Command { get; init; }
+
+    /// <summary>A folder relative to the checkout root, which is the default.</summary>
+    public string? Folder { get; init; }
+
+    /// <summary>The command time limit in minutes. Defaults to 30.</summary>
+    public int? TimeLimitMinutes { get; init; }
 }
 
 /// <summary>Parameters for opening a pull request.</summary>
