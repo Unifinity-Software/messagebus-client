@@ -59,6 +59,8 @@ public sealed record RunToolsRequest(RunWorkspace Workspace, TaskDelivery Delive
     public Action<string, MessageBus.Contracts.Mcp.McpError>? Refused { get; init; }
 
     internal Action<MessageBus.Contracts.Mcp.SettleInput>? RecordVerifiedTaskSettle { get; init; }
+
+    internal Action<string>? RecordStepOutcome { get; init; }
 }
 
 /// <summary>

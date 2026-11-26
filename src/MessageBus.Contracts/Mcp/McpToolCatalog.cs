@@ -279,13 +279,22 @@ public static class McpToolCatalog
         }
         if (input == typeof(SettleInput) && node["properties"] is JsonObject settle)
         {
-            if (local) settle.Remove("attempt");
+            if (local)
+            {
+                settle.Remove("attempt");
+                settle["outcome"] = new JsonObject
+                {
+                    ["type"] = "string",
+                    ["description"] = "Required for workflow steps. Use an exact outcome word from the task prompt.",
+                };
+            }
+            else settle.Remove("friction");
             settle.Remove("frictionOnly");
-            if (!local) settle.Remove("friction");
         }
         // The runner reports usage and the exit code from the CLI's own output; an agent doesn't know them.
         if (local && input == typeof(SettleInput) && node["properties"]?["result"]?["properties"] is JsonObject result)
         {
+            result.Remove("outcome");
             result.Remove("usage");
             result.Remove("exitCode");
             result.Remove("frictionKinds");

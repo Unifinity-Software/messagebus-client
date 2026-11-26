@@ -1016,6 +1016,13 @@ Clients check the configured service for this token before sending workflow fiel
 The service only dispatches workflow payloads when this feature is enabled.
 
 - `SettleResult.outcome` is the optional outcome word selected for the step.
+  The runner's local `settle` tool accepts a top-level `outcome` argument.
+  When the delivery has a step context, the tool requires an exact, case-sensitive
+  match to an entry in `allowedOutcomes`, excluding the built-in `timed-out`.
+  A missing or invalid value returns `invalid-input` for `outcome` and lists the
+  allowed words so the agent can retry. The runner sends the accepted word in its
+  final `SettleResult.outcome`. A run without an accepted settle reports no
+  outcome. The local tool ignores the argument for deliveries without step context.
 - `TaskDelivery.stepContext` is optional service-provided metadata with
   `jobId`, `stepId`, `stepName`, `round`, `allowedOutcomes`, and `inputs`.
   Each input contains `fromStep`, `threadId`, and `what`.

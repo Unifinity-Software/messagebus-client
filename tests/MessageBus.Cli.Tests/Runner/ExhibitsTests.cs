@@ -116,7 +116,7 @@ public sealed class ExhibitsTests
         Assert.Equal("MbusKey test", uploaded.Header("Authorization"));
 
         var settled = await PipeRunTools.CallAsync(session.Variables[RunToolsVariables.File], McpToolNames.Settle,
-            new JsonObject { ["threadId"] = delivery.Envelope.ThreadId, ["result"] = new JsonObject
+            new JsonObject { ["threadId"] = delivery.Envelope.ThreadId, ["outcome"] = "done", ["result"] = new JsonObject
             {
                 ["status"] = "succeeded", ["refs"] = new JsonArray(new JsonObject
                 { ["kind"] = "exhibit", ["id"] = "ex_test", ["exhibit"] = new JsonObject { ["name"] = "wrong.txt", ["mediaType"] = "text/plain", ["size"] = 1 } }),

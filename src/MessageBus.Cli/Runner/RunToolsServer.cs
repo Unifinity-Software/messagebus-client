@@ -52,6 +52,7 @@ internal static class RunToolsServer
                 ProposalAuthority = request.ProposalAuthority,
                 Refused = request.Refused,
                 RecordVerifiedTaskSettle = request.RecordVerifiedTaskSettle,
+                RecordStepOutcome = request.RecordStepOutcome,
                 PrepareGit = start => InRun(start, request, git),
                 Session = request.Session,
             };

@@ -79,6 +79,7 @@ internal sealed class AgentRun
     private readonly SettleResult? _immediateResult;
     private readonly IRunnerAction? _action;
     private SettleInput? _verifiedAgentSettle;
+    private string? _stepOutcome;
     private VerificationResult? _verification;
     private int _resourceRoot;
 
@@ -418,6 +419,7 @@ internal sealed class AgentRun
                     Session = Resume,
                     ProposalAuthority = ProposalAuthority,
                     RecordVerifiedTaskSettle = verifier is null ? null : input => Volatile.Write(ref _verifiedAgentSettle, input),
+                    RecordStepOutcome = Delivery.StepContext is null ? null : word => Volatile.Write(ref _stepOutcome, word),
                     Refused = (name, error) =>
                     {
                         if (name == McpToolNames.Settle) Volatile.Write(ref _lastRefusal, error.Message);
@@ -523,7 +525,10 @@ internal sealed class AgentRun
                 : Compose(Reason, _stopDetail, failure, exitCode, outcome, agentSettle, tail,
                 _s.Time.GetElapsedTime(started), workspace?.WorkTree,
                 // A message to a session inbox is an answer the session reads; there is nothing for it to settle.
-                answerExpected: Delivery.Envelope.Target is not InboxTarget, runnerNote: sandboxSettleNote, refusal: refusal);
+                answerExpected: Delivery.Envelope.Target is not InboxTarget, runnerNote: sandboxSettleNote, refusal: refusal) with
+            {
+                Outcome = Reason == StopReason.None && agentSettle is not null ? Volatile.Read(ref _stepOutcome) : null,
+            };
             result = CurrentResult();
             if (result.Status is SettleStatus.Failed or SettleStatus.Abandoned && workspace is not null
                 && File.Exists(MessageBus.Mcp.RoleKeyReadiness.FileName(workspace.SettleFile)))

@@ -119,7 +119,7 @@ internal sealed partial class LocalTools : IAsyncDisposable
                 McpToolNames.Watch => Ok(await WatchAsync(Read<WatchInput>(arguments), ct)),
                 McpToolNames.Inbox => Ok(await InboxAsync(Read<InboxInput>(arguments), ct)),
                 McpToolNames.Progress => Ok(await ProgressAsync(Read<ProgressInput>(arguments), ct)),
-                McpToolNames.Settle => Ok(await SettleAsync(Read<SettleInput>(arguments), ct)),
+                McpToolNames.Settle => Ok(await SettleAsync(Read<SettleInput>(arguments), arguments, ct)),
                 McpToolNames.ListWorkflows => Ok(await ListWorkflowsAsync(ct)),
                 McpToolNames.StartJob => Ok(await StartJobAsync(Read<StartJobInput>(arguments), ct)),
                 McpToolNames.JobStatus => Ok(await JobStatusAsync(Read<JobStatusInput>(arguments), ct)),
@@ -1247,16 +1247,31 @@ internal sealed partial class LocalTools : IAsyncDisposable
         await ForwardAsync<ProgressInput, ProgressResult>(McpToolNames.Progress,
             IsRunnerTask(input.ThreadId, input.DeliveryId) ? input with { DeliveryId = RunnerDeliveryId(Delivery!) } : input, ct);
 
-    private async Task<SettleOutput> SettleAsync(SettleInput input, CancellationToken ct)
+    private async Task<SettleOutput> SettleAsync(SettleInput input, IDictionary<string, JsonElement>? arguments, CancellationToken ct)
     {
-        if (!IsRunnerTask(input.ThreadId, input.DeliveryId) || _o.SettleFile is null)
+        var runnerTask = IsRunnerTask(input.ThreadId, input.DeliveryId) && _o.SettleFile is not null;
+        if (input.Result is null) throw McpToolException.Invalid("result", "Give a result.");
+        input = input with { Result = input.Result with { Outcome = null } };
+        if (!runnerTask)
             return await SettleCoreAsync(input, runnerTask: false, ct);
+
+        string? outcome = null;
+        if (Delivery!.StepContext is { } step)
+        {
+            if (arguments is not null && arguments.TryGetValue("outcome", out var value) && value.ValueKind == JsonValueKind.String)
+                outcome = value.GetString();
+            var allowed = step.AllowedOutcomes.Where(word => word != "timed-out").ToArray();
+            if (string.IsNullOrEmpty(outcome) || !allowed.Contains(outcome, StringComparer.Ordinal))
+                throw McpToolException.Invalid("outcome", $"Use one of the allowed outcomes: {string.Join(", ", allowed)}.");
+        }
 
         // A pinned settle must clear any fallback written by an earlier call.
         await _runnerSettleGate.WaitAsync(ct);
         try
         {
-            return await SettleCoreAsync(input with { DeliveryId = RunnerDeliveryId(Delivery!) }, runnerTask: true, ct);
+            var output = await SettleCoreAsync(input with { DeliveryId = RunnerDeliveryId(Delivery!) }, runnerTask: true, ct);
+            if (outcome is not null) _o.RecordStepOutcome?.Invoke(outcome);
+            return output;
         }
         finally
         {
