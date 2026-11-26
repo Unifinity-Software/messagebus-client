@@ -1,5 +1,6 @@
 using System.Text;
 using MessageBus.Contracts.Mcp;
+using MessageBus.Contracts.Messaging;
 using MessageBus.Contracts.Runner;
 
 namespace MessageBus.Cli.Runner;
@@ -45,6 +46,7 @@ public static class TaskPrompt
         }
         sb.Append("</untrusted-task-data>\n\n");
 
+        if (delivery.StepContext is { } step) AppendWorkflowStep(sb, step);
         AppendStepInputs(sb, delivery);
 
         sb.Append("## When you finish\n\n");
@@ -58,6 +60,32 @@ public static class TaskPrompt
         sb.Append("If anything got in the way, add a settle friction note: a kind and one sentence.\n");
         sb.Append("Leave run caches and scratch/build folders for the runner to remove according to the role cleanup setting; do not delete them recursively yourself.\n");
         return sb.ToString();
+    }
+
+    private static void AppendWorkflowStep(StringBuilder sb, StepContext step)
+    {
+        sb.Append("## Workflow step\n\n");
+        sb.Append(step.StepName.ReplaceLineEndings(" ")).Append(" (round ").Append(step.Round).Append(")\n\n");
+        sb.Append("Give `settle` one of these exact `outcome` values. If the tool rejects the value, correct it and call again.\n\n");
+        foreach (var word in step.AllowedOutcomes.Where(word => word != "timed-out"))
+        {
+            var label = word.Replace('-', ' ').ReplaceLineEndings(" ");
+            var description = word switch
+            {
+                "approved" => "Use when the work meets the review criteria.",
+                "changes-needed" => "Use when the work needs revisions.",
+                "passed" => "Use when the required checks passed.",
+                "failed" => "Use when the work or checks failed.",
+                "done" => "Use when the requested work is complete.",
+                "opened" => "Use when the pull request was opened.",
+                "declined" => "Use when the request was declined.",
+                _ => "Use when this outcome matches the step's instructions and result.",
+            };
+            sb.Append("- ").Append(label);
+            if (label != word) sb.Append(" (`").Append(word.ReplaceLineEndings(" ")).Append("`)");
+            sb.Append(" — ").Append(description).Append('\n');
+        }
+        sb.Append('\n');
     }
 
     private static void AppendStepInputs(StringBuilder sb, TaskDelivery delivery)

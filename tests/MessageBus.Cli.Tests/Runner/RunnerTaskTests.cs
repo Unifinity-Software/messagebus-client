@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text.Json.Nodes;
 using MessageBus.Cli.Readiness;
 using MessageBus.Cli.Runner;
 using MessageBus.Cli.Tests.Infrastructure;
@@ -8,6 +9,8 @@ using MessageBus.Contracts.Mcp;
 using MessageBus.Contracts.Messaging;
 using MessageBus.Contracts.Roles;
 using MessageBus.Contracts.Runner;
+using MessageBus.Mcp;
+using MessageBus.Tests.Shared;
 using Microsoft.Extensions.Time.Testing;
 using Xunit;
 
@@ -20,6 +23,114 @@ namespace MessageBus.Cli.Tests.Runner;
 /// </summary>
 public sealed class RunnerTaskTests
 {
+    [Theory]
+    [InlineData(false, false, null)]
+    [InlineData(false, false, "ignored")]
+    [InlineData(true, false, "changes-needed")]
+    [InlineData(true, true, "changes-needed")]
+    [InlineData(true, true, null)]
+    public async Task Workflow_outcomes_are_validated_before_the_runner_reports_them(bool workflow, bool tryInvalid, string? outcome)
+    {
+        Assert.SkipWhen(OperatingSystem.IsWindows() && InsideRun.Now, "Windows task sandbox blocks named-pipe clients.");
+        using var machine = new TestMachine();
+        using var http = new HttpClient(machine.Server, disposeHandler: false) { BaseAddress = new Uri(FakeServer.Url + "/") };
+        var pipe = new PipeRunTools((request, stream, ct) => LocalServer.RunAsync(new LocalServerOptions
+        {
+            Http = http, Links = machine.Server.Links, WorkspaceId = "ws_test", MachineId = "mch_test",
+            ConfigDirectory = machine.MbusFolder, Input = stream, Output = stream,
+            Delivery = request.Delivery, SettleFile = request.Workspace.SettleFile,
+            Scope = RunToolScope.For(request.Delivery, request.Workspace.Root),
+            RecordStepOutcome = request.RecordStepOutcome,
+        }, ct), TextWriter.Null);
+        var tools = new AgentSettleTools(pipe);
+        await using var h = new RunnerHarness(extensions: e => e with { Tools = tools });
+        var task = h.Task("dlv_outcome", directives: d => d["settle"] = "no");
+        if (workflow)
+        {
+            task = task with
+            {
+                StepContext = new StepContext
+                {
+                    JobId = "job_test", StepId = "review", StepName = "Code review", Round = 2,
+                    AllowedOutcomes = ["approved", "changes-needed", "timed-out"], Inputs = [],
+                },
+            };
+        }
+
+        Assert.True((await h.DeliverAsync(task)).Accepted);
+        var session = await tools.Started.Task.WaitAsync(TestContext.Current.CancellationToken);
+        var arguments = new JsonObject
+        {
+            ["threadId"] = task.Envelope.ThreadId,
+            ["deliveryId"] = task.DeliveryId,
+            ["result"] = new JsonObject { ["status"] = "succeeded", ["outcome"] = "approved" },
+        };
+        try
+        {
+            if (tryInvalid)
+            {
+                foreach (var invalid in new string?[] { null, "Changes-needed", "timed-out" })
+                {
+                    arguments["outcome"] = invalid;
+                    var refused = await CallAsync();
+                    Assert.Equal(McpErrorCodes.InvalidInput, refused.Error?.Code);
+                    Assert.Equal("outcome", refused.Error?.Field);
+                    Assert.Contains("approved, changes-needed", refused.Error?.Message);
+                    Assert.DoesNotContain("timed-out", refused.Error?.Message);
+                }
+            }
+            if (!workflow || outcome is not null)
+            {
+                arguments["outcome"] = outcome;
+                var accepted = await CallAsync();
+                Assert.True(accepted.Succeeded, accepted.Error?.Message);
+            }
+        }
+        finally
+        {
+            tools.CallsComplete.TrySetResult();
+        }
+        var result = (await h.Service.SettledAsync(task.DeliveryId)).Result;
+        Assert.Equal(workflow ? outcome : null, result.Outcome);
+        Assert.Equal(workflow && outcome is null ? SettleStatus.Failed : SettleStatus.Succeeded, result.Status);
+        var prompt = File.ReadAllText(Path.Combine(Path.GetDirectoryName(h.WorkTreeOf(task.DeliveryId))!, "prompt.md"));
+        if (workflow)
+        {
+            Assert.Contains("Code review (round 2)", prompt);
+            Assert.Contains("changes needed (`changes-needed`) — Use when", prompt);
+            Assert.DoesNotContain("timed-out", prompt);
+        }
+        else
+        {
+            Assert.DoesNotContain("## Workflow step", prompt);
+        }
+
+        Task<ScriptResult> CallAsync() => PipeRunTools.CallAsync(session.Variables[RunToolsVariables.File], McpToolNames.Settle,
+            arguments, TestContext.Current.CancellationToken);
+    }
+
+    private sealed class AgentSettleTools(IRunTools pipe) : IRunTools
+    {
+        public TaskCompletionSource<RunToolsSession> Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource CallsComplete { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public async Task<RunToolsSession> StartAsync(RunToolsRequest request, CancellationToken cancellationToken)
+        {
+            var session = await pipe.StartAsync(request, cancellationToken);
+            Started.SetResult(session);
+            try
+            {
+                await CallsComplete.Task.WaitAsync(cancellationToken);
+                return session;
+            }
+            catch
+            {
+                await session.DisposeAsync();
+                throw;
+            }
+        }
+    }
+
     [Fact]
     public async Task A_fresh_runner_role_key_refusal_is_reported_on_the_callback()
     {
