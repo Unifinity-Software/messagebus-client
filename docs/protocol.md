@@ -1090,3 +1090,56 @@ Cancellation skips pickup. Uploaded refs are included in the action's settlement
 individual refusals add the filename and refusal message to its summary, leave the
 command's outcome unchanged, and allow the other files to upload. Without step
 context the runner does not create the folder, set the variable, or upload files.
+
+### Workflow and job CLI calls
+
+`mbus job start|list|show|stop|retry|open` and `mbus workflow list|show|check`
+use the authenticated HTTP client, with the configured server's API base path
+preserved. Before workflow requests the client checks `TargetCapabilities` for
+`workflows`. Missing support, or a 404 from any workflow route, reports
+"Workflows are not switched on for this workspace." and exits non-zero.
+Hands-on `job find|ensure|complete` use the existing project MCP tools without
+requiring workflows. `project find|ensure|complete` remain aliases for one release;
+a marker in the CLI config directory records the one-time rename notice on stderr.
+All commands accept `--json`.
+
+Routes below are relative to `/api/w/{workspaceId}/`:
+
+- `GET workflows` returns a plain array with `id`, `name`, `description`, `state`,
+  optional `publishedVersion`, `hasDraft` and `settings`. `GET workflows/{id}`
+  also returns optional `draft` and `published` paths. Settings include
+  `startsWhen`, `runsOn`, optional `spendingLimitUsd`, `loopLimit`, `whoCanStart`,
+  `asks` and `keepExhibitsLocked`. Paths have `schema`, `steps` and `arrows`.
+- `POST workflows/check` accepts a path directly and returns `{ok, problems}`.
+  Problems have `kind`, `message`, optional `stepId` and optional `severity`;
+  missing severity means error. The CLI prints errors before warnings and exits
+  successfully only when there are no errors.
+- `POST jobs` accepts `{workItem, workflowId, instructions?, limitUsd?, runsOn?}`
+  and returns a job. The CLI resolves a published workflow by id or name without
+  regard to case, then prints `<server base URL>/jobs/<id>` and returns immediately.
+- `GET jobs?state=&workflowId=&startedBy=` returns a plain job array.
+  `--mine` resolves `startedBy` from `GET /api/caller`'s `subjectId`.
+  `GET jobs/{id}` returns `id`, `title`, `workItem`, `drivenBy`, optional
+  `workflow` (`id`, `name`, `version`), `state`, optional `startedBy`, `startedAt`,
+  `runsOn`, `spentUsd`, optional `limitUsd`, optional `path`, `activeStepIds`,
+  and `steps`. A step run has `stepId`, `round`, `state` and optional `outcome`,
+  `threadId`, `agent`, `machineId`, `startedAt`, `endedAt`, `costUsd`, `waitingOn`.
+  Waiting details depend on `kind`: `checks` (`pullRequest`, `done`, `total`),
+  `person` (`who`), `agent` (`role`), `merge` (`pullRequest`), `deployment`
+  (`environment`) or `delay` (`until`). Missing and null optional fields are equivalent.
+- `POST jobs/{id}/stop` and `POST jobs/{id}/steps/{stepId}/retry` have no request
+  body. The CLI accepts a JSON response or an empty successful response.
+- `GET jobs/{id}/exhibits` returns a plain array with `id`, `stepId`, `round`,
+  `kind`, `name`, optional `caption`, `mediaType`, `size`, `createdAt`, `locked`.
+  `GET jobs/{id}/exhibits/{exhibitId}` returns bytes. Only locked exhibits are
+  downloaded by `job open`; unlocked exhibits are listed with their job's link.
+
+Locked exhibit bytes start with ASCII `mbus-sealed-exhibit/1\n`, followed by one
+line of compact `EncryptionInfo` JSON serialized with `MessageBusJson`, then
+`\n`, then the stream produced by `MessageCrypto.SealAsync` for the workspace key.
+The CLI uses the machine's workspace grants and `MessageCrypto.OpenAsync` to open
+them locally. Unsupported headers and failed authentication are refused; incomplete
+plaintext is removed. Files are saved as `<exhibit id>-<name>` under `--out`, or
+`./mbus-exhibits/<job id>/`, without overwriting existing files or trusting paths
+in exhibit names. The CLI's `--json` open result includes `url` and, for saved
+locked exhibits, `path` alongside their metadata.

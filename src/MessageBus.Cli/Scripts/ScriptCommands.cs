@@ -4,6 +4,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using MessageBus.Attachments.Client;
 using MessageBus.Cli.Commands;
+using MessageBus.Cli.Configuration;
 using MessageBus.Cli.Hosting;
 using MessageBus.Contracts;
 using MessageBus.Contracts.Attachments;
@@ -255,14 +256,14 @@ internal static class ScriptCommands
             && (Script.Child(thread, "result") is not { } result || Script.Text(result, "status") is null or "succeeded");
     }
 
-    private static Command Project(CliHost host, CommonOptions options)
+    internal static Command Project(CliHost host, CommonOptions options, string name = "project")
     {
-        var command = new Command("project", "Find, coordinate or complete a project.");
+        var command = new Command(name, "Find, coordinate or complete a hands-on job.");
 
         var findKey = new Argument<string>("key") { Description = "A project key or claimed work item." };
         var findJson = ScriptRunner.JsonOption();
         var find = new Command("find", "Look up a visible project without creating one.") { findKey, findJson };
-        find.SetAction((parse, ct) => ScriptRunner.RunAsync(host, parse, options, "project find", parse.GetValue(findJson), async (script, ct) =>
+        find.SetAction((parse, ct) => RunAsync(parse, "find", parse.GetValue(findJson), async (script, ct) =>
             await script.ReportAsync(await FindProjectAsync(script, parse.GetValue(findKey)!, ct), value =>
             {
                 if (Script.Child(value, "project") is { } project) WriteProject(script, project);
@@ -281,7 +282,7 @@ internal static class ScriptCommands
         scope.AcceptOnlyFromAmong("workspace", "owner-runners");
         var ensureJson = ScriptRunner.JsonOption();
         var ensure = new Command("ensure", "Find or create a project and acquire any requested claims.") { key, title, claim, inbox, scope, ensureJson };
-        ensure.SetAction((parse, ct) => ScriptRunner.RunAsync(host, parse, options, "project ensure", parse.GetValue(ensureJson), async (script, ct) =>
+        ensure.SetAction((parse, ct) => RunAsync(parse, "ensure", parse.GetValue(ensureJson), async (script, ct) =>
         {
             var claims = parse.GetValue(claim) ?? [];
             var coordinator = parse.GetValue(inbox);
@@ -310,7 +311,7 @@ internal static class ScriptCommands
         status.AcceptOnlyFromAmong("completed", "failed");
         var completeJson = ScriptRunner.JsonOption();
         var complete = new Command("complete", "Mark a project completed or failed.") { target, summary, status, completeJson };
-        complete.SetAction((parse, ct) => ScriptRunner.RunAsync(host, parse, options, "project complete", parse.GetValue(completeJson), async (script, ct) =>
+        complete.SetAction((parse, ct) => RunAsync(parse, "complete", parse.GetValue(completeJson), async (script, ct) =>
         {
             var (id, error) = await ResolveProjectAsync(script, parse.GetValue(target)!, ct);
             if (error is not null) return await script.FailAsync(error);
@@ -324,6 +325,22 @@ internal static class ScriptCommands
         command.Subcommands.Add(complete);
 
         return command;
+
+        Task<int> RunAsync(ParseResult parse, string subcommand, bool json, Func<Script, CancellationToken, Task<int>> body, CancellationToken ct)
+        {
+            if (name == "project")
+            {
+                DurableProfileFile.CreatePrivateDirectory(host.ConfigDirectory);
+                var marker = Path.Combine(host.ConfigDirectory, "project-alias-notice-shown");
+                try
+                {
+                    using var file = new FileStream(marker, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+                    host.Error.WriteLine("`mbus project` is now `mbus job`; the old name goes away in the next release.");
+                }
+                catch (IOException) when (File.Exists(marker)) { }
+            }
+            return ScriptRunner.RunAsync(host, parse, options, $"{name} {subcommand}", json, body, ct);
+        }
     }
 
     private static Task<ScriptResult> FindProjectAsync(Script script, string key, CancellationToken ct) =>
