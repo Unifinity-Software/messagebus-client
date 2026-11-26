@@ -1,4 +1,5 @@
 using MessageBus.Contracts.Messaging;
+using MessageBus.Contracts.Mcp;
 using MessageBus.Contracts.Roles;
 using MessageBus.Contracts.Runner;
 
@@ -11,6 +12,14 @@ namespace MessageBus.Cli.Runner;
 /// </summary>
 public interface IBundleSource
 {
+    /// <summary>Reads and decrypts the latest result reply on an earlier step's thread, or null when unavailable.</summary>
+    Task<ReceivedMessage?> ReadStepResultAsync(TaskDelivery delivery, StepInput input, CancellationToken cancellationToken) =>
+        Task.FromResult<ReceivedMessage?>(null);
+
+    /// <summary>Downloads and decrypts a result attachment to the supplied path, or returns null when unavailable.</summary>
+    Task<string?> FetchStepAttachmentAsync(AttachmentRef attachment, string path, CancellationToken cancellationToken) =>
+        Task.FromResult<string?>(null);
+
     /// <summary>A decrypted copy of <paramref name="bundle"/> under <paramref name="runDirectory"/>, or null when this source can't get it.</summary>
     Task<string?> FetchAsync(TaskDelivery delivery, AttachmentRef bundle, string runDirectory, CancellationToken cancellationToken);
 
@@ -59,6 +68,21 @@ public sealed partial class RunWorkspace : IDisposable
     internal string? PrivateSocketDirectory { get; set; }
 
     internal bool SandboxCleanupIncomplete { get; set; }
+
+    internal PreparedStepInputs? PreparedInputs { get; set; }
+
+    internal async Task<string?> ImportStepBranchAsync(string git, string file, string branch,
+        Func<ProcessLaunch, ProcessLaunch> wrap, CancellationToken ct)
+    {
+        Directory.CreateDirectory(WorkTree);
+        if (!Directory.Exists(Path.Combine(WorkTree, ".git"))
+            && await GitAsync(git, ["init", "--quiet", WorkTree], wrap, ct).ConfigureAwait(false) is { } initError) return initError;
+        var reference = "refs/remotes/mbus-input/" + Guid.NewGuid().ToString("N");
+        return await GitAsync(git, ["-C", WorkTree, "check-ref-format", "refs/heads/" + branch], wrap, ct).ConfigureAwait(false)
+            ?? await GitAsync(git, ["-C", WorkTree, "bundle", "verify", file], wrap, ct).ConfigureAwait(false)
+            ?? await GitAsync(git, ["-C", WorkTree, "fetch", "--quiet", "--no-tags", file, "refs/heads/" + branch + ":" + reference], wrap, ct).ConfigureAwait(false)
+            ?? await GitAsync(git, ["-C", WorkTree, "checkout", "--quiet", "-B", branch, reference], wrap, ct).ConfigureAwait(false);
+    }
 
     // Chosen from the trusted adapter, before checkout, never from task content.
     internal Contracts.Machines.AgentKind? AgentKind { get; set; }
@@ -174,7 +198,7 @@ public sealed partial class RunWorkspace : IDisposable
             var file = bundle is null || bundles is null ? null : await bundles.FetchAsync(delivery, bundle, Root, cancellationToken).ConfigureAwait(false);
             if (file is null)
             {
-                if (delivery.RunnerAction is not null)
+                if (bundle is not null && delivery.RunnerAction is not null)
                     return "The workflow action could not check out the task's code bundle.";
 
                 // With no decrypted bundle here, start from an empty

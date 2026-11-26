@@ -1019,6 +1019,21 @@ The service only dispatches workflow payloads when this feature is enabled.
 - `TaskDelivery.stepContext` is optional service-provided metadata with
   `jobId`, `stepId`, `stepName`, `round`, `allowedOutcomes`, and `inputs`.
   Each input contains `fromStep`, `threadId`, and `what`.
+  Before launching an agent, a runner reads each `result` or `branch` input's latest
+  `.reply` message through the existing thread-messages route, opens its body with
+  the machine's keys, and downloads attachments through the existing attachment
+  download-link route. Stored bodies use the existing message-body route; no
+  plaintext result is sent to the service. The configured service must advertise
+  `workflows` before input retrieval starts.
+  Inputs appear under `.mbus/inputs/<fromStep>/` in the checkout: `summary.txt`,
+  `result.md`, document attachments under their own names, and `exhibits.json`
+  (the reply's exhibit metadata array) when present. A `branch` input also imports
+  and checks out the bundle's named local branch and records it in `branch.txt`.
+  The runner excludes `/.mbus/` through `.git/info/exclude`, and the prompt lists
+  the relative input folders. `work-item` needs no fetch; unknown `what` values
+  are ignored with a log line. An unavailable, invalid, or undecryptable input
+  settles the run as failed with `failureCategory: "unreadable"` and the source
+  step in its error, before any agent starts. Existing routes and payloads are unchanged.
 - `TaskDelivery.runnerAction` is an optional request to the runner. Its `kind`
   identifies the corresponding parameters object:
   `run-command` uses `runCommand` with `command`, optional checkout-relative `folder` (defaults to the root), and optional `timeLimitMinutes` (defaults to 30);

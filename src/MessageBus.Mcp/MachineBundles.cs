@@ -1,4 +1,6 @@
 using System.Text.Json;
+using System.Security.Cryptography;
+using System.Text;
 using MessageBus.Attachments.Client;
 using MessageBus.Contracts.Http;
 using MessageBus.Contracts.Json;
@@ -21,6 +23,8 @@ public sealed class MachineBundles : IDisposable
     private readonly MachineKeys _keys;
     private readonly TextWriter _log;
     private readonly TimeProvider _time;
+    private readonly HttpClient _api;
+    private readonly string _workspaceId;
 
     /// <param name="api">The service as this machine (signed; base address the server URL with a trailing slash).</param>
     /// <param name="links">A plain client for link URLs, with a long timeout.</param>
@@ -35,6 +39,8 @@ public sealed class MachineBundles : IDisposable
         Func<string?>? machineKeyPem = null, HttpClient? mcp = null)
     {
         _time = time ?? TimeProvider.System;
+        _api = api;
+        _workspaceId = workspaceId;
         _log = log;
         _mcp = mcp ?? api;
         _attachments = new AttachmentClient(api, links, workspaceId);
@@ -43,6 +49,50 @@ public sealed class MachineBundles : IDisposable
 
     /// <summary>Longest single inbox call while waiting for earlier history; the wait is made of several.</summary>
     public TimeSpan PollChunk { get; init; } = TimeSpan.FromSeconds(50);
+
+    /// <summary>Reads the latest result reply with this machine's keys, retaining sealed attachment metadata for download.</summary>
+    public async Task<ReceivedMessage?> ReadStepResultAsync(TaskDelivery delivery, StepInput input, CancellationToken ct)
+    {
+        if (delivery.Envelope.WorkspaceId != _workspaceId)
+            throw new InvalidOperationException("The step input belongs to another workspace.");
+        if (!await TargetCapabilities.SupportsAsync(_api, WorkflowCapabilities.Workflows, ct))
+            throw new InvalidOperationException("The service does not confirm support for workflow inputs.");
+        var threadPath = $"api/w/{Uri.EscapeDataString(_workspaceId)}/threads/{Uri.EscapeDataString(input.ThreadId)}/messages";
+        using var response = await _api.GetAsync(threadPath, ct);
+        response.EnsureSuccessStatusCode();
+        using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
+        var envelope = document.RootElement.EnumerateArray()
+            .Select(e => e.Deserialize<MessageEnvelope>(MessageBusJson.Options)!)
+            .Where(e => e.ThreadId == input.ThreadId && e.WorkspaceId == _workspaceId && e.Type.EndsWith(".reply", StringComparison.Ordinal))
+            .OrderBy(e => e.Time).ThenBy(e => e.Id, StringComparer.Ordinal).LastOrDefault();
+        if (envelope is null) return null;
+        byte[] bytes;
+        if (envelope.Body.Data is { } data) bytes = Convert.FromBase64String(data);
+        else
+        {
+            using var stored = await _api.GetAsync(threadPath + $"/{Uri.EscapeDataString(envelope.Id)}/body", ct);
+            stored.EnsureSuccessStatusCode();
+            bytes = await stored.Content.ReadAsByteArrayAsync(ct);
+        }
+        if (bytes.LongLength != envelope.Body.SizeBytes || Convert.ToHexStringLower(SHA256.HashData(bytes)) != envelope.Body.Sha256)
+            throw new CryptographicException("The result body does not match its size and SHA-256.");
+        var body = envelope.Encryption is { } encryption
+            ? await _keys.OpenAsync(bytes, encryption, ct)
+            : MessageBusJson.Deserialize<MessageBody>(Encoding.UTF8.GetString(bytes));
+        return body is null ? null : new ReceivedMessage { Envelope = envelope, Body = body, Decrypted = true };
+    }
+
+    /// <summary>Downloads an earlier result's attachment using this machine's keys and the existing attachment route.</summary>
+    public async Task<string?> FetchStepAttachmentAsync(AttachmentRef attachment, string path, CancellationToken ct)
+    {
+        var link = await _attachments.DownloadLinkAsync(attachment.Id, ct);
+        await _keys.WithRingAsync(async ring =>
+        {
+            await _attachments.DownloadToFileAsync(attachment, link, path, ring, ct);
+            return true;
+        }, ct);
+        return path;
+    }
 
     /// <summary>A decrypted copy of <paramref name="bundle"/> under <paramref name="runDirectory"/>, or null (logged) when it can't be had.</summary>
     public Task<string?> FetchAsync(TaskDelivery delivery, AttachmentRef bundle, string runDirectory, CancellationToken ct) =>
