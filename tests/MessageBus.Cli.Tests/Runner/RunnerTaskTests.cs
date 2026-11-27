@@ -24,12 +24,14 @@ namespace MessageBus.Cli.Tests.Runner;
 public sealed class RunnerTaskTests
 {
     [Theory]
-    [InlineData(false, false, null)]
-    [InlineData(false, false, "ignored")]
-    [InlineData(true, false, "changes-needed")]
-    [InlineData(true, true, "changes-needed")]
-    [InlineData(true, true, null)]
-    public async Task Workflow_outcomes_are_validated_before_the_runner_reports_them(bool workflow, bool tryInvalid, string? outcome)
+    [InlineData(false, false, null, false)]
+    [InlineData(false, false, "ignored", false)]
+    [InlineData(true, false, "changes-needed", false)]
+    [InlineData(true, true, "changes-needed", false)]
+    [InlineData(true, true, null, false)]
+    [InlineData(true, false, null, true)]
+    public async Task Workflow_outcomes_are_validated_before_the_runner_reports_them(
+        bool workflow, bool tryInvalid, string? outcome, bool failed)
     {
         Assert.SkipWhen(OperatingSystem.IsWindows() && InsideRun.Now, "Windows task sandbox blocks named-pipe clients.");
         using var machine = new TestMachine();
@@ -78,10 +80,24 @@ public sealed class RunnerTaskTests
                     Assert.Contains("approved, changes-needed", refused.Error?.Message);
                     Assert.DoesNotContain("timed-out", refused.Error?.Message);
                 }
+                arguments["result"]!["status"] = "failed";
+                arguments["outcome"] = "approved";
+                var failedVerdict = await CallAsync();
+                Assert.Equal(McpErrorCodes.InvalidInput, failedVerdict.Error?.Code);
+                Assert.Equal("result.status", failedVerdict.Error?.Field);
+                Assert.Contains("approved, changes-needed", failedVerdict.Error?.Message);
+                Assert.Contains("friction", failedVerdict.Error?.Message);
+                var settleFile = Path.Combine(Path.GetDirectoryName(h.WorkTreeOf(task.DeliveryId))!, "settle.json");
+                Assert.False(File.Exists(settleFile));
+                Assert.False(File.Exists(KeptAnswer.KeptFile(settleFile)));
             }
-            if (!workflow || outcome is not null)
+            if (!workflow || outcome is not null || failed)
             {
-                arguments["outcome"] = outcome;
+                arguments["result"]!["status"] = failed ? "failed" : "succeeded";
+                if (outcome is null)
+                    arguments.Remove("outcome");
+                else
+                    arguments["outcome"] = outcome;
                 var accepted = await CallAsync();
                 Assert.True(accepted.Succeeded, accepted.Error?.Message);
             }
@@ -97,6 +113,9 @@ public sealed class RunnerTaskTests
         if (workflow)
         {
             Assert.Contains("Code review (round 2)", prompt);
+            Assert.Contains("settle as `succeeded`", prompt);
+            Assert.Contains("settle friction notes", prompt);
+            Assert.Contains("settle as `failed` and omit `outcome`", prompt);
             Assert.Contains("changes needed (`changes-needed`) — Use when", prompt);
             Assert.DoesNotContain("timed-out", prompt);
         }

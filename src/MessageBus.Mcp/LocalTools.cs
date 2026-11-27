@@ -1258,10 +1258,18 @@ internal sealed partial class LocalTools : IAsyncDisposable
         string? outcome = null;
         if (Delivery!.StepContext is { } step)
         {
-            if (arguments is not null && arguments.TryGetValue("outcome", out var value) && value.ValueKind == JsonValueKind.String)
-                outcome = value.GetString();
             var allowed = step.AllowedOutcomes.Where(word => word != "timed-out").ToArray();
-            if (string.IsNullOrEmpty(outcome) || !allowed.Contains(outcome, StringComparer.Ordinal))
+            if (arguments is not null && arguments.TryGetValue("outcome", out var value) && value.ValueKind != JsonValueKind.Null)
+            {
+                if (value.ValueKind != JsonValueKind.String)
+                    throw McpToolException.Invalid("outcome", $"Use one of the allowed outcomes: {string.Join(", ", allowed)}.");
+                outcome = value.GetString();
+            }
+            var failed = input.Result.Status == SettleStatus.Failed;
+            if (failed && !string.IsNullOrEmpty(outcome) && outcome != "failed")
+                throw McpToolException.Invalid("result.status",
+                    $"Settle as succeeded with an allowed outcome ({string.Join(", ", allowed)}) and put what you couldn't check in friction. Use failed only if you couldn't do the step at all.");
+            if (!(failed && outcome is null) && (string.IsNullOrEmpty(outcome) || !allowed.Contains(outcome, StringComparer.Ordinal)))
                 throw McpToolException.Invalid("outcome", $"Use one of the allowed outcomes: {string.Join(", ", allowed)}.");
         }
 
@@ -1270,7 +1278,7 @@ internal sealed partial class LocalTools : IAsyncDisposable
         try
         {
             var output = await SettleCoreAsync(input with { DeliveryId = RunnerDeliveryId(Delivery!) }, runnerTask: true, ct);
-            if (outcome is not null) _o.RecordStepOutcome?.Invoke(outcome);
+            if (Delivery.StepContext is not null) _o.RecordStepOutcome?.Invoke(outcome);
             return output;
         }
         finally
