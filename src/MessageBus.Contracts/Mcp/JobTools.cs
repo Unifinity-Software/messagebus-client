@@ -99,6 +99,18 @@ public sealed record JobStatusResult
 
     /// <summary>One entry per step run.</summary>
     public required IReadOnlyList<JobStepRun> Steps { get; init; }
+
+    /// <summary>Whether the job is driven by a workflow or a session, when reported.</summary>
+    public string? DrivenBy { get; init; }
+
+    /// <summary>The person who took over the job and when, as reported by the service.</summary>
+    public JsonElement? TakenOver { get; init; }
+
+    /// <summary>The job's tracker work item as JSON, when available.</summary>
+    public JsonElement? WorkItem { get; init; }
+
+    /// <summary>The job's workflow path as JSON, when available.</summary>
+    public JsonElement? Path { get; init; }
 }
 
 /// <summary>The current state of a single step run.</summary>
@@ -124,4 +136,13 @@ public sealed record JobStepRun
 
     /// <summary>What the step is waiting on, if anything.</summary>
     public JsonElement? WaitingOn { get; init; }
+
+    /// <summary>The step run's task thread id, if assigned.</summary>
+    public string? ThreadId { get; init; }
+
+    /// <summary>The step run's error, if reported.</summary>
+    public string? Error { get; init; }
+
+    /// <summary>The step run's cost in USD, if reported.</summary>
+    public decimal? CostUsd { get; init; }
 }

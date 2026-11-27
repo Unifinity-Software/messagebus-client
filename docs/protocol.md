@@ -1050,6 +1050,8 @@ If the service does not advertise `workflows`, the inventory omits all
   are ignored with a log line. An unavailable, invalid, or undecryptable input
   settles the run as failed with `failureCategory: "unreadable"` and the source
   step in its error, before any agent starts. Existing routes and payloads are unchanged.
+- A runner that stops a task for exceeding `TaskDelivery.costCap` settles it as
+  failed with `failureCategory: "cost-cap"` and reports the estimated cost and cap in `error`.
 - `TaskDelivery.runnerAction` is an optional request to the runner. Its `kind`
   identifies the corresponding parameters object:
   `run-command` uses `runCommand` with `command`, optional checkout-relative `folder` (defaults to the root), and optional `timeLimitMinutes` (defaults to 30);
@@ -1085,9 +1087,12 @@ switched on for this workspace.”
   It returns `{jobId, url, state, workflow}` as soon as the job is created.
   The service runs the job after the calling session closes.
 - `job_status {jobId}` reads `GET jobs/{id}` and returns `{jobId, url, state,
-  spentUsd, limitUsd?, activeStepIds, steps}`. Each run in `steps` contains
-  `stepId`, `round`, `state`, and optional `outcome`, `agent`, `machineId`
-  and `waitingOn`. Both job tools use `<server base URL>/jobs/<job id>` for
+  spentUsd, limitUsd?, activeStepIds, steps, drivenBy?, takenOver?, workItem?, path?}`.
+  When sent by the service, `drivenBy` is `workflow` or `session`, and
+  `takenOver` has shape `{who: {id, name}, at}`. The tool passes `workItem`
+  and `path` through as JSON. Each run in `steps` contains `stepId`, `round`,
+  `state`, and optional `outcome`, `agent`, `machineId`, `waitingOn`,
+  `threadId`, `error`, and `costUsd`. Both job tools use `<server base URL>/jobs/<job id>` for
   the dashboard link.
 - `find_job`, `ensure_job`, and `complete_job` use the same arguments,
   results and handlers as `find_project`, `ensure_project`, and

@@ -613,7 +613,7 @@ public sealed class RunnerTaskTests
     }
 
     [Fact]
-    public async Task A_run_whose_reported_usage_passes_the_roles_most_cost_per_run_is_stopped_and_fails_counting_what_it_used()
+    public async Task A_run_that_exceeds_its_cost_cap_is_stopped_and_fails_counting_what_it_used()
     {
         // Claude Code repeats a message's usage on each of its content blocks: msg_a counts once. 4,000 + 3,000 output
         // tokens at $15 a million is $0.105, past the $0.10 cap only with msg_b; the agent would otherwise never finish.
@@ -630,7 +630,8 @@ public sealed class RunnerTaskTests
 
         var settle = await h.Service.SettledAsync("dlv_cap");
         Assert.Equal(SettleStatus.Failed, settle.Result.Status);
-        Assert.Equal("Stopped at an estimated $0.11, over the role's most cost per run of $0.10.", settle.Result.Error);
+        Assert.Equal("cost-cap", settle.Result.FailureCategory);
+        Assert.Equal("Stopped at an estimated $0.11, over the most this run may cost ($0.10).", settle.Result.Error);
         Assert.Equal(7000, settle.Result.Usage!.TokensOut); // what it used goes toward the role's budget
     }
 

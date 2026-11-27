@@ -77,9 +77,16 @@ public sealed class JobToolsTests
         using var machine = new TestMachine();
         SetCapability(machine, true);
         machine.Server.On(HttpMethod.Get, "/api/w/ws_test/jobs/job_test", _ => Json("""
-            {"id":"job_test","state":"running","spentUsd":1.2,"limitUsd":3,"path":{},
+            {"id":"job_test","state":"running","spentUsd":1.2,"limitUsd":3,"drivenBy":"session",
+             "takenOver":{"who":{"id":"user_test","name":"Ada"},"at":"2026-01-02T03:04:05Z"},
+             "workItem":{"key":"gh:owner/repo#42"},"path":{"schema":1,"steps":[],"arrows":[]},
              "activeStepIds":["review"],"steps":[{"stepId":"review","round":2,"state":"waiting","agent":"reviewer",
-             "machineId":"mch_test","threadId":"thr_test","waitingOn":{"kind":"agent","role":"reviewer"}}]}
+             "machineId":"mch_test","threadId":"thr_test","error":"Review failed.","costUsd":0.25,
+             "waitingOn":{"kind":"agent","role":"reviewer"}}]}
+            """));
+        machine.Server.On(HttpMethod.Get, "/api/w/ws_test/jobs/job_basic", _ => Json("""
+            {"id":"job_basic","state":"running","spentUsd":0,
+             "steps":[{"stepId":"review","round":1,"state":"running"}]}
             """));
         using var http = Client(machine);
         await using var tools = Tools(machine, http);
@@ -93,8 +100,25 @@ public sealed class JobToolsTests
         Assert.Equal(2, step.Round);
         Assert.Equal("mch_test", step.MachineId);
         Assert.Equal("agent", step.WaitingOn!.Value.GetProperty("kind").GetString());
-        Assert.False(call.StructuredContent!.Value.TryGetProperty("path", out _));
-        Assert.False(call.StructuredContent.Value.GetProperty("steps")[0].TryGetProperty("threadId", out _));
+        Assert.Equal("session", result.DrivenBy);
+        Assert.True(JsonNode.DeepEquals(JsonNode.Parse(result.TakenOver!.Value.GetRawText()),
+            JsonNode.Parse("""{"who":{"id":"user_test","name":"Ada"},"at":"2026-01-02T03:04:05Z"}""")));
+        Assert.True(JsonNode.DeepEquals(JsonNode.Parse(result.WorkItem!.Value.GetRawText()),
+            JsonNode.Parse("""{"key":"gh:owner/repo#42"}""")));
+        Assert.True(JsonNode.DeepEquals(JsonNode.Parse(result.Path!.Value.GetRawText()),
+            JsonNode.Parse("""{"schema":1,"steps":[],"arrows":[]}""")));
+        Assert.Equal("thr_test", step.ThreadId);
+        Assert.Equal("Review failed.", step.Error);
+        Assert.Equal(0.25m, step.CostUsd);
+
+        var basic = await Call(tools, McpToolNames.JobStatus, """{"jobId":"job_basic"}""");
+        Assert.Equal("job_basic", McpToolCatalog.ReadResult<JobStatusResult>(basic).JobId);
+        var basicJson = basic.StructuredContent!.Value;
+        foreach (var field in new[] { "drivenBy", "takenOver", "workItem", "path" })
+            Assert.False(basicJson.TryGetProperty(field, out _));
+        var basicStep = basicJson.GetProperty("steps")[0];
+        foreach (var field in new[] { "threadId", "error", "costUsd" })
+            Assert.False(basicStep.TryGetProperty(field, out _));
 
         var missing = await Call(tools, McpToolNames.JobStatus, """{"jobId":"job_missing"}""");
         var error = Assert.Throws<McpToolException>(() => McpToolCatalog.ReadResult<JobStatusResult>(missing));
