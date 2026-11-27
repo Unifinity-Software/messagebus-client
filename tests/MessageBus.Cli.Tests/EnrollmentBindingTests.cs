@@ -13,6 +13,7 @@ using MessageBus.Contracts.Json;
 using MessageBus.Contracts.Machines;
 using MessageBus.Contracts.Security;
 using MessageBus.Mcp;
+using MessageBus.Tests.Shared;
 using Xunit;
 
 namespace MessageBus.Cli.Tests;
@@ -205,6 +206,7 @@ public sealed class EnrollmentBindingTests
     [InlineData(true, true)]
     public async Task Runner_logout_clears_provenance_and_restarts_for_new_login_without_erasing_floor(bool isolated, bool pending)
     {
+        Assert.SkipWhen(InsideRun.Now, InsideRun.MachineKeyReason);
         using var machine = new TestMachine();
         machine.Env[ConfigStore.KeyStoreVariable] = "file";
         machine.Env[EnvVars.ApiKey] = ApiKey;
@@ -273,6 +275,7 @@ public sealed class EnrollmentBindingTests
     [InlineData(true)]
     public async Task Logout_deletes_independently_staged_runner_key_and_active_key(bool isolated)
     {
+        Assert.SkipWhen(InsideRun.Now, InsideRun.MachineKeyReason);
         using var machine = new TestMachine();
         machine.Env[ConfigStore.KeyStoreVariable] = "file";
         machine.Env[EnvVars.Server] = Eu;
@@ -308,6 +311,7 @@ public sealed class EnrollmentBindingTests
     [InlineData(true)]
     public async Task Logout_preserves_latest_settings_and_refuses_a_new_identity_published_during_discovery(bool replaceIdentity)
     {
+        Assert.SkipWhen(InsideRun.Now, InsideRun.MachineKeyReason);
         using var machine = new TestMachine();
         machine.Env[ConfigStore.KeyStoreVariable] = "file";
         var store = new ConfigStore(machine.MbusFolder, "file");
@@ -386,6 +390,7 @@ public sealed class EnrollmentBindingTests
     [Fact]
     public async Task Runner_lost_response_checkpoints_key_and_scope_and_resumes_after_restart()
     {
+        Assert.SkipWhen(InsideRun.Now, InsideRun.MachineKeyReason);
         using var machine = new TestMachine();
         machine.Env[ConfigStore.KeyStoreVariable] = "file";
         machine.Env[EnvVars.ApiKey] = ApiKey;
@@ -471,6 +476,7 @@ public sealed class EnrollmentBindingTests
     [InlineData(Eu, true)]
     public async Task Occupied_runner_replacement_preserves_active_identity_on_loss_or_proof_failure_and_resumes(string selected, bool failProof)
     {
+        Assert.SkipWhen(InsideRun.Now, InsideRun.MachineKeyReason);
         using var machine = new TestMachine();
         machine.Env[ConfigStore.KeyStoreVariable] = "file";
         machine.Env[EnvVars.ApiKey] = ApiKey;

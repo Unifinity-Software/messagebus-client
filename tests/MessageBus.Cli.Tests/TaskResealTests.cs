@@ -12,6 +12,7 @@ using MessageBus.Contracts.Runner;
 using MessageBus.Contracts.Security;
 using MessageBus.Crypto;
 using MessageBus.Mcp;
+using MessageBus.Tests.Shared;
 using Xunit;
 
 namespace MessageBus.Cli.Tests;
@@ -25,6 +26,7 @@ public sealed class TaskResealTests
     [InlineData(true)]
     public async Task Replay_command_refuses_old_service_without_content_requests_or_replacement_uploads(bool sameKeyBody)
     {
+        Assert.SkipWhen(InsideRun.Now, InsideRun.MachineKeyReason);
         using var machine = new TestMachine();
         using var device = KeyPair.GenerateP256();
         var store = new ConfigStore(machine.MbusFolder, "file");

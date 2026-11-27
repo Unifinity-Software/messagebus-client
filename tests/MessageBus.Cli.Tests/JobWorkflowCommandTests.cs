@@ -7,6 +7,7 @@ using MessageBus.Contracts.Json;
 using MessageBus.Contracts.Mcp;
 using MessageBus.Contracts.Security;
 using MessageBus.Crypto;
+using MessageBus.Tests.Shared;
 using Xunit;
 
 namespace MessageBus.Cli.Tests;
@@ -359,6 +360,7 @@ public sealed class JobWorkflowCommandTests
     [InlineData("unsafe-name")]
     public async Task Open_decrypts_workspace_exhibits_and_never_saves_partial_or_unsupported_content(string format)
     {
+        Assert.SkipWhen(InsideRun.Now, InsideRun.MachineKeyReason);
         using var machine = Machine();
         using var device = KeyPair.GenerateP256();
         using var workspace = KeyPair.GenerateP256();

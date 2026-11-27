@@ -13,6 +13,7 @@ using MessageBus.Cli.Server;
 using MessageBus.Cli.Tests.Infrastructure;
 using MessageBus.Contracts.Http;
 using MessageBus.Runner.Transport;
+using MessageBus.Tests.Shared;
 using Xunit;
 
 namespace MessageBus.Cli.Tests.Runner;
@@ -116,6 +117,7 @@ public sealed class RunnerTransportBindingTests
     [InlineData(false)]
     public async Task Built_in_CLI_reconnect_signs_current_domain_and_refuses_security_regression(bool isolated)
     {
+        Assert.SkipWhen(InsideRun.Now, InsideRun.MachineKeyReason);
         using var machine = new TestMachine();
         using var key = MachineKey.Create();
         var store = new ConfigStore(machine.MbusFolder, "file");
