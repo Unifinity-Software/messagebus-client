@@ -201,6 +201,158 @@ public sealed class JobWorkflowCommandTests
     }
 
     [Theory]
+    [InlineData(null, false)]
+    [InlineData("draft", true)]
+    [InlineData("3", true)]
+    public async Task Workflow_export_writes_the_server_yaml_exactly(string? version, bool toFile)
+    {
+        using var machine = Machine();
+        const string yaml = "messagebusWorkflow: 1\r\nname: Fonctionnalité";
+        const string route = Root + "workflows/wf_feature/export";
+        machine.Server.On(HttpMethod.Get, Root + "workflows", _ => Json(Workflows))
+            .On(HttpMethod.Get, route, _ => new(HttpStatusCode.OK)
+            {
+                Content = new StringContent(yaml, Encoding.UTF8, "application/yaml"),
+            });
+        var file = Path.Combine(machine.Home, "feature.workflow.yaml");
+        var args = new List<string> { "workflow", "export", "fEaTuRe" };
+        if (version is not null) args.AddRange(["--version", version]);
+        if (toFile) args.AddRange(["--output", file]);
+
+        var run = await machine.RunAsync(args.ToArray());
+
+        Assert.True(run.ExitCode == 0, run.Error);
+        Assert.Equal(version is null ? "" : $"?version={version}", machine.Server.Single(HttpMethod.Get, route).Uri.Query);
+        if (toFile)
+        {
+            Assert.Equal(file, run.Output.Trim());
+            Assert.Equal(Encoding.UTF8.GetBytes(yaml), await File.ReadAllBytesAsync(file, TestContext.Current.CancellationToken));
+        }
+        else
+        {
+            Assert.Equal(yaml, run.Output);
+        }
+    }
+
+    [Fact]
+    public async Task Workflow_import_sends_markdown_to_the_resolved_workflow_and_reports_a_saved_draft_with_problems()
+    {
+        using var machine = Machine();
+        const string content = "# Fonctionnalité\r\n\r\n## Required steps\r\n";
+        const string response = """
+            {"workflow":{"id":"wf_draft","name":"Draft"},"problems":[
+             {"severity":"warning","stepId":"build","message":"Review the role."},{"message":"Add an end step."}]}
+            """;
+        var file = machine.WriteHomeFile("workflow.md", content);
+        machine.Server.On(HttpMethod.Get, Root + "workflows", _ => Json(Workflows))
+            .On(HttpMethod.Post, Root + "workflows/import", _ => Json(response));
+
+        var run = await machine.RunAsync("workflow", "import", file, "--into", "dRaFt");
+
+        Assert.True(run.ExitCode == 0, run.Error);
+        Assert.StartsWith($"Saved draft Draft: {FakeServer.Url}/workflows/wf_draft/edit{Environment.NewLine}", run.Output);
+        Assert.Contains($"error: path: Add an end step.{Environment.NewLine}warning: build: Review the role.", run.Output);
+        var body = JsonNode.Parse(machine.Server.Single(HttpMethod.Post, Root + "workflows/import").BodyText)!.AsObject();
+        Assert.Equal(content, (string?)body["content"]);
+        Assert.Equal("wf_draft", (string?)body["workflowId"]);
+        Assert.False(body.ContainsKey("name"));
+    }
+
+    [Fact]
+    public async Task Workflow_import_reports_the_servers_file_error()
+    {
+        using var machine = Machine();
+        var file = machine.WriteHomeFile("workflow.yaml", "messagebusWorkflow: 2\n");
+        machine.Server.On(HttpMethod.Post, Root + "workflows/import", _ => new(HttpStatusCode.BadRequest)
+        {
+            Content = new StringContent("""{"error":"This file is from a newer version of messagebus.ai."}""",
+                Encoding.UTF8, "application/json"),
+        });
+
+        var run = await machine.RunAsync("workflow", "import", file);
+
+        Assert.NotEqual(0, run.ExitCode);
+        Assert.Equal("This file is from a newer version of messagebus.ai.", run.Error.Trim());
+        Assert.Empty(run.Output);
+    }
+
+    [Theory]
+    [InlineData(32768, true)]
+    [InlineData(32769, false)]
+    public async Task Workflow_import_enforces_the_byte_limit_and_returns_the_response_in_json_mode(int length, bool fits)
+    {
+        using var machine = Machine();
+        const string response = """{"workflow":{"id":"wf_new","name":"New workflow"},"problems":[]}""";
+        var content = new string('é', length);
+        var file = machine.WriteHomeFile("workflow.yaml", content);
+        machine.Server.On(HttpMethod.Post, Root + "workflows/import", _ => Json(response));
+
+        var run = await machine.RunAsync("workflow", "import", file, "--name", "New workflow", "--json");
+
+        if (fits)
+        {
+            Assert.True(run.ExitCode == 0, run.Error);
+            Assert.True(JsonNode.DeepEquals(JsonNode.Parse(response), JsonNode.Parse(run.Output)));
+            var body = JsonNode.Parse(machine.Server.Single(HttpMethod.Post, Root + "workflows/import").BodyText)!.AsObject();
+            Assert.Equal(content, (string?)body["content"]);
+            Assert.Equal("New workflow", (string?)body["name"]);
+            Assert.False(body.ContainsKey("workflowId"));
+        }
+        else
+        {
+            Assert.NotEqual(0, run.ExitCode);
+            Assert.Contains("64 KiB", run.Error);
+            Assert.DoesNotContain(machine.Server.Requests, r => r.Method == HttpMethod.Post);
+        }
+    }
+
+    [Fact]
+    public async Task Workflow_export_reports_the_servers_not_found_message()
+    {
+        using var machine = Machine();
+        machine.Server.On(HttpMethod.Get, Root + "workflows", _ => Json(Workflows))
+            .On(HttpMethod.Get, Root + "workflows/wf_feature/export", _ => new(HttpStatusCode.NotFound)
+            {
+                Content = new StringContent("""{"error":"Workflow or version not found."}""", Encoding.UTF8, "application/json"),
+            });
+
+        var run = await machine.RunAsync("workflow", "export", "Feature", "--version", "draft");
+
+        Assert.NotEqual(0, run.ExitCode);
+        Assert.Equal("Workflow or version not found.", run.Error.Trim());
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Workflow_file_commands_distinguish_an_absent_capability_from_missing_file_routes(bool advertised)
+    {
+        using var machine = Machine(advertised);
+        machine.Server.On(HttpMethod.Get, Root + "workflows", _ => Json(Workflows))
+            .On(HttpMethod.Get, Root + "workflows/wf_feature/export", _ => new(HttpStatusCode.NotFound))
+            .On(HttpMethod.Post, Root + "workflows/import", _ => new(HttpStatusCode.NotFound));
+        var file = machine.WriteHomeFile("workflow.yaml", "messagebusWorkflow: 1\n");
+
+        foreach (var args in new[] { new[] { "workflow", "export", "Feature" }, ["workflow", "import", file] })
+        {
+            var run = await machine.RunAsync(args);
+            Assert.NotEqual(0, run.ExitCode);
+            Assert.Empty(run.Output);
+            Assert.Equal(advertised ? "This server can't export or import workflow files yet."
+                : "Workflows are not switched on for this workspace.", run.Error.Trim());
+        }
+        if (advertised)
+        {
+            machine.Server.Single(HttpMethod.Get, Root + "workflows/wf_feature/export");
+            machine.Server.Single(HttpMethod.Post, Root + "workflows/import");
+        }
+        else
+        {
+            Assert.DoesNotContain(machine.Server.Requests, r => r.Uri.AbsolutePath.StartsWith(Root, StringComparison.Ordinal));
+        }
+    }
+
+    [Theory]
     [InlineData("valid")]
     [InlineData("unsupported")]
     [InlineData("tampered")]

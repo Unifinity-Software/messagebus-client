@@ -1121,15 +1121,17 @@ context the runner does not create the folder, set the variable, or upload files
 
 ### Workflow and job CLI calls
 
-`mbus job start|list|show|stop|retry|open` and `mbus workflow list|show|check`
+`mbus job start|list|show|stop|retry|open` and `mbus workflow list|show|export|import|check`
 use the authenticated HTTP client, with the configured server's API base path
 preserved. Before workflow requests the client checks `TargetCapabilities` for
-`workflows`. Missing support, or a 404 from any workflow route, reports
-"Workflows are not switched on for this workspace." and exits non-zero.
+`workflows`. A missing capability or a 404 from the existing workflow and job
+routes reports "Workflows are not switched on for this workspace." A 404 from
+the export or import route after the capability check reports "This server
+can't export or import workflow files yet." Both cases exit non-zero.
 Hands-on `job find|ensure|complete` use the existing project MCP tools without
 requiring workflows. `project find|ensure|complete` remain aliases for one release;
 a marker in the CLI config directory records the one-time rename notice on stderr.
-All commands accept `--json`.
+All commands except `workflow export` accept `--json`.
 
 Routes below are relative to `/api/w/{workspaceId}/`:
 
@@ -1138,6 +1140,18 @@ Routes below are relative to `/api/w/{workspaceId}/`:
   also returns optional `draft` and `published` paths. Settings include
   `startsWhen`, `runsOn`, optional `spendingLimitUsd`, `loopLimit`, `whoCanStart`,
   `asks` and `keepExhibitsLocked`. Paths have `schema`, `steps` and `arrows`.
+- `GET workflows/{id}/export[?version=<n>|draft]` returns UTF-8 YAML
+  (`application/yaml`) with an attachment filename and a `messagebusWorkflow: 1`
+  marker. Without a version, it returns the published version, or the draft
+  if the workflow has never been published.
+- `POST workflows/import` requires workflow editor permission and accepts
+  `{content, name?, workflowId?}`. Content is versioned YAML or repository
+  Markdown with a `## Required steps` heading. The CLI rejects files above
+  64 KiB before sending. The service returns 413 for content above 65,536
+  characters and 400 with `{error}` for unreadable definitions. A workflow
+  id selects the draft to replace, and an archived target returns 409.
+  A successful import returns `{workflow, problems}` and saves the draft even
+  when it has validation problems.
 - `POST workflows/check` accepts a path directly and returns `{ok, problems}`.
   Problems have `kind`, `message`, optional `stepId` and optional `severity`;
   missing severity means error. The CLI prints errors before warnings and exits
