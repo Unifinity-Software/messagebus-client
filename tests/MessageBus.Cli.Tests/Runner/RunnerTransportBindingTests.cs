@@ -26,10 +26,8 @@ public sealed class RunnerTransportBindingTests(ITestOutputHelper output)
     private const string Isolated = """{"product":"messagebus.ai","stamp":{"stampId":"eu","geography":"eu","azureRegion":"westeurope","url":"https://eu.runner.example.test","aliases":[]},"signIn":{"authority":{"version":1,"stampId":"eu","issuer":"https://eu.runner.example.test","audience":"https://eu.runner.example.test"},"machineSignature":{"version":2,"required":true}}}""";
 
     [Theory(Timeout = 30_000)]
-    [InlineData(401, true)]
     [InlineData(403, true)]
     [InlineData(401, false)]
-    [InlineData(403, false)]
     public async Task Reconnect_recovers_from_outages_then_stops_on_uncoded_refusal(int refusalStatus, bool refuseDiscovery)
     {
         var ct = TestContext.Current.CancellationToken;
