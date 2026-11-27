@@ -721,7 +721,8 @@ The selected API path prefix is retained in the default runner connect path.
 The WebSocket handshake uses the .NET 10 `ConnectAsync(Uri, HttpMessageInvoker, CancellationToken)`
 over an explicitly cookie-free, credential-free handler with redirects disabled. Any 3xx response
 stops the connection without replay. Upgrade responses 401, 403, 404 and 426 are terminal even
-without an `X-Mbus-Error` header. The runner caps an upgrade 503 `Retry-After` delay at 60 seconds.
+without an `X-Mbus-Error` header. For upgrade 503 responses, the runner caps `Retry-After` at 60 seconds and reduces the
+result by up to 10% before taking the greater of that delay and its reconnect backoff.
 For discovery, HTTP 408, 429 and 5xx responses, connection errors and timeouts may retry only the
 same selected endpoint, with no credential send or v1/host fallback. Other unsuccessful discovery
 responses, including 401 and 403, and binding/protocol/durable-state refusals are terminal.

@@ -118,6 +118,7 @@ public sealed class ReverseConnectionClient(ReverseConnectionClientOptions optio
         var time = options.TimeProvider;
         var attempt = 0;
         var reconnecting = false;
+        var loggedConnectException = false;
         while (true)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -133,10 +134,16 @@ public sealed class ReverseConnectionClient(ReverseConnectionClientOptions optio
                 case ConnectOutcome.Retry retry:
                     reason = retry.Reason;
                     minimumDelay = retry.RetryAfter;
+                    if (!loggedConnectException && retry.Exception is { } exception)
+                    {
+                        _logger.LogWarning(exception, "Connection attempt failed before reaching the server.");
+                        loggedConnectException = true;
+                    }
                     break;
 
                 case ConnectOutcome.Connected connected:
                     reconnecting = false;
+                    loggedConnectException = false;
                     var connection = new SocketConnection(connected.WebSocket, time);
                     if (!listener.TryAdd(connection))
                     {
@@ -267,7 +274,7 @@ public sealed class ReverseConnectionClient(ReverseConnectionClientOptions optio
         {
             // Most likely preparing the request failed (a credential store was unavailable): worth retrying.
             webSocket.Dispose();
-            return new ConnectOutcome.Retry($"Couldn't connect: {ex.Message}", null);
+            return new ConnectOutcome.Retry($"Couldn't connect: {ex.Message}", null, ex);
         }
         catch
         {
@@ -301,7 +308,7 @@ public sealed class ReverseConnectionClient(ReverseConnectionClientOptions optio
 
         var retryAfter = status switch
         {
-            503 => RetryAfter(webSocket, TimeSpan.FromSeconds(60)),
+            503 => RetryAfter(webSocket, TimeSpan.FromSeconds(60)) * (1 - Random.Shared.NextDouble() * 0.1),
             ConnectRefusal.TooManyAttempts => RetryAfter(webSocket, MaxRetryAfter),
             _ => null,
         };
@@ -403,7 +410,7 @@ public sealed class ReverseConnectionClient(ReverseConnectionClientOptions optio
         /// <param name="ServerPings">How often the server pings over HTTP/2 when the client is quiet, if it does.</param>
         public sealed record Connected(WebSocket WebSocket, TimeSpan? ServerPings) : ConnectOutcome;
 
-        public sealed record Retry(string Reason, TimeSpan? RetryAfter) : ConnectOutcome;
+        public sealed record Retry(string Reason, TimeSpan? RetryAfter, Exception? Exception = null) : ConnectOutcome;
 
         public sealed record Refused(int? StatusCode, string Reason) : ConnectOutcome;
     }

@@ -147,7 +147,7 @@ public enum ReverseConnectionStopReason
 {
     /// <summary>The caller cancelled.</summary>
     Cancelled,
-    /// <summary>The connection was permanently refused, for example with a coded 401/403 or HTTP 404/426.</summary>
+    /// <summary>The server refused the connect request with a permanent HTTP status (401, 403, 404, 426) or a redirect, or local preparation was refused.</summary>
     Refused,
     /// <summary>The server closed with a code <see cref="ReverseConnectionClientOptions.IsTerminalClose"/> says is final.</summary>
     TerminalClose,

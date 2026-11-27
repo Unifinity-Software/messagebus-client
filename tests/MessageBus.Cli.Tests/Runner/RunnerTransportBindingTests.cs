@@ -14,6 +14,8 @@ using MessageBus.Cli.Tests.Infrastructure;
 using MessageBus.Contracts.Http;
 using MessageBus.Runner.Transport;
 using MessageBus.Tests.Shared;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
 
 namespace MessageBus.Cli.Tests.Runner;
@@ -68,10 +70,13 @@ public sealed class RunnerTransportBindingTests(ITestOutputHelper output)
         var connected = 0;
         var dropped = 0;
         var retryDelays = new List<TimeSpan>();
+        var retryLogCounts = new List<int>();
+        using var logger = new ReconnectLogger();
         var options = RunnerTransport.ClientOptions(new Uri(server.Selected), _ => { }) with
         {
             CertificateChainPolicy = server.ChainPolicy(),
             TimeProvider = machine.Time,
+            LoggerFactory = logger,
             ExecuteConnect = host.ConnectAsync,
             IsTerminalPreparationException = RunnerHandshake.IsTerminal,
             OnStatus = status =>
@@ -85,6 +90,7 @@ public sealed class RunnerTransportBindingTests(ITestOutputHelper output)
                 if (status.RetryDelay is { } delay)
                 {
                     retryDelays.Add(delay);
+                    retryLogCounts.Add(logger.RetryLines);
                     machine.Time.Advance(delay);
                 }
             },
@@ -98,7 +104,8 @@ public sealed class RunnerTransportBindingTests(ITestOutputHelper output)
         Assert.Equal(refuseDiscovery ? 3 : 4, upgrades);
         Assert.Equal(7, retryDelays.Count);
         Assert.All(retryDelays, delay => Assert.InRange(delay, TimeSpan.FromMilliseconds(1), TimeSpan.FromSeconds(60)));
-        Assert.Equal(TimeSpan.FromSeconds(60), retryDelays[5]);
+        Assert.InRange(retryDelays[5], TimeSpan.FromSeconds(54), TimeSpan.FromSeconds(60));
+        Assert.Equal([1, 1, 1, 1, 1, 1, 2], retryLogCounts);
         Assert.Equal(ReverseConnectionStopReason.Refused, stop.Reason);
         Assert.Equal(refuseDiscovery ? null : refusalStatus, stop.StatusCode);
     }
@@ -326,6 +333,26 @@ public sealed class RunnerTransportBindingTests(ITestOutputHelper output)
         await Assert.ThrowsAsync<ServerBindingException>(() => client.GetAsync("api/caller", TestContext.Current.CancellationToken));
         if (durableHome) Assert.Equal(Origin + "/api/server", Assert.Single(destinations).AbsoluteUri);
         else Assert.Empty(destinations);
+    }
+
+    private sealed class ReconnectLogger : ILoggerFactory, ILogger
+    {
+        public int RetryLines { get; private set; }
+
+        public ILogger CreateLogger(string categoryName) =>
+            categoryName == "MessageBus.Runner.Transport" ? this : NullLogger.Instance;
+
+        public void AddProvider(ILoggerProvider provider) { }
+        public void Dispose() { }
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => logLevel == LogLevel.Information;
+
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            if (IsEnabled(logLevel) && formatter(state, exception).Contains("Retrying in", StringComparison.Ordinal))
+                RetryLines++;
+        }
     }
 
     private sealed class Handler(Func<HttpRequestMessage, HttpResponseMessage> respond) : HttpMessageHandler
