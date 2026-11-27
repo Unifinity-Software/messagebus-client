@@ -147,10 +147,15 @@ public sealed class LocalBundleTests
     }
 
     [Theory]
-    [InlineData(false, false)]
-    [InlineData(true, false)]
-    [InlineData(false, true)]
-    public async Task Workflow_code_is_self_contained_when_the_repository_is_unavailable(bool hasCredential, bool publicRepository)
+    [InlineData(false, false, false, false)]
+    [InlineData(true, false, false, false)]
+    [InlineData(false, true, false, false)]
+    [InlineData(false, false, true, false)]
+    [InlineData(true, false, true, false)]
+    [InlineData(false, false, true, true)]
+    [InlineData(false, false, false, true)]
+    public async Task Workflow_bundle_uses_the_connection_status_and_checkout_result(
+        bool hasCredential, bool publicRepository, bool ownerGit, bool credentialServiceFailed)
     {
         await WindowsRunCapabilities.RequireGitShellAsync();
         var git = CommandLocator.Find("git", Environment.GetEnvironmentVariable, []);
@@ -168,16 +173,30 @@ public sealed class LocalBundleTests
                 JobId = "job_test", StepId = "code", StepName = "Code", Round = 1, AllowedOutcomes = ["done"], Inputs = [],
             },
         };
-        var profile = new PermissionProfile { Name = "worker" };
+        var profile = new PermissionProfile { Name = "worker", CanPush = true };
+        machine.Server.On(HttpMethod.Post, ServiceRoutes.RepoCredential, request =>
+        {
+            var issuance = MessageBusJson.Deserialize<RunnerRepoCredentialRequest>(request.BodyText)!;
+            Assert.Equal(!ownerGit, issuance.CanPush);
+            if (credentialServiceFailed)
+                return new(HttpStatusCode.ServiceUnavailable);
+            return hasCredential
+                ? FakeServer.Json(new RunnerRepoCredential
+                {
+                    UserName = "fixture", Secret = "fixture-password", ExpiresAt = DateTimeOffset.MaxValue,
+                })
+                : new(HttpStatusCode.NoContent);
+        });
         var isolation = RunIsolation.Create(new RunIsolationOptions
         {
             WorkRoot = harness.WorkRoot, HomeDirectory = harness.Home, Requested = IsolationLevel.Basic,
-            Credentials = hasCredential ? new CheckoutAuthenticationTests.FixtureCredential() : new NoRepoCredentials(),
+            Credentials = new ServiceRepoCredentials(http, TextWriter.Null),
+            UseOwnerGit = _ => ownerGit,
         }, TextWriter.Null);
         var remote = delivery.Envelope.Refs[0].Url!;
         var localRemote = Path.Combine(harness.Scratch, "remote");
         string? remoteBase = null;
-        if (publicRepository)
+        if (publicRepository || ownerGit)
         {
             Directory.CreateDirectory(localRemote);
             await Git.RunAsync(localRemote, ["init", "--quiet", "--initial-branch=main"], Ct);
@@ -188,11 +207,14 @@ public sealed class LocalBundleTests
         await isolation.PrepareAsync(producer, delivery, profile, Ct);
         try
         {
-            if (!hasCredential)
+            machine.Server.Single(HttpMethod.Post, ServiceRoutes.RepoCredential);
+            Assert.Equal(hasCredential && !ownerGit, File.Exists(Path.Combine(producer.Root, RunGitConfig.CredentialFileName)));
+            if (!hasCredential || ownerGit)
             {
                 var checkout = await producer.CheckOutAsync(delivery, _ => git, null, Ct, launch =>
                     TestRepositoryRemote.Map(isolation.Wrap(launch, producer, profile), remote, localRemote));
                 Assert.Null(checkout);
+                Assert.Equal(remoteBase is null, producer.RepositoryUnavailable);
                 await Git.RunAsync(producer.WorkTree, ["symbolic-ref", "HEAD", "refs/heads/main"], Ct);
             }
             else
@@ -226,7 +248,8 @@ public sealed class LocalBundleTests
                 node => (string?)node?["params"]?["name"] == McpToolNames.Settle);
             var sent = MessageBusJson.Deserialize<SettleInput>(request!["params"]!["arguments"]!.ToJsonString())!;
             var attachment = Assert.Single(sent.Attachments);
-            Assert.Equal(hasCredential || publicRepository ? baseCommit : null, attachment.BaseCommit);
+            var expectThin = hasCredential || publicRepository || (ownerGit && credentialServiceFailed);
+            Assert.Equal(expectThin ? baseCommit : null, attachment.BaseCommit);
             using var keys = new KeyRing();
             keys.Add(attachment.Encryption!.KeyId, KeyPair.FromPem(pair.ExportPem()));
             var body = BodyCrypto.Open(sent.SealedReply!, keys);
@@ -236,29 +259,29 @@ public sealed class LocalBundleTests
                 await MessageCrypto.OpenAsync(new MemoryStream(machine.Server.Single(HttpMethod.Put, $"/blobs/{attachment.Id}").Body),
                     file, attachment.Encryption, keys, Ct);
             var prerequisites = GitBundles.ReadHeader(bundle).Prerequisites;
-            if (hasCredential || publicRepository)
+            if (expectThin)
             {
                 Assert.Contains(baseCommit, prerequisites);
                 Assert.Empty(body.Friction);
                 Assert.Empty(recorded.Result.FrictionKinds);
-                if (hasCredential) return;
+                return;
             }
-            else
-            {
-                Assert.Empty(prerequisites);
-                Assert.Equal("No repository connection for git.example.test/team/private: code was passed as a full bundle",
-                    Assert.Single(body.Friction).Note);
-                Assert.Equal("missing-context", Assert.Single(recorded.Result.FrictionKinds));
-            }
+            Assert.Empty(prerequisites);
+            Assert.Equal(credentialServiceFailed
+                ? "Repository checkout failed: code was passed as a full bundle"
+                : "No repository connection for git.example.test/team/private: code was passed as a full bundle",
+                Assert.Single(body.Friction).Note);
+            Assert.Equal("missing-context", Assert.Single(recorded.Result.FrictionKinds));
 
             var source = new WorkflowBundleSource(new ReceivedMessage
             {
                 Envelope = delivery.Envelope with { Attachments = [attachment] }, Body = body,
             }, bundle);
+            var consumerRemote = ownerGit ? Path.Combine(harness.Scratch, "unreachable") : localRemote;
             await using var consumer = new RunnerHarness(bundles: source, sandbox: root =>
                 new RepositorySandbox(
                     RunIsolation.Create(new RunIsolationOptions { WorkRoot = root, HomeDirectory = machine.Home, Requested = IsolationLevel.Basic }, TextWriter.Null),
-                    git!, remote, localRemote));
+                    git!, remote, consumerRemote));
             var review = consumer.Task("dlv_review", environment: new RunEnvironment { Checkout = CheckoutMode.Clone });
             review = review with
             {

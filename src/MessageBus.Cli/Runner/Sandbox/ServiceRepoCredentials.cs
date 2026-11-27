@@ -22,7 +22,13 @@ public sealed class ServiceRepoCredentials(HttpClient http, TextWriter log) : IR
     public string Description => "From the workspace's GitHub App or Azure DevOps connection, for the task's repository only; none when neither is set up.";
 
     /// <inheritdoc />
-    public async Task<RepoCredential?> IssueAsync(RepoCredentialRequest request, CancellationToken cancellationToken)
+    public async Task<RepoCredential?> IssueAsync(RepoCredentialRequest request, CancellationToken cancellationToken) =>
+        (await IssueWithStatusAsync(request, cancellationToken).ConfigureAwait(false)).Credential;
+
+    Task<RepoCredentialResult> IRepoCredentialSource.IssueWithStatusAsync(RepoCredentialRequest request, CancellationToken cancellationToken) =>
+        IssueWithStatusAsync(request, cancellationToken);
+
+    private async Task<RepoCredentialResult> IssueWithStatusAsync(RepoCredentialRequest request, CancellationToken cancellationToken)
     {
         var body = new RunnerRepoCredentialRequest
         {
@@ -41,21 +47,23 @@ public sealed class ServiceRepoCredentials(HttpClient http, TextWriter log) : IR
             if (response.StatusCode == HttpStatusCode.NoContent)
             {
                 await log.WriteLineAsync($"No repository credential for {request.Repository}: the service supplied none (204).").ConfigureAwait(false);
-                return null;
+                return new(null, NoConnection: true);
             }
             if (!response.IsSuccessStatusCode)
             {
                 await log.WriteLineAsync($"No repository credential for {request.Repository}: the service answered {(int)response.StatusCode}.").ConfigureAwait(false);
-                return null;
+                return default;
             }
             var text = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
             var credential = MessageBusJson.Deserialize<RunnerRepoCredential>(text);
-            return credential is null ? null : new RepoCredential { UserName = credential.UserName, Secret = credential.Secret, ExpiresAt = credential.ExpiresAt };
+            return credential is null ? default : new(
+                new RepoCredential { UserName = credential.UserName, Secret = credential.Secret, ExpiresAt = credential.ExpiresAt },
+                NoConnection: false);
         }
         catch (Exception ex) when (ex is HttpRequestException or JsonException or TaskCanceledException && !cancellationToken.IsCancellationRequested)
         {
             await log.WriteLineAsync($"No repository credential for {request.Repository}: {ex.Message}").ConfigureAwait(false);
-            return null;
+            return default;
         }
     }
 }

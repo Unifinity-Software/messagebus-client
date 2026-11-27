@@ -320,18 +320,21 @@ public sealed partial class RunWorkspace : IDisposable
             TryDelete(WorkTree);
             error = await GitAsync(git, ["clone", "--quiet", "--", url, WorkTree], RemoteGit(wrap), cancellationToken).ConfigureAwait(false);
         }
-        if (error is not null && RepositoryCredentialNote is not null)
+        if (RepositoryCredentialNote is not null)
         {
-            RepositoryUnavailable = true;
-            if (delivery.StepContext is not null && RunnerGit.RepositoryUri(url) is { } repository)
+            if (error is null)
+                FullBundleFriction = null;
+            else
             {
-                var name = repository.Host + repository.AbsolutePath;
-                if (name.EndsWith(".git", StringComparison.OrdinalIgnoreCase)) name = name[..^4];
-                FullBundleFriction = new FrictionNote
+                RepositoryUnavailable = true;
+                if (delivery.StepContext is not null)
                 {
-                    Kind = "missing-context",
-                    Note = $"No repository connection for {name[..Math.Min(name.Length, 420)]}: code was passed as a full bundle",
-                };
+                    FullBundleFriction ??= new FrictionNote
+                    {
+                        Kind = "missing-context",
+                        Note = "Repository checkout failed: code was passed as a full bundle",
+                    };
+                }
             }
         }
         if (error is null && repoRef.Sha is { Length: > 0 } sha)
