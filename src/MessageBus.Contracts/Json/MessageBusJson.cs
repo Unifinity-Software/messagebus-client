@@ -239,6 +239,7 @@ public static class MessageBusJson
 [JsonSerializable(typeof(ListWorkflowsResult))]
 [JsonSerializable(typeof(WorkflowSummary[]))]
 [JsonSerializable(typeof(StartJobInput))]
+[JsonSerializable(typeof(StartJobRequest))]
 [JsonSerializable(typeof(StartJobResult))]
 [JsonSerializable(typeof(JobStatusInput))]
 [JsonSerializable(typeof(JobStatusResult))]

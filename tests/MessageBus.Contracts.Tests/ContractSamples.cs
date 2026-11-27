@@ -573,6 +573,11 @@ internal static class ContractSamples
         new ListWorkflowsResult { Workflows = [Workflow] },
         Workflow,
         new StartJobInput { WorkItem = "gh:owner/repo#42", Workflow = "Feature", Instructions = "Fix the list view.", LimitUsd = 25m, RunsOn = "workspace" },
+        new StartJobRequest
+        {
+            WorkItem = "gh:owner/repo#42", WorkflowId = "wf_feature", Instructions = "Fix the list view.",
+            LimitUsd = 25m, RunsOn = "workspace", WorkItemTitle = "Fix the list view", WorkItemBody = "Show due dates.",
+        },
         new StartJobResult
         {
             JobId = "job_example", Url = "https://example.test/jobs/job_example", State = "running",

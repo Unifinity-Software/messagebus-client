@@ -45,10 +45,18 @@ public sealed class JobToolsTests
         }
     }
 
-    [Fact]
-    public async Task Starts_a_job_by_workflow_name_and_returns_the_dashboard_link()
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Starts_a_job_by_workflow_name_and_returns_the_dashboard_link(bool ghWorks)
     {
         using var machine = new TestMachine();
+        machine.WorkItemCommand = (start, _) =>
+        {
+            Assert.Equal("gh", start.FileName);
+            Assert.Equal(["issue", "view", "42", "--repo", "owner/repo", "--json", "title,body"], start.ArgumentList);
+            return Task.FromResult(ghWorks ? (0, """{"title":"  Add due dates  ","body":"Keep the issue context."}""") : (1, ""));
+        };
         SetCapability(machine, true);
         machine.Server
             .On(HttpMethod.Get, "/api/w/ws_test/workflows", _ =>
@@ -66,8 +74,14 @@ public sealed class JobToolsTests
         Assert.Equal("running", result.State);
         Assert.Equal("wf_feature", result.Workflow!.Value.GetProperty("id").GetString());
         var request = machine.Server.Single(HttpMethod.Post, "/api/w/ws_test/jobs");
-        Assert.True(JsonNode.DeepEquals(JsonNode.Parse(request.BodyText), JsonNode.Parse(
-            """{"workItem":"gh:owner/repo#42","workflowId":"wf_feature","instructions":"Add tests.","limitUsd":5.50,"runsOn":"owner-runners"}""")));
+        var expected = JsonNode.Parse(
+            """{"workItem":"gh:owner/repo#42","workflowId":"wf_feature","instructions":"Add tests.","limitUsd":5.50,"runsOn":"owner-runners"}""")!;
+        if (ghWorks)
+        {
+            expected["workItemTitle"] = "Add due dates";
+            expected["workItemBody"] = "Keep the issue context.";
+        }
+        Assert.True(JsonNode.DeepEquals(JsonNode.Parse(request.BodyText), expected));
         Assert.Equal(3, machine.Server.Requests.Count);
     }
 
@@ -190,6 +204,7 @@ public sealed class JobToolsTests
     {
         Http = http, Links = http, WorkspaceId = "ws_test", ConfigDirectory = machine.Home,
         Input = Stream.Null, Output = Stream.Null, Time = machine.Time,
+        RunWorkItemCommand = machine.WorkItemCommand,
     });
 
     private static HttpResponseMessage Json(string json, HttpStatusCode status = HttpStatusCode.OK) => new(status)

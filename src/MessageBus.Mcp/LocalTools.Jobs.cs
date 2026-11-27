@@ -45,10 +45,14 @@ internal sealed partial class LocalTools
                 ?? throw McpToolException.NotFound("No workflow matches that id or name.");
         }
 
+        var issue = await GitHubWorkItem.ReadAsync(input.WorkItem, _o.Time, _o.RunWorkItemCommand, ct);
         using var request = new HttpRequestMessage(HttpMethod.Post, WorkflowRoute("jobs"))
         {
-            Content = JsonContent.Create(new NewWorkflowJob(input.WorkItem, workflow.Id, input.Instructions, input.LimitUsd, input.RunsOn),
-                WorkflowHttpJson.Default.NewWorkflowJob),
+            Content = JsonContent.Create(new StartJobRequest
+            {
+                WorkItem = input.WorkItem, WorkflowId = workflow.Id, Instructions = input.Instructions,
+                LimitUsd = input.LimitUsd, RunsOn = input.RunsOn, WorkItemTitle = issue?.Title, WorkItemBody = issue?.Body,
+            }, (JsonTypeInfo<StartJobRequest>)MessageBusJson.Options.GetTypeInfo(typeof(StartJobRequest))),
         };
         var job = await SendWorkflowRequestAsync(request, WorkflowHttpJson.Default.WorkflowJobView, ct);
         return new() { JobId = job.Id, Url = JobUrl(job.Id), State = job.State, Workflow = job.Workflow };
@@ -116,13 +120,10 @@ internal sealed partial class LocalTools
     }
 }
 
-internal sealed record NewWorkflowJob(string WorkItem, string WorkflowId, string? Instructions, decimal? LimitUsd, string? RunsOn);
-
 internal sealed record WorkflowJobView(string Id, string State, JsonElement? Workflow, decimal SpentUsd,
     decimal? LimitUsd, IReadOnlyList<string>? ActiveStepIds, IReadOnlyList<JobStepRun>? Steps,
     string? DrivenBy, JsonElement? TakenOver, JsonElement? WorkItem, JsonElement? Path);
 
 [JsonSourceGenerationOptions(JsonSerializerDefaults.Web, DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull)]
-[JsonSerializable(typeof(NewWorkflowJob))]
 [JsonSerializable(typeof(WorkflowJobView))]
 internal sealed partial class WorkflowHttpJson : JsonSerializerContext;

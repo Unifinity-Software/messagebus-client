@@ -52,6 +52,76 @@ public sealed class JobWorkflowCommandTests
     }
 
     [Fact]
+    public async Task Start_sends_the_locally_read_issue_within_service_limits()
+    {
+        using var machine = Machine();
+        machine.WorkItemCommand = (start, _) =>
+        {
+            Assert.Equal("gh", start.FileName);
+            Assert.Equal(["issue", "view", "42", "--repo", "acme/app", "--json", "title,body"], start.ArgumentList);
+            Assert.Equal("1", start.Environment["GH_PROMPT_DISABLED"]);
+            Assert.False(start.UseShellExecute);
+            Assert.True(start.CreateNoWindow);
+            return Task.FromResult((0, new JsonObject
+            {
+                ["title"] = "  " + new string('t', 201) + "  ", ["body"] = new string('b', 30_001),
+            }.ToJsonString()));
+        };
+        machine.Server.On(HttpMethod.Get, Root + "workflows", _ => Json(Workflows))
+            .On(HttpMethod.Post, Root + "jobs", _ => Json("""{"id":"job_test","state":"running"}"""));
+
+        var run = await machine.RunAsync("job", "start", "gh:acme/app#42", "--workflow", "Feature");
+
+        Assert.Equal(0, run.ExitCode);
+        Assert.Empty(run.Error);
+        var body = JsonNode.Parse(machine.Server.Single(HttpMethod.Post, Root + "jobs").BodyText)!;
+        Assert.Equal(new string('t', 200), (string?)body["workItemTitle"]);
+        Assert.Equal(new string('b', 30_000), (string?)body["workItemBody"]);
+    }
+
+    [Theory]
+    [InlineData("failed")]
+    [InlineData("missing")]
+    [InlineData("timeout")]
+    [InlineData("malformed")]
+    [InlineData("wrong-shape")]
+    [InlineData("ado")]
+    public async Task Start_without_local_issue_context_still_starts_quietly(string reason)
+    {
+        using var machine = Machine();
+        var calls = 0;
+        machine.WorkItemCommand = async (_, ct) =>
+        {
+            calls++;
+            if (reason == "missing") throw new System.ComponentModel.Win32Exception();
+            if (reason == "timeout")
+            {
+                var pending = new TaskCompletionSource<(int, string)>();
+                using var registration = ct.Register(() => pending.TrySetCanceled(ct));
+                machine.Time.Advance(TimeSpan.FromSeconds(5));
+                return await pending.Task;
+            }
+            return reason switch
+            {
+                "malformed" => (0, "not JSON"),
+                "wrong-shape" => (0, """{"title":12,"body":null}"""),
+                _ => (1, "not signed in"),
+            };
+        };
+        machine.Server.On(HttpMethod.Get, Root + "workflows", _ => Json(Workflows))
+            .On(HttpMethod.Post, Root + "jobs", _ => Json("""{"id":"job_test","state":"running"}"""));
+
+        var run = await machine.RunAsync("job", "start", reason == "ado" ? "ado:org/project#42" : "gh:acme/app#42", "--workflow", "Feature");
+
+        Assert.Equal(0, run.ExitCode);
+        Assert.Empty(run.Error);
+        Assert.Equal(reason == "ado" ? 0 : 1, calls);
+        var body = JsonNode.Parse(machine.Server.Single(HttpMethod.Post, Root + "jobs").BodyText)!.AsObject();
+        Assert.False(body.ContainsKey("workItemTitle"));
+        Assert.False(body.ContainsKey("workItemBody"));
+    }
+
+    [Fact]
     public async Task Show_prints_step_names_rounds_results_agents_duration_and_waiting_details()
     {
         using var machine = Machine();

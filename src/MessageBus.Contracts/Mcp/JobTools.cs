@@ -53,6 +53,31 @@ public sealed record StartJobInput
     public string? RunsOn { get; init; }
 }
 
+/// <summary>The HTTP request to start a job with a resolved published workflow.</summary>
+public sealed record StartJobRequest
+{
+    /// <summary>Tracker work item key, such as <c>gh:owner/repo#42</c>.</summary>
+    public required string WorkItem { get; init; }
+
+    /// <summary>The resolved workflow id.</summary>
+    public required string WorkflowId { get; init; }
+
+    /// <summary>Optional context for the job.</summary>
+    public string? Instructions { get; init; }
+
+    /// <summary>Optional spending limit in USD.</summary>
+    public decimal? LimitUsd { get; init; }
+
+    /// <summary>Optional runner scope, workspace or owner-runners.</summary>
+    public string? RunsOn { get; init; }
+
+    /// <summary>Optional issue title read locally; trimmed and limited to 200 characters.</summary>
+    public string? WorkItemTitle { get; init; }
+
+    /// <summary>Optional issue body read locally; limited to 30,000 characters.</summary>
+    public string? WorkItemBody { get; init; }
+}
+
 /// <summary>The job started by the service.</summary>
 public sealed record StartJobResult
 {
