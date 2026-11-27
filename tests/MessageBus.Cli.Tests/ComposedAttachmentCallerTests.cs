@@ -27,6 +27,7 @@ using MessageBus.Crypto;
 using MessageBus.Mcp;
 using ModelContextProtocol.Client;
 using ModelContextProtocol.Protocol;
+using MessageBus.Tests.Shared;
 using Xunit;
 
 namespace MessageBus.Cli.Tests;
@@ -68,6 +69,7 @@ public sealed partial class ComposedAttachmentCallerTests
     [InlineData(true)]
     public async Task Deadletters_command_reseals_body_and_attachment_and_checks_binding_after_link(bool isolated)
     {
+        Assert.SkipWhen(InsideRun.Now, InsideRun.MachineKeyReason);
         await using var f = new Fixture(isolated);
         f.Machine.Env.Remove(EnvVars.ApiKey);
         var source = await f.SealSource();
@@ -200,6 +202,7 @@ public sealed partial class ComposedAttachmentCallerTests
     [InlineData(true)]
     public async Task Runner_tools_actual_factory_packages_file_or_refuses_stripping_after_link(bool isolated)
     {
+        Assert.SkipWhen(InsideRun.Now, InsideRun.MachineKeyReason);
         await using var f = new Fixture(isolated, machineAuthentication: true);
         var tools = RunToolsServer.Create(f.Context)!;
         await using var session = await tools.StartAsync(new RunToolsRequest(f.Run, f.Delivery, new PermissionProfile { Name = "worker" }, p => p), Ct);
@@ -228,6 +231,7 @@ public sealed partial class ComposedAttachmentCallerTests
     [InlineData(true)]
     public async Task Code_return_Create_uploads_exact_git_head_or_refuses_after_link(bool isolated)
     {
+        Assert.SkipWhen(InsideRun.Now, InsideRun.MachineKeyReason);
         Assert.SkipWhen(CommandLocator.Find("git", Environment.GetEnvironmentVariable, []) is null, "git isn't installed.");
         await using var f = new Fixture(isolated, machineAuthentication: true);
         await Git.RunAsync(f.Run.WorkTree, ["init", "--quiet", "--initial-branch=main"], Ct);

@@ -19,6 +19,7 @@ using MessageBus.Contracts.Runner;
 using MessageBus.Contracts.Security;
 using MessageBus.Crypto;
 using MessageBus.Runner.Transport;
+using MessageBus.Tests.Shared;
 using Xunit;
 
 namespace MessageBus.Cli.Tests;
@@ -148,6 +149,7 @@ public sealed class IsolatedHttpsJourneyTests(ITestOutputHelper testOutput)
     [Fact(Timeout = 30_000)]
     public async Task Real_WSS_reconnect_rediscovers_and_signs_each_upgrade_then_refuses_stripping()
     {
+        Assert.SkipWhen(InsideRun.Now, InsideRun.MachineKeyReason);
         var Ct = TestContext.Current.CancellationToken;
         await using var server = new IsolatedHttpsServer(Ct, testOutput);
         using var machine = new TestMachine();

@@ -4,7 +4,7 @@ namespace MessageBus.Attachments.Client;
 /// <param name="Path">The bundle file.</param>
 /// <param name="Branch">The branch it carries (<c>refs/heads/{Branch}</c> inside the bundle).</param>
 /// <param name="HeadCommit">The branch's commit when bundled.</param>
-/// <param name="BaseCommit">The resolved exclusion revision; null when no base was requested.</param>
+/// <param name="BaseCommit">The resolved exclusion revision; null for a full bundle.</param>
 public sealed record GitBundle(string Path, string Branch, string HeadCommit, string? BaseCommit)
 {
     /// <summary>The prerequisite commit IDs advertised by a Git bundle.</summary>
@@ -31,7 +31,8 @@ public static class GitBundles
     /// <summary>
     /// Writes <paramref name="branch"/> (default: the checked-out branch) of <paramref name="repository"/>
     /// to a bundle at <paramref name="outputPath"/>: the commits after <paramref name="baseCommit"/>, or the
-    /// whole history when it is null or empty.
+    /// whole history when it is null or empty. With a configured remote, a local-only base is replaced
+    /// by a shared published ancestor when one exists, otherwise by the whole history.
     /// </summary>
     /// <param name="repository">The repository (or a worktree of it).</param>
     /// <param name="outputPath">Where to write the bundle.</param>
@@ -46,6 +47,25 @@ public static class GitBundles
         var head = await Git.CommitIdAsync(repository, source, ct);
         var @base = string.IsNullOrEmpty(baseCommit) ? null : await Git.CommitIdAsync(repository, baseCommit, ct);
         if (@base == head) throw new GitException($"Nothing to send: {branch} has no commits after {baseCommit}.");
+
+        if (@base is not null)
+        {
+            var remotes = (await Git.RunAsync(repository, ["remote"], ct))
+                .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            var upstream = (await Git.RunAsync(repository,
+                ["for-each-ref", "--format=%(upstream:remotename)", source], ct)).Trim();
+            if (remotes.Contains(upstream, StringComparer.Ordinal))
+                remotes = [upstream];
+            else if (remotes.Contains("origin", StringComparer.Ordinal))
+                remotes = ["origin"];
+
+            // refs/remotes/mbus can hold received bundles without representing a configured remote.
+            if (remotes.Length > 0 && string.IsNullOrWhiteSpace(await Git.RunAsync(repository,
+                ["for-each-ref", "--contains", @base, .. remotes.Select(remote => $"refs/remotes/{remote}/")], ct)))
+            {
+                @base = await NearestPublishedBaseAsync(repository, head, remotes, ct);
+            }
+        }
 
         List<string> args = ["bundle", "create", "--quiet", Path.GetFullPath(outputPath), source];
         if (@base is not null) args.Add($"^{@base}");
@@ -82,6 +102,34 @@ public static class GitBundles
         return new GitBundle(outputPath, branch, advertisedHead, @base) { Prerequisites = header.Prerequisites };
     }
 
+    private static async Task<string?> NearestPublishedBaseAsync(string repository, string head, string[] remotes, CancellationToken ct)
+    {
+        // Boundary commits are the published parents of the commits this branch adds.
+        var history = await Git.RunAsync(repository,
+            ["rev-list", "--boundary", head, "--not", .. remotes.Select(remote => $"--remotes={remote}/*")], ct);
+        if (history.Length == 0)
+        {
+            // The tip itself is published. Keep one or more commits in the bundle by using its first parent.
+            var parents = await Git.RunAsync(repository, ["rev-list", "--parents", "--max-count=1", head], ct);
+            return parents.Trim().Split(' ').Skip(1).FirstOrDefault();
+        }
+
+        var candidates = history.Split('\n').Where(line => line.StartsWith('-')).Select(line => line[1..]).ToArray();
+        if (candidates.Length <= 1) return candidates.FirstOrDefault();
+
+        string? nearest = null;
+        var smallestRange = long.MaxValue;
+        foreach (var candidate in candidates)
+        {
+            var count = await Git.RunAsync(repository, ["rev-list", "--count", $"{candidate}..{head}"], ct);
+            var range = long.Parse(count, System.Globalization.CultureInfo.InvariantCulture);
+            if (range >= smallestRange) continue;
+            nearest = candidate;
+            smallestRange = range;
+        }
+        return nearest;
+    }
+
     /// <summary>
     /// Checks the bundle against <paramref name="repository"/> (made with <c>git init</c> if the folder
     /// isn't one yet), then fetches its <paramref name="branch"/> into <paramref name="into"/> (default
@@ -99,11 +147,86 @@ public static class GitBundles
         Directory.CreateDirectory(repository);
         if (!IsRepository(repository)) await Git.RunAsync(repository, ["init", "--quiet"], ct);
         var bundle = Path.GetFullPath(bundlePath);
-        await Git.RunAsync(repository, ["bundle", "verify", bundle], ct);
 
         var target = into is null ? $"refs/remotes/mbus/{branch}" : into.StartsWith("refs/", StringComparison.Ordinal) ? into : $"refs/heads/{into}";
-        await Git.RunAsync(repository, ["fetch", "--quiet", "--no-tags", bundle, $"+refs/heads/{branch}:{target}"], ct);
+        await ApplyAsync(bundle, $"repository '{repository}'", [$"+refs/heads/{branch}:{target}"],
+            (args, token) => Git.RunAsync(repository, args, token), writeFetchHead: true, ct);
         return await Git.CommitIdAsync(repository, target, ct);
+    }
+
+    /// <summary>Applies a bundle in an initialized repository, recovering missing prerequisites from its remotes.</summary>
+    /// <param name="bundle">The bundle file.</param>
+    /// <param name="repository">Repository description for errors.</param>
+    /// <param name="refSpecs">Refs to fetch from the bundle.</param>
+    /// <param name="run">Runs git in the receiving repository and throws <see cref="GitException"/> on failure.</param>
+    /// <param name="writeFetchHead">Whether the bundle fetch writes FETCH_HEAD.</param>
+    /// <param name="ct">Cancels the operation.</param>
+    internal static async Task ApplyAsync(string bundle, string repository, IReadOnlyList<string> refSpecs,
+        Func<IReadOnlyList<string>, CancellationToken, Task<string>> run, bool writeFetchHead, CancellationToken ct)
+    {
+        bundle = Path.GetFullPath(bundle);
+        var missing = await MissingPrerequisitesAsync(ReadHeader(bundle), run, ct);
+        var temporaryRefs = new List<string>();
+        try
+        {
+            if (missing.Count > 0)
+            {
+                var prefix = $"refs/mbus/prerequisites/{Guid.NewGuid():N}/";
+                string[] fetch = ["fetch", "--quiet", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head"];
+                var remotes = (await run(["remote"], ct)).Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                foreach (var remote in remotes.OrderBy(r => r == "origin" ? 0 : 1))
+                {
+                    var refs = missing.Select(commit => (Commit: commit, Ref: prefix + commit)).ToArray();
+                    temporaryRefs.AddRange(refs.Select(entry => entry.Ref));
+                    await TryRunAsync(run, [.. fetch, "--", remote, .. refs.Select(entry => $"{entry.Commit}:{entry.Ref}")], ct);
+                    missing = await MissingAsync(missing, run, ct);
+                    if (missing.Count > 0)
+                    {
+                        await TryRunAsync(run, [.. fetch, "--", remote], ct);
+                        missing = await MissingAsync(missing, run, ct);
+                    }
+                    if (missing.Count > 0 && (await run(["rev-parse", "--is-shallow-repository"], ct)).Trim() == "true")
+                    {
+                        await TryRunAsync(run, [.. fetch, "--unshallow", "--", remote], ct);
+                        missing = await MissingAsync(missing, run, ct);
+                    }
+                    if (missing.Count == 0) break;
+                }
+                if (missing.Count > 0)
+                    throw new GitException($"The bundle needs commits missing from {repository}: {string.Join(", ", missing)}. Fetch them or ask the sender to resend with base: \"\" for the whole history.", input: "repository");
+            }
+            var args = new List<string> { "fetch", "--quiet", "--no-tags", "--no-recurse-submodules" };
+            if (!writeFetchHead) args.Add("--no-write-fetch-head");
+            args.AddRange(["--", bundle, .. refSpecs]);
+            await run(args, ct);
+        }
+        finally
+        {
+            foreach (var reference in temporaryRefs.Distinct(StringComparer.Ordinal))
+                await TryRunAsync(run, ["update-ref", "-d", reference], CancellationToken.None);
+        }
+    }
+
+    /// <summary>Returns the bundle's prerequisite commits absent from the receiving repository.</summary>
+    internal static Task<List<string>> MissingPrerequisitesAsync(BundleHeader header,
+        Func<IReadOnlyList<string>, CancellationToken, Task<string>> run, CancellationToken ct) =>
+        MissingAsync(header.Prerequisites, run, ct);
+
+    private static async Task<List<string>> MissingAsync(IReadOnlyList<string> commits,
+        Func<IReadOnlyList<string>, CancellationToken, Task<string>> run, CancellationToken ct)
+    {
+        var missing = new List<string>();
+        foreach (var commit in commits)
+            if (!await TryRunAsync(run, ["cat-file", "-e", commit + "^{commit}"], ct))
+                missing.Add(commit);
+        return missing;
+    }
+
+    private static async Task<bool> TryRunAsync(Func<IReadOnlyList<string>, CancellationToken, Task<string>> run,
+        IReadOnlyList<string> args, CancellationToken ct)
+    {
+        try { await run(args, ct); return true; }
+        catch (GitException e) when (e.RawOutput) { return false; }
     }
 
     /// <summary>
@@ -349,7 +472,8 @@ public static class GitBundles
         }
     }
 
-    /// <summary>A repository or worktree rooted here (<c>.git</c> is a folder, or a file in a worktree), not a parent folder's.</summary>
+    /// <summary>A repository or worktree rooted here, including a bare repository.</summary>
     private static bool IsRepository(string directory) =>
-        Directory.Exists(Path.Combine(directory, ".git")) || File.Exists(Path.Combine(directory, ".git"));
+        Directory.Exists(Path.Combine(directory, ".git")) || File.Exists(Path.Combine(directory, ".git"))
+        || (File.Exists(Path.Combine(directory, "HEAD")) && Directory.Exists(Path.Combine(directory, "objects")));
 }

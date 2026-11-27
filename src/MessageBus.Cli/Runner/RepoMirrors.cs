@@ -1,3 +1,4 @@
+using MessageBus.Attachments.Client;
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text;
@@ -258,9 +259,10 @@ public sealed class RepoMirrors(string root, TimeProvider? time = null)
         {
             return null;
         }
+        var header = GitBundles.ReadHeader(bundle);
         foreach (var copy in Directory.EnumerateDirectories(Root, CodePrefix(workspaceId) + "*.git").OrderByDescending(LastUsed))
         {
-            if (await GitAsync(git, Root, ["-C", copy, "bundle", "verify", "--quiet", Path.GetFullPath(bundle)], cancellationToken).ConfigureAwait(false) is null)
+            if ((await GitBundles.MissingPrerequisitesAsync(header, BundleGit(git, copy), cancellationToken).ConfigureAwait(false)).Count == 0)
             {
                 return copy;
             }
@@ -285,10 +287,10 @@ public sealed class RepoMirrors(string root, TimeProvider? time = null)
         try
         {
             var error = await GitAsync(git, Root, ["init", "--bare", "--quiet", incoming], cancellationToken).ConfigureAwait(false)
-                        ?? await GitAsync(git, Root, ["-C", incoming, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head", Path.GetFullPath(bundle), .. RefSpecs(header)], cancellationToken).ConfigureAwait(false);
+                        ?? await ApplyBundleAsync(git, incoming, bundle, header, cancellationToken).ConfigureAwait(false);
             if (error is not null)
             {
-                return (null, error);
+                return (null, RunnerGit.DescribePath(error, incoming, "this machine's working copy"));
             }
             var root = (await OutputAsync(git, ["-C", incoming, "rev-list", "--first-parent", "--max-parents=0", head], cancellationToken).ConfigureAwait(false))
                 ?.Split('\n', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries).FirstOrDefault();
@@ -311,7 +313,8 @@ public sealed class RepoMirrors(string root, TimeProvider? time = null)
                 }
                 if (error is not null)
                 {
-                    return (null, error);
+                    error = RunnerGit.DescribePath(error, copy, "this machine's repository copy");
+                    return (null, RunnerGit.DescribePath(error, incoming, "this machine's working copy"));
                 }
                 MarkCodeRefsReceived(copy, header, _time.GetUtcNow());
                 MarkUsed(copy, _time.GetUtcNow());
@@ -324,7 +327,7 @@ public sealed class RepoMirrors(string root, TimeProvider? time = null)
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            return (null, ex.Message);
+            return (null, "Couldn't access this machine's copy of the repository or the task's bundle.");
         }
         finally
         {
@@ -350,7 +353,7 @@ public sealed class RepoMirrors(string root, TimeProvider? time = null)
             }
             var file = Path.GetFullPath(bundle);
             // A new repository fetching one commit from the copy: its own objects, no shared files, nothing else of the copy's.
-            var error = await GitAsync(git, Root, ["-C", copy, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head", file, .. RefSpecs(header)], cancellationToken).ConfigureAwait(false)
+            var error = await ApplyBundleAsync(git, copy, file, header, cancellationToken).ConfigureAwait(false)
                         ?? await GitAsync(git, Root, ["init", "--quiet", workTree], cancellationToken).ConfigureAwait(false)
                         ?? await GitAsync(git, Root, ["-C", workTree, "remote", "add", "origin", file], cancellationToken).ConfigureAwait(false)
                         ?? await GitAsync(git, Root, ["-C", workTree, "fetch", RunnerGit.LocalUploadPack, "--quiet", "--no-tags", "--no-write-fetch-head", Path.GetFullPath(copy),
@@ -360,11 +363,14 @@ public sealed class RepoMirrors(string root, TimeProvider? time = null)
                 MarkCodeRefsReceived(copy, header, _time.GetUtcNow());
                 MarkUsed(copy, _time.GetUtcNow());
             }
-            return error;
+            if (error is null) return null;
+            error = RunnerGit.DescribePath(error, workTree, "this machine's working copy");
+            error = RunnerGit.DescribePath(error, copy, "this machine's repository copy");
+            return RunnerGit.DescribePath(error, file, "the task's bundle");
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            return ex.Message;
+            return "Couldn't access this machine's copy of the repository or the task's bundle.";
         }
         finally
         {
@@ -372,33 +378,38 @@ public sealed class RepoMirrors(string root, TimeProvider? time = null)
         }
     }
 
+    private static async Task<string?> ApplyBundleAsync(string git, string repository, string bundle, BundleHeader header, CancellationToken ct)
+    {
+        try
+        {
+            await GitBundles.ApplyAsync(bundle, "this machine's working copy", [.. RefSpecs(header)], BundleGit(git, repository, bundle), writeFetchHead: false, ct).ConfigureAwait(false);
+            return null;
+        }
+        catch (GitException ex)
+        {
+            return ex.Message;
+        }
+    }
+
+    private static Func<IReadOnlyList<string>, CancellationToken, Task<string>> BundleGit(string git, string repository, string? bundle = null) =>
+        async (args, ct) =>
+        {
+            var (output, error) = await RunGitAsync(git, Path.GetTempPath(), ["-C", repository, .. args], ct, captureOutput: true).ConfigureAwait(false);
+            if (error is null) return output;
+            error = RunnerGit.DescribePath(error, repository, "this machine's working copy");
+            if (bundle is not null)
+                error = RunnerGit.DescribePath(error, Path.GetFullPath(bundle), "the task's bundle");
+            throw new GitException(error, rawOutput: true);
+        };
+
     /// <summary>Each branch in the bundle kept under its commit.</summary>
     private static IEnumerable<string> RefSpecs(Attachments.Client.BundleHeader header) =>
         header.Refs.Where(r => r.Key.StartsWith("refs/heads/", StringComparison.Ordinal)).Select(r => $"+{r.Key}:{CodeRef(r.Value)}").Distinct();
 
     private static async Task<string?> OutputAsync(string git, IReadOnlyList<string> args, CancellationToken cancellationToken)
     {
-        var lines = new List<string>();
-        using var process = AgentProcess.Start(new ProcessLaunch
-        {
-            FileName = git,
-            Arguments = RunnerGit.Arguments(args),
-            WorkingDirectory = Path.GetTempPath(),
-            Environment = new Dictionary<string, string?> { ["GIT_TERMINAL_PROMPT"] = "0" },
-        }, line =>
-        {
-            lock (lines)
-            {
-                lines.Add(line);
-            }
-        }, tailLines: 20);
-        using var kill = cancellationToken.Register(process.Kill);
-        var exit = await process.WaitForExitAsync().ConfigureAwait(false);
-        cancellationToken.ThrowIfCancellationRequested();
-        lock (lines)
-        {
-            return exit == 0 ? string.Join('\n', lines) : null;
-        }
+        var (output, error) = await RunGitAsync(git, Path.GetTempPath(), args, cancellationToken, captureOutput: true).ConfigureAwait(false);
+        return error is null ? output : null;
     }
 
     /// <summary>The remote's default branch as a clone recorded it (<c>refs/remotes/origin/HEAD</c>), or null.</summary>
@@ -419,8 +430,13 @@ public sealed class RepoMirrors(string root, TimeProvider? time = null)
         return text is not null && text.StartsWith(prefix, StringComparison.Ordinal) && text.Length > prefix.Length ? text[prefix.Length..] : null;
     }
 
-    private static async Task<string?> GitAsync(string git, string directory, IReadOnlyList<string> args, CancellationToken cancellationToken, string? input = null)
+    private static async Task<string?> GitAsync(string git, string directory, IReadOnlyList<string> args, CancellationToken cancellationToken, string? input = null) =>
+        (await RunGitAsync(git, directory, args, cancellationToken, input: input).ConfigureAwait(false)).Error;
+
+    private static async Task<(string Output, string? Error)> RunGitAsync(string git, string directory,
+        IReadOnlyList<string> args, CancellationToken cancellationToken, bool captureOutput = false, string? input = null)
     {
+        var lines = new List<string>();
         using var process = AgentProcess.Start(new ProcessLaunch
         {
             FileName = git,
@@ -429,10 +445,17 @@ public sealed class RepoMirrors(string root, TimeProvider? time = null)
             WorkingDirectory = directory,
             Environment = new Dictionary<string, string?> { ["GIT_TERMINAL_PROMPT"] = "0" },
             StandardInput = input,
-        }, tailLines: 20);
+        }, captureOutput ? line =>
+        {
+            lock (lines) lines.Add(line);
+        } : null, tailLines: 20);
         using var kill = cancellationToken.Register(process.Kill);
         var exit = await process.WaitForExitAsync().ConfigureAwait(false);
         cancellationToken.ThrowIfCancellationRequested();
-        return exit == 0 ? null : $"git {args[0]} failed (exit {exit}): {string.Join(" ", process.Tail()).Trim()}";
+        lock (lines)
+        {
+            return exit == 0 ? (string.Join('\n', lines), null)
+                : ("", $"git {args[0]} failed (exit {exit}): {string.Join(" ", process.Tail()).Trim()}");
+        }
     }
 }

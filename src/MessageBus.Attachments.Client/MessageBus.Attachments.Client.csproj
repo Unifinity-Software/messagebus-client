@@ -16,6 +16,7 @@
   <ItemGroup>
     <Compile Include="..\Shared\CredentialFreeProxy.cs" Link="Http\CredentialFreeProxy.cs" />
     <InternalsVisibleTo Include="MessageBus.Cli.Tests" />
+    <InternalsVisibleTo Include="MessageBus.Cli" />
     <ProjectReference Include="..\MessageBus.Contracts\MessageBus.Contracts.csproj" />
     <ProjectReference Include="..\MessageBus.Crypto\MessageBus.Crypto.csproj" />
   </ItemGroup>

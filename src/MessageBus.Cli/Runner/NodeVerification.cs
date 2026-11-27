@@ -1,3 +1,4 @@
+using MessageBus.Attachments.Client;
 using System.Text;
 using System.Text.Json;
 using MessageBus.Cli.Runner.Sandbox;
@@ -153,10 +154,22 @@ internal sealed class NodeVerification(string remote, IVerificationProcess proce
                 snapshot.Revision + ".." + BranchRef], ct, input: gitDirectory, output: exchange).ConfigureAwait(false))
             return null;
         var bundle = new FileInfo(Path.Combine(exchange, "result.bundle"));
-        if (!bundle.Exists || bundle.LinkTarget is not null
-            || !await GitOkAsync(fresh.WorkTree, ["fetch", "--no-tags", "--no-recurse-submodules", "/input",
-                BranchRef + ":refs/mbus/result"], ct, input: bundle.FullName).ConfigureAwait(false))
+        if (!bundle.Exists || bundle.LinkTarget is not null) return null;
+        try
+        {
+            await GitBundles.ApplyAsync(bundle.FullName, "the verification working copy", [BranchRef + ":refs/mbus/result"], async (args, token) =>
+            {
+                var importing = args.Contains(bundle.FullName, StringComparer.Ordinal);
+                var command = args.Select(arg => arg == bundle.FullName ? "/input" : arg).ToArray();
+                var run = await GitAsync(fresh.WorkTree, command, token, input: importing ? bundle.FullName : null).ConfigureAwait(false);
+                if (run.ExitCode != 0) throw new GitException("Git could not import the verification bundle.", rawOutput: true);
+                return run.Output;
+            }, writeFetchHead: true, ct).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is GitException or IOException)
+        {
             return null;
+        }
 
         var result = await GitAsync(fresh.WorkTree, ["rev-parse", "--verify", "refs/mbus/result^{commit}"], ct).ConfigureAwait(false);
         var revision = result.Output.Trim();

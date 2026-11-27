@@ -41,7 +41,8 @@ public sealed class HostAllowList
     public bool Allows(string host)
     {
         var name = host.Trim().TrimEnd('.').Trim('[', ']');
-        return name.Length > 0 && (_exact.Contains(name) || _suffixes.Any(s => name.EndsWith(s, StringComparison.OrdinalIgnoreCase) && name.Length > s.Length));
+        return name.Length > 0 && (_exact.Contains(name)
+            || _suffixes.Any(s => name.EndsWith(s, StringComparison.OrdinalIgnoreCase) && name.Length > s.Length));
     }
 
     /// <summary>The host part of an entry (<c>https://dev.azure.com/org</c> → <c>dev.azure.com</c>), lower case; null when there is none.</summary>
@@ -208,9 +209,12 @@ public sealed class RunNetwork : IDisposable
         if (host == "github.com")
         {
             hosts.Add("*.githubusercontent.com");
+            hosts.Add("github-production-user-asset-6210df.s3.amazonaws.com");
         }
         return hosts;
     }
+
+    internal static readonly string[] AntigravityProviderHosts = ["www.googleapis.com", "aicode.googleapis.com", "play.googleapis.com"];
 
     /// <summary>The agents' model providers and sign-in (Claude Code, Codex, GitHub Copilot CLI, OpenCode, Antigravity CLI).</summary>
     internal static readonly string[] ModelProviders =

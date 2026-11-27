@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Runtime.InteropServices;
+using MessageBus.Cli.Agents;
 using MessageBus.Cli.Configuration;
 using MessageBus.Cli.Hosting;
 using MessageBus.Cli.Security;
@@ -150,7 +151,7 @@ public static class RunnerEnvironment
             return new DetectedAgent { Kind = kind, Found = path is not null, ExecutablePath = path, OnPath = path is not null };
         }).ToList();
         var capabilities = new List<string> { CapabilityNames.Format(CapabilityNames.OsPrefix, os == MachineOs.MacOs ? "macos" : os.ToString()) };
-        capabilities.AddRange(agents.Where(a => a.Found).Select(a => CapabilityNames.Format(CapabilityNames.AgentPrefix, AgentKinds.Name(a.Kind))));
+        capabilities.AddRange(AgentScanner.AgentCapabilities(agents, requireSignIn: false));
         return new MachineInventory
         {
             MachineId = host.MachineId ?? "",
@@ -183,6 +184,7 @@ public sealed class EnvironmentRunnerHostContext : IRunnerHostContext
     private readonly Func<HttpMessageHandler> _createHandler;
     private readonly IReadOnlyList<string> _extraDirectories;
     private readonly TimeProvider _time;
+    internal Func<HttpMessageHandler> CreateAntigravityHttpHandler { get; init; } = AntigravityReadiness.Handler;
 
     /// <summary>Reads the variables through <paramref name="env"/>.</summary>
     /// <param name="env">Environment lookup (null when unset).</param>
@@ -281,8 +283,21 @@ public sealed class EnvironmentRunnerHostContext : IRunnerHostContext
 
     /// <inheritdoc />
     // Container runners use environment configuration and have no persisted workspace trust to check.
-    public Task<MachineInventory> BuildInventoryAsync(int slots, CancellationToken cancellationToken) =>
-        Task.FromResult(RunnerEnvironment.BasicInventory(this, slots, _time.GetUtcNow()));
+    public async Task<MachineInventory> BuildInventoryAsync(int slots, CancellationToken cancellationToken)
+    {
+        var inventory = RunnerEnvironment.BasicInventory(this, slots, _time.GetUtcNow());
+        var agent = inventory.Agents.FirstOrDefault(a => a is { Kind: AgentKind.Antigravity, Found: true });
+        if (agent is null) return inventory;
+
+        var checkedAgent = await AntigravityReadiness.CheckAsync(agent, CreateAntigravityHttpHandler, _time, cancellationToken).ConfigureAwait(false);
+        var agents = inventory.Agents.Select(a => a.Kind == agent.Kind ? checkedAgent : a).ToArray();
+        var otherCapabilities = inventory.Capabilities.Except(AgentScanner.AgentCapabilities(inventory.Agents, requireSignIn: false));
+        return inventory with
+        {
+            Agents = agents,
+            Capabilities = [.. otherCapabilities, .. AgentScanner.AgentCapabilities(agents, requireSignIn: false)],
+        };
+    }
 
     /// <inheritdoc />
     public string? GetEnvironmentVariable(string name) => _env(name);

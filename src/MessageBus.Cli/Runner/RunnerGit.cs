@@ -15,6 +15,15 @@ internal static class RunnerGit
     // explicitly so the source can read long object paths too; these arguments contain no shell metacharacters.
     internal static string LocalUploadPack => "--upload-pack=git " + string.Join(' ', Arguments(["upload-pack"]));
 
+    internal static string DescribePath(string error, string path, string description)
+    {
+        if (!OperatingSystem.IsWindows())
+            return error.Replace(path, description, StringComparison.Ordinal);
+
+        return error.Replace(path, description, StringComparison.OrdinalIgnoreCase)
+            .Replace(path.Replace('\\', '/'), description, StringComparison.OrdinalIgnoreCase);
+    }
+
     internal static Task<bool> IsValidRefAsync(string reference, CancellationToken ct) =>
         RunAsync(null, ["check-ref-format", reference], "", ct);
 

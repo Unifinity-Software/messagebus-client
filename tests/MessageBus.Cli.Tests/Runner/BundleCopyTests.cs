@@ -206,7 +206,17 @@ public sealed class BundleCopyTests(BundleCopyTests.Code code) : IClassFixture<B
         // main after B: only C travelled, the rest came from the copy, and nothing of the other branch did.
         source.File = code.Next;
         using var next = RunWorkspace.Create(work, "dlv_next", 1);
-        checkoutError = await next.CheckOutAsync(Delivery("dlv_next", "main"), _ => code.Git, source, TestContext.Current.CancellationToken, ask: source.AskAsync);
+        var delivery = Delivery("dlv_next", "main");
+        delivery = delivery with
+        {
+            Envelope = delivery.Envelope with { Refs = [new Ref { Kind = "git.repo", Url = Path.Combine(work, "unavailable.git") }] },
+        };
+        checkoutError = await next.CheckOutAsync(delivery, _ => code.Git, source, TestContext.Current.CancellationToken,
+            wrap: launch =>
+            {
+                Assert.DoesNotContain("clone", launch.Arguments);
+                return launch;
+            }, ask: source.AskAsync);
         Assert.True(checkoutError is null, checkoutError);
         Assert.Equal(0, source.Asked);
         Assert.Equal("three", File.ReadAllText(Path.Combine(next.WorkTree, "README.md")));
@@ -218,6 +228,31 @@ public sealed class BundleCopyTests(BundleCopyTests.Code code) : IClassFixture<B
         Assert.Contains(code.Secret, (await Git.RunAsync(copy, ["-c", "core.longpaths=true", "rev-list", "--all"])).Split('\n'));
         // Its own objects: nothing shared with the copy, so the task can't change what later tasks get.
         Assert.False(File.Exists(Path.Combine(next.WorkTree, ".git", "objects", "info", "alternates")));
+    }
+
+    [Fact]
+    public async Task A_runner_without_a_copy_clones_the_task_repository_before_applying_its_bundle()
+    {
+        code.RequireLocalFetch();
+        var ct = TestContext.Current.CancellationToken;
+        var remote = Path.Combine(code.Root, "task-repository.git");
+        await Git.RunAsync(code.Root, ["clone", "--bare", "--branch", "main", code.Whole, remote], ct);
+        Assert.NotEqual(code.C, await Git.CommitIdAsync(remote, "refs/heads/main", ct));
+
+        var source = new Bundles { File = code.Next };
+        using var run = RunWorkspace.Create(Path.Combine(code.Root, "cold-checkout"), "dlv_clone", 1);
+        var delivery = Delivery("dlv_clone", "main");
+        delivery = delivery with
+        {
+            Envelope = delivery.Envelope with { Refs = [new Ref { Kind = "git.repo", Url = remote }] },
+        };
+
+        var error = await run.CheckOutAsync(delivery, _ => code.Git, source, ct, ask: source.AskAsync);
+        Assert.True(error is null, error);
+        Assert.Equal(0, source.Asked);
+        Assert.Equal(code.C, await Git.CommitIdAsync(run.WorkTree, "HEAD", ct));
+        Assert.Equal("main", (await Git.RunAsync(run.WorkTree, ["branch", "--show-current"], ct)).Trim());
+        Assert.Equal("three", await File.ReadAllTextAsync(Path.Combine(run.WorkTree, "README.md"), ct));
     }
 
     [Fact]
