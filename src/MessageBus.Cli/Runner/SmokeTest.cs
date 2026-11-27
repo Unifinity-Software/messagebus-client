@@ -342,7 +342,7 @@ internal sealed class SmokeTest(SmokeTestOptions options)
             FileName = options.Git,
             Arguments = ["-C", tree, .. args],
             WorkingDirectory = tree,
-            Environment = new Dictionary<string, string?> { ["GIT_TERMINAL_PROMPT"] = "0" },
+            Environment = new Dictionary<string, string?> { ["GIT_TERMINAL_PROMPT"] = "0", ["GCM_INTERACTIVE"] = "never" },
         }, line => { lock (lines) { lines.Add(line); } }, tailLines: 20);
         using var kill = cancellationToken.Register(git.Kill);
         var exit = await git.WaitForExitAsync().ConfigureAwait(false);

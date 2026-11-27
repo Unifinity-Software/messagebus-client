@@ -810,8 +810,11 @@ public sealed class RunnerTaskTests
         Assert.Equal("from the bundle", File.ReadAllText(Path.Combine(h.WorkTreeOf("dlv_bundle"), "README.md")));
     }
 
-    [Fact]
-    public async Task Clone_mode_starts_each_run_from_the_machines_mirror_of_the_repository_and_keeps_the_mirror_up_to_date()
+    [Theory]
+    [InlineData("https://git.example.test/team/app.git")]
+    [InlineData("ssh://git@git.example.test/team/app.git")]
+    [InlineData("git@git.example.test:team/app.git")]
+    public async Task Clone_mode_starts_each_run_from_the_machines_mirror_of_the_repository_and_keeps_the_mirror_up_to_date(string url)
     {
         await WindowsRunCapabilities.RequireGitShellAsync();
         var git = CommandLocator.Find("git", Environment.GetEnvironmentVariable, []);
@@ -821,13 +824,14 @@ public sealed class RunnerTaskTests
         Git(git!, source, "init", "--quiet", "--initial-branch=main");
         var first = Commit(git!, source, "first version");
         var origin = Path.Combine(h.Scratch, "origin.git");
+        ProcessLaunch Remote(ProcessLaunch launch) => TestRepositoryRemote.Map(launch, url, origin);
         Git(git!, h.Scratch, "clone", "--quiet", "--bare", source, origin);
         var task = h.Task("dlv_clone", environment: new RunEnvironment { Checkout = CheckoutMode.Clone });
-        task = task with { Envelope = task.Envelope with { Refs = [new Ref { Kind = "url", Url = origin }] } };
+        task = task with { Envelope = task.Envelope with { Refs = [new Ref { Kind = "url", Url = url }] } };
 
         using var run1 = RunWorkspace.Create(h.WorkRoot, "dlv_1", 1);
-        Assert.Null(await run1.CheckOutAsync(task, _ => git, null, TestContext.Current.CancellationToken));
-        Assert.True(RepoMirrors.For(h.WorkRoot).Has(origin));
+        Assert.Null(await run1.CheckOutAsync(task, _ => git, null, TestContext.Current.CancellationToken, Remote));
+        Assert.True(RepoMirrors.For(h.WorkRoot).Has(url));
 
         // The remote's history is replaced: a fresh clone could no longer check out the first commit.
         Git(git!, source, "checkout", "--quiet", "--orphan", "rewrite");
@@ -839,13 +843,13 @@ public sealed class RunnerTaskTests
 
         // The next run copies the mirror (which still has it), fetches what is new from the real remote, and works on its own copy.
         using var run2 = RunWorkspace.Create(h.WorkRoot, "dlv_2", 1);
-        var pinned = task with { Envelope = task.Envelope with { Refs = [new Ref { Kind = "url", Url = origin, Sha = first }] } };
-        Assert.Null(await run2.CheckOutAsync(pinned, _ => git, null, TestContext.Current.CancellationToken));
+        var pinned = task with { Envelope = task.Envelope with { Refs = [new Ref { Kind = "url", Url = url, Sha = first }] } };
+        Assert.Null(await run2.CheckOutAsync(pinned, _ => git, null, TestContext.Current.CancellationToken, Remote));
         Assert.Equal("first version", File.ReadAllText(Path.Combine(run2.WorkTree, "README.md")));
-        Assert.Equal(origin, GitOutput(git!, run2.WorkTree, "remote", "get-url", "origin"));
+        Assert.Equal(url, GitOutput(git!, run2.WorkTree, "remote", "get-url", "origin"));
         Assert.Equal(second, GitOutput(git!, run2.WorkTree, "rev-parse", "refs/remotes/origin/main"));
         Assert.False(File.Exists(Path.Combine(run2.WorkTree, ".git", "objects", "info", "alternates")));
-        Assert.Equal(second, GitOutput(git!, RepoMirrors.For(h.WorkRoot).PathFor(origin), "rev-parse", "refs/heads/main"));
+        Assert.Equal(second, GitOutput(git!, RepoMirrors.For(h.WorkRoot).PathFor(url), "rev-parse", "refs/heads/main"));
     }
 
     [Fact]

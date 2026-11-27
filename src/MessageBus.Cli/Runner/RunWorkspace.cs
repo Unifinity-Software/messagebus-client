@@ -63,6 +63,8 @@ public sealed partial class RunWorkspace : IDisposable
     private FileStream? _lock;
 
     internal Action<string>? GitLog { get; set; }
+    // Prepared by isolation before checkout, also used by runner-owned Git outside an OS wrapper.
+    internal IReadOnlyDictionary<string, string?> GitEnvironment { get; set; } = new Dictionary<string, string?>();
     internal Uri? LocalModelEndpoint { get; set; }
     internal string? PrivateSocketDirectory { get; set; }
 
@@ -280,12 +282,14 @@ public sealed partial class RunWorkspace : IDisposable
         Func<ProcessLaunch, ProcessLaunch> wrap, CancellationToken cancellationToken)
     {
         var url = RepositoryUrl(repoRef)!;
+        if (!RunnerGit.IsRemoteRepository(url))
+            return "The repository address must use HTTPS or SSH. Local folders and file addresses aren't allowed.";
         var mirrors = RepoMirrors.For(Path.GetDirectoryName(Root)!);
         var error = mirrors.Has(url) ? await CopyFromMirrorAsync(git, mirrors, url, wrap, cancellationToken).ConfigureAwait(false) : "no mirror";
         if (error is not null)
         {
             TryDelete(WorkTree);
-            error = await GitAsync(git, ["clone", "--quiet", url, WorkTree], wrap, cancellationToken).ConfigureAwait(false);
+            error = await GitAsync(git, ["clone", "--quiet", "--", url, WorkTree], RemoteGit(wrap), cancellationToken).ConfigureAwait(false);
         }
         if (error is null && repoRef.Sha is { Length: > 0 } sha)
         {
@@ -401,13 +405,19 @@ public sealed partial class RunWorkspace : IDisposable
         // The runner copies its own mirror (no shared files, so the run can't change it); the run's git does the rest.
         var error = await GitAsync(git, ["clone", "--quiet", "--no-hardlinks", "--no-checkout", mirrors.PathFor(url), WorkTree], launch => launch, cancellationToken).ConfigureAwait(false)
                     ?? await GitAsync(git, ["-C", WorkTree, "remote", "set-url", "origin", url], wrap, cancellationToken).ConfigureAwait(false)
-                    ?? await GitAsync(git, ["-C", WorkTree, "fetch", "--quiet", "--prune", "--tags", "origin"], wrap, cancellationToken).ConfigureAwait(false);
+                    ?? await GitAsync(git, ["-C", WorkTree, "fetch", "--quiet", "--prune", "--tags", "origin"], RemoteGit(wrap), cancellationToken).ConfigureAwait(false);
         if (error is null && RepoMirrors.CurrentBranch(WorkTree) is { } branch)
         {
             error = await GitAsync(git, ["-C", WorkTree, "checkout", "--quiet", "-B", branch, "refs/remotes/origin/" + branch], wrap, cancellationToken).ConfigureAwait(false);
         }
         return error;
     }
+
+    private static Func<ProcessLaunch, ProcessLaunch> RemoteGit(Func<ProcessLaunch, ProcessLaunch> wrap) => launch => wrap(launch with
+    {
+        // Also reject a local transport introduced by an inherited URL rewrite.
+        Environment = new Dictionary<string, string?>(launch.Environment) { ["GIT_ALLOW_PROTOCOL"] = "https:ssh" },
+    });
 
     /// <summary>
     /// Ends the run and deletes its folder: the worktree, the code bundle, git settings, prompt, caches and anything the
@@ -587,7 +597,8 @@ public sealed partial class RunWorkspace : IDisposable
                 return $"https://dev.azure.com/{org}/{project}/_git/{name}";
             }
         }
-        return r.Url is { } url && url.EndsWith(".git", StringComparison.OrdinalIgnoreCase) ? url : null;
+        return r.Url is { Length: > 0 } url && (r.Kind is "git.repository" or "git.repo"
+            || url.EndsWith(".git", StringComparison.OrdinalIgnoreCase)) ? url : null;
     }
 
     /// <summary>Deletes a folder tree, including git's read-only object files; leaves it when something still holds a file.</summary>
@@ -668,7 +679,11 @@ public sealed partial class RunWorkspace : IDisposable
             // Inherited post-checkout hooks/fsmonitor can start git children that outlive checkout.
             Arguments = RunnerGit.Arguments(args),
             WorkingDirectory = Root,
-            Environment = new Dictionary<string, string?> { ["GIT_TERMINAL_PROMPT"] = "0" },
+            Environment = new Dictionary<string, string?>(GitEnvironment)
+            {
+                ["GIT_TERMINAL_PROMPT"] = "0",
+                ["GCM_INTERACTIVE"] = "never",
+            },
         }), captureOutput ? line =>
         {
             lock (output) output.Add(line);

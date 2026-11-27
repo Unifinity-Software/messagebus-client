@@ -443,10 +443,10 @@ public sealed class RunIsolation : IRunSandbox
         var snapshot = delivery.Verification;
         var repository = snapshot is not null ? new Uri(snapshot.Remote) : delivery.Envelope.Refs
             .Select(RunWorkspace.RepositoryUrl)
-            .Select(url => Uri.TryCreate(url, UriKind.Absolute, out var uri) && uri.Scheme == Uri.UriSchemeHttps ? uri : null)
+            .Select(RunnerGit.RepositoryUri)
             .FirstOrDefault(uri => uri is not null);
         var ownerGit = !_options.RequireAciSandbox && snapshot is null && _options.UseOwnerGit?.Invoke(delivery) == true;
-        var credential = repository is null || ownerGit || snapshot is not null ? null : await _options.Credentials.IssueAsync(new RepoCredentialRequest
+        var credential = repository?.Scheme != Uri.UriSchemeHttps || ownerGit || snapshot is not null ? null : await _options.Credentials.IssueAsync(new RepoCredentialRequest
         {
             DeliveryId = delivery.DeliveryId,
             WorkspaceId = delivery.Envelope.WorkspaceId,
@@ -604,8 +604,9 @@ public sealed class RunIsolation : IRunSandbox
         var marker = PosixRunProcesses.NewMarker();
         // Git over SSH goes through the proxy too where the sandbox would block it otherwise (macOS).
         var sshProxy = network is { NeedsCredential: false } && NetworkEnforced ? $"127.0.0.1:{network.Port.ToString(System.Globalization.CultureInfo.InvariantCulture)}" : null;
-        var variables = new Dictionary<string, string?>(RunGitConfig.Write(workspace.Root, _identity, repository, credential, canPush, sshProxy,
-            ownerGitConfig: ownerGit ? Path.Combine(_options.HomeDirectory, ".gitconfig") : null))
+        workspace.GitEnvironment = RunGitConfig.Write(workspace.Root, _identity, repository, credential, canPush, sshProxy,
+            ownerGitConfig: ownerGit ? Path.Combine(_options.HomeDirectory, ".gitconfig") : null);
+        var variables = new Dictionary<string, string?>(workspace.GitEnvironment)
         {
             ["TMPDIR"] = temp,
             ["TMP"] = temp,
@@ -658,6 +659,7 @@ public sealed class RunIsolation : IRunSandbox
                     FileName = options.Git,
                     Arguments = ["config", "--global", "--get", key],
                     WorkingDirectory = options.HomeDirectory,
+                    Environment = new Dictionary<string, string?> { ["GIT_TERMINAL_PROMPT"] = "0", ["GCM_INTERACTIVE"] = "never" },
                 }, line => value ??= line.Trim(), tailLines: 1);
                 return git.WaitForExitAsync().GetAwaiter().GetResult() == 0 && value is { Length: > 0 } ? value : null;
             }

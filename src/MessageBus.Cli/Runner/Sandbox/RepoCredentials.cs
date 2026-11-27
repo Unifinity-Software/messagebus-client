@@ -165,6 +165,7 @@ internal static class RunGitConfig
             ["GIT_CONFIG_GLOBAL"] = configFile,
             ["GIT_CONFIG_NOSYSTEM"] = ownerGitConfig is null ? "1" : null,
             ["GIT_TERMINAL_PROMPT"] = "0",
+            ["GCM_INTERACTIVE"] = "never",
         };
         if (!canPush || sshProxy is not null)
         {
