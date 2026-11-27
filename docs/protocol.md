@@ -818,10 +818,13 @@ link, downloads, checks the hash, opens it and, for a bundle, verifies it before
 For local `send` and per message in `send_many`, attachment order is existing `attachments` followed by the
 results of packaging `attach`. Only the first Git bundle in that order is eligible for automatic incremental
 packaging, send history bookkeeping, and runner checkout history recovery. Files and patches do not take that
-position. Later bundles default to whole history. An explicit nonempty companion `base` is honored and the
-send notice lists any prerequisite commits advertised by the bundle. An empty `base` requests whole history. If
-`fetch_attachment` reports missing prerequisite commits, fetch into a repository that has them or request a
-resend with `base: ""`.
+position. Later bundles default to whole history. When the sender has a configured Git remote and a requested
+base is local-only, packaging uses the closest published ancestor available in its remote-tracking refs or
+sends the whole history if the histories are unrelated. The attachment reports the base actually used and the
+send notice lists the advertised prerequisites. An empty `base` requests whole history. For an incremental
+bundle the runner tries a local code copy containing every prerequisite, then the repository named in the task,
+then requests history from the sender. If `fetch_attachment` still reports missing prerequisites, fetch into a
+repository that has them or request a resend with `base: ""`.
 
 The local attachment spec accepts optional `expectedHead` for Git bundles in `send`, `send_many`, and `settle`.
 It is a full 40- or 64-digit hex commit SHA checked against the branch advertised in the finished bundle before

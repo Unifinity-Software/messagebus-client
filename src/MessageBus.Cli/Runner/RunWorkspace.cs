@@ -299,17 +299,6 @@ public sealed partial class RunWorkspace : IDisposable
         }
         var mirrors = RepoMirrors.For(Path.GetDirectoryName(Root)!);
         var workspace = delivery.Envelope.WorkspaceId;
-        string? repositoryError = null;
-        if (header.Prerequisites.Count > 0 && delivery.Envelope.Refs.FirstOrDefault(r => RepositoryUrl(r) is not null) is { } repoRef)
-        {
-            var repository = RepositoryUrl(repoRef)!;
-            const string reference = "refs/remotes/mbus/task";
-            repositoryError = await CheckOutRepositoryAsync(git, repoRef, wrap, cancellationToken).ConfigureAwait(false)
-                ?? await ApplyBundleAsync(git, file, repository, branch, reference, wrap, cancellationToken).ConfigureAwait(false);
-            if (repositoryError is null)
-                return await GitAsync(git, ["-C", WorkTree, "checkout", "--quiet", "-B", branch, reference], wrap, cancellationToken).ConfigureAwait(false);
-            TryDelete(WorkTree);
-        }
         string? copy;
         if (header.Prerequisites.Count == 0)
         {
@@ -326,6 +315,19 @@ public sealed partial class RunWorkspace : IDisposable
         }
         else if ((copy = await mirrors.FindCodeAsync(git, workspace, file, cancellationToken).ConfigureAwait(false)) is null)
         {
+            string? repositoryError = null;
+            if (delivery.Envelope.Refs.FirstOrDefault(r => RepositoryUrl(r) is not null) is { } repoRef)
+            {
+                var repository = RepositoryUrl(repoRef)!;
+                const string reference = "refs/remotes/mbus/task";
+                repositoryError = await CheckOutRepositoryAsync(git, repoRef, wrap, cancellationToken).ConfigureAwait(false)
+                    ?? await ApplyBundleAsync(git, file, repository, branch, reference, wrap, cancellationToken).ConfigureAwait(false)
+                    ?? await GitAsync(git, ["-C", WorkTree, "checkout", "--quiet", "-B", branch, reference], wrap, cancellationToken).ConfigureAwait(false);
+                if (repositoryError is null)
+                    return null;
+                TryDelete(WorkTree);
+            }
+
             var minutes = Math.Max(1, (int)Math.Round(historyWait.TotalMinutes));
             var history = ask is null ? null
                 : await bundles.RequestHistoryAsync(delivery, bundle, Root, ask, historyWait, cancellationToken).ConfigureAwait(false);

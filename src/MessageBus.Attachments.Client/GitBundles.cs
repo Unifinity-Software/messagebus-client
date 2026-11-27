@@ -31,7 +31,8 @@ public static class GitBundles
     /// <summary>
     /// Writes <paramref name="branch"/> (default: the checked-out branch) of <paramref name="repository"/>
     /// to a bundle at <paramref name="outputPath"/>: the commits after <paramref name="baseCommit"/>, or the
-    /// whole history when it is null, empty, or local-only in a repository with a remote.
+    /// whole history when it is null or empty. With a configured remote, a local-only base is replaced
+    /// by a shared published ancestor when one exists, otherwise by the whole history.
     /// </summary>
     /// <param name="repository">The repository (or a worktree of it).</param>
     /// <param name="outputPath">Where to write the bundle.</param>
@@ -47,9 +48,17 @@ public static class GitBundles
         var @base = string.IsNullOrEmpty(baseCommit) ? null : await Git.CommitIdAsync(repository, baseCommit, ct);
         if (@base == head) throw new GitException($"Nothing to send: {branch} has no commits after {baseCommit}.");
 
-        if (@base is not null && !string.IsNullOrWhiteSpace(await Git.RunAsync(repository, ["remote"], ct))
-            && string.IsNullOrWhiteSpace(await Git.RunAsync(repository, ["for-each-ref", "--contains", @base, "refs/remotes"], ct)))
-            @base = null;
+        if (@base is not null)
+        {
+            var remotes = (await Git.RunAsync(repository, ["remote"], ct))
+                .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            // refs/remotes/mbus can hold received bundles without representing a configured remote.
+            if (remotes.Length > 0 && string.IsNullOrWhiteSpace(await Git.RunAsync(repository,
+                ["for-each-ref", "--contains", @base, .. remotes.Select(remote => $"refs/remotes/{remote}/")], ct)))
+            {
+                @base = await NearestPublishedBaseAsync(repository, head, remotes, ct);
+            }
+        }
 
         List<string> args = ["bundle", "create", "--quiet", Path.GetFullPath(outputPath), source];
         if (@base is not null) args.Add($"^{@base}");
@@ -84,6 +93,34 @@ public static class GitBundles
             finally { File.Delete(renamed); }
         }
         return new GitBundle(outputPath, branch, advertisedHead, @base) { Prerequisites = header.Prerequisites };
+    }
+
+    private static async Task<string?> NearestPublishedBaseAsync(string repository, string head, string[] remotes, CancellationToken ct)
+    {
+        // Boundary commits are the published parents of the commits this branch adds.
+        var history = await Git.RunAsync(repository,
+            ["rev-list", "--boundary", head, "--not", .. remotes.Select(remote => $"--remotes={remote}/*")], ct);
+        if (history.Length == 0)
+        {
+            // The tip itself is published. Keep one or more commits in the bundle by using its first parent.
+            var parents = await Git.RunAsync(repository, ["rev-list", "--parents", "--max-count=1", head], ct);
+            return parents.Trim().Split(' ').Skip(1).FirstOrDefault();
+        }
+
+        var candidates = history.Split('\n').Where(line => line.StartsWith('-')).Select(line => line[1..]).ToArray();
+        if (candidates.Length <= 1) return candidates.FirstOrDefault();
+
+        string? nearest = null;
+        var smallestRange = long.MaxValue;
+        foreach (var candidate in candidates)
+        {
+            var count = await Git.RunAsync(repository, ["rev-list", "--count", $"{candidate}..{head}"], ct);
+            var range = long.Parse(count, System.Globalization.CultureInfo.InvariantCulture);
+            if (range >= smallestRange) continue;
+            nearest = candidate;
+            smallestRange = range;
+        }
+        return nearest;
     }
 
     /// <summary>

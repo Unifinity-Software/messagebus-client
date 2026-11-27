@@ -206,7 +206,17 @@ public sealed class BundleCopyTests(BundleCopyTests.Code code) : IClassFixture<B
         // main after B: only C travelled, the rest came from the copy, and nothing of the other branch did.
         source.File = code.Next;
         using var next = RunWorkspace.Create(work, "dlv_next", 1);
-        checkoutError = await next.CheckOutAsync(Delivery("dlv_next", "main"), _ => code.Git, source, TestContext.Current.CancellationToken, ask: source.AskAsync);
+        var delivery = Delivery("dlv_next", "main");
+        delivery = delivery with
+        {
+            Envelope = delivery.Envelope with { Refs = [new Ref { Kind = "git.repo", Url = Path.Combine(work, "unavailable.git") }] },
+        };
+        checkoutError = await next.CheckOutAsync(delivery, _ => code.Git, source, TestContext.Current.CancellationToken,
+            wrap: launch =>
+            {
+                Assert.DoesNotContain("clone", launch.Arguments);
+                return launch;
+            }, ask: source.AskAsync);
         Assert.True(checkoutError is null, checkoutError);
         Assert.Equal(0, source.Asked);
         Assert.Equal("three", File.ReadAllText(Path.Combine(next.WorkTree, "README.md")));

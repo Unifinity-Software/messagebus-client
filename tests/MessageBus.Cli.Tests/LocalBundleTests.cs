@@ -275,22 +275,36 @@ public sealed class LocalBundleTests
     }
 
     [Fact]
-    public async Task Local_only_base_is_replaced_with_full_history_when_the_sender_has_a_remote()
+    public async Task Local_only_base_uses_the_nearest_published_ancestor_or_whole_history()
     {
         using var machine = new TestMachine();
         var repo = await InitAsync(machine);
-        await CommitAsync(repo, "Published");
+        var older = await CommitAsync(repo, "Older published commit");
+        var published = await CommitAsync(repo, "Published base");
+        await Git.RunAsync(repo, ["branch", "older", older], Ct);
         var remote = Path.Combine(machine.Home, "origin.git");
         await Git.RunAsync(repo, ["clone", "--quiet", "--bare", repo, remote], Ct);
         await Git.RunAsync(repo, ["remote", "add", "origin", remote], Ct);
         await Git.RunAsync(repo, ["fetch", "--quiet", "origin"], Ct);
         var localBase = await CommitAsync(repo, "Local base");
         var tip = await CommitAsync(repo, "Worker result");
-        var bundle = await GitBundles.CreateAsync(repo, Path.Combine(machine.Home, "whole.bundle"), "main", localBase, Ct);
+        await Git.RunAsync(repo, ["update-ref", "refs/remotes/mbus/returned", localBase], Ct);
+        var bundle = await GitBundles.CreateAsync(repo, Path.Combine(machine.Home, "incremental.bundle"), "main", localBase, Ct);
 
-        Assert.Null(bundle.BaseCommit);
-        Assert.Empty(bundle.Prerequisites);
-        Assert.Equal(tip, await GitBundles.FetchAsync(bundle.Path, Path.Combine(machine.Home, "receiver"), "main", ct: Ct));
+        Assert.Equal(published, bundle.BaseCommit);
+        Assert.Equal(published, Assert.Single(bundle.Prerequisites));
+        var receiver = Path.Combine(machine.Home, "receiver");
+        await Git.RunAsync(repo, ["clone", "--quiet", remote, receiver], Ct);
+        Assert.Equal(tip, await GitBundles.FetchAsync(bundle.Path, receiver, "main", ct: Ct));
+
+        await Git.RunAsync(repo, ["checkout", "--quiet", "--orphan", "unrelated"], Ct);
+        var unrelatedBase = await CommitAsync(repo, "Unrelated root");
+        var unrelatedTip = await CommitAsync(repo, "Unrelated result");
+        var whole = await GitBundles.CreateAsync(repo, Path.Combine(machine.Home, "whole.bundle"), "unrelated", unrelatedBase, Ct);
+
+        Assert.Null(whole.BaseCommit);
+        Assert.Empty(whole.Prerequisites);
+        Assert.Equal(unrelatedTip, await GitBundles.FetchAsync(whole.Path, Path.Combine(machine.Home, "empty"), "unrelated", ct: Ct));
     }
 
     [Fact]
