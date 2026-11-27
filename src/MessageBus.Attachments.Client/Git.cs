@@ -56,6 +56,7 @@ public static class Git
         foreach (var arg in argList) start.ArgumentList.Add(arg);
         // Never stop to ask for credentials or an editor.
         start.Environment["GIT_TERMINAL_PROMPT"] = "0";
+        start.Environment["GCM_INTERACTIVE"] = "never";
         start.Environment["GIT_EDITOR"] = "true";
         start.Environment["LC_ALL"] = "C";
         start.Environment["LANGUAGE"] = "C";

@@ -811,11 +811,26 @@ public sealed class RunnerTaskTests
     }
 
     [Theory]
-    [InlineData("https://git.example.test/team/app.git")]
-    [InlineData("ssh://git@git.example.test/team/app.git")]
-    [InlineData("git@git.example.test:team/app.git")]
-    public async Task Clone_mode_starts_each_run_from_the_machines_mirror_of_the_repository_and_keeps_the_mirror_up_to_date(string url)
+    [InlineData(CheckoutMode.Clone, "../private/repo.git")]
+    [InlineData(CheckoutMode.Bundle, "../private/repo.git")]
+    [InlineData(CheckoutMode.Clone, "https://reader:example-password@git.example.test/team/app.git")]
+    public async Task A_refused_repository_fails_without_retrying_or_starting_the_agent(CheckoutMode mode, string address)
     {
+        await using var h = new RunnerHarness();
+        var task = h.Task("dlv_bad_repository", environment: new RunEnvironment { Checkout = mode });
+        task = task with { Envelope = task.Envelope with { Refs = [new Ref { Kind = "git.repo", Url = address }] } };
+        Assert.True((await h.DeliverAsync(task)).Accepted);
+
+        var result = (await h.Service.SettledAsync(task.DeliveryId)).Result;
+        Assert.Equal(SettleStatus.Failed, result.Status);
+        Assert.DoesNotContain("example-password", result.Error);
+        Assert.False(File.Exists(Path.Combine(h.WorkTreeOf(task.DeliveryId), "fake-agent.txt")));
+    }
+
+    [Fact]
+    public async Task Clone_mode_starts_each_run_from_the_machines_mirror_of_the_repository_and_keeps_the_mirror_up_to_date()
+    {
+        const string url = "https://git.example.test/team/app.git";
         await WindowsRunCapabilities.RequireGitShellAsync();
         var git = CommandLocator.Find("git", Environment.GetEnvironmentVariable, []);
         Assert.SkipWhen(git is null, "git isn't installed.");

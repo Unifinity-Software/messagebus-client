@@ -1,18 +1,26 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using MessageBus.Cli.Runner.Sandbox;
+using MessageBus.Contracts.Messaging;
 
 namespace MessageBus.Cli.Runner;
 
 internal static class RunnerGit
 {
+    internal static Ref? RepositoryRef(IEnumerable<Ref> references)
+    {
+        var named = references.Where(r => RunWorkspace.RepositoryUrl(r) is not null).ToArray();
+        return named.FirstOrDefault(r => IsRemoteRepository(RunWorkspace.RepositoryUrl(r)!)) ?? named.FirstOrDefault();
+    }
+
     internal static bool IsRemoteRepository(string address) => RepositoryUri(address) is not null;
 
     internal static Uri? RepositoryUri(string? address)
     {
         if (string.IsNullOrEmpty(address) || address.Any(c => char.IsWhiteSpace(c) || char.IsControl(c) || c == '\\')) return null;
         if (Uri.TryCreate(address, UriKind.Absolute, out var uri)
-            && uri.Scheme is "https" or "ssh" && !string.IsNullOrEmpty(uri.Host)) return uri;
+            && uri.Scheme is "https" or "ssh" && !string.IsNullOrEmpty(uri.Host))
+            return uri.Scheme == "https" && uri.UserInfo.Contains(':') ? null : uri;
 
         // SCP-style SSH: require the git user and a host, never a drive or relative path.
         if (!address.StartsWith("git@", StringComparison.Ordinal)) return null;

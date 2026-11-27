@@ -351,7 +351,7 @@ internal sealed class AgentRun
                 {
                     // Often the network or a credential; another attempt (maybe elsewhere) may work. Earlier history that never
                     // came is the sender's to fix (its session closed): another attempt wouldn't get it either.
-                    failure = (asked ? SettleStatus.Failed : SettleStatus.Abandoned, checkoutError);
+                    failure = (asked || workspace.RepositoryRefused ? SettleStatus.Failed : SettleStatus.Abandoned, checkoutError);
                 }
                 else if (asked)
                 {

@@ -441,10 +441,8 @@ public sealed class RunIsolation : IRunSandbox
                 throw new IOException("Protected ACI tasks need a fresh worktree and a remote model endpoint.");
         }
         var snapshot = delivery.Verification;
-        var repository = snapshot is not null ? new Uri(snapshot.Remote) : delivery.Envelope.Refs
-            .Select(RunWorkspace.RepositoryUrl)
-            .Select(RunnerGit.RepositoryUri)
-            .FirstOrDefault(uri => uri is not null);
+        var repository = snapshot is not null ? new Uri(snapshot.Remote)
+            : RunnerGit.RepositoryUri(RunnerGit.RepositoryRef(delivery.Envelope.Refs) is { } repoRef ? RunWorkspace.RepositoryUrl(repoRef) : null);
         var ownerGit = !_options.RequireAciSandbox && snapshot is null && _options.UseOwnerGit?.Invoke(delivery) == true;
         var credential = repository?.Scheme != Uri.UriSchemeHttps || ownerGit || snapshot is not null ? null : await _options.Credentials.IssueAsync(new RepoCredentialRequest
         {
@@ -453,6 +451,8 @@ public sealed class RunIsolation : IRunSandbox
             Repository = repository,
             CanPush = profile.CanPush,
         }, cancellationToken).ConfigureAwait(false);
+        workspace.RepositoryCredentialNote = repository?.Scheme == Uri.UriSchemeHttps && !ownerGit && snapshot is null && credential is null
+            ? "No repository credential was available for this run. A private repository needs a workspace repository connection or a code bundle." : null;
         var telemetry = await _options.Telemetry.IssueAsync(delivery.DeliveryId, cancellationToken).ConfigureAwait(false);
         RunNetwork? network = null;
         if (_aci is not null || _options.LimitNetwork && profile.Network != NetworkAccess.Open)

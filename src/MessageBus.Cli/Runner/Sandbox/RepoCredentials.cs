@@ -251,7 +251,8 @@ internal static class RunGitConfig
               esac
             done
             path=${path%/}
-            path=${path%.git}
+            case "$path" in *.[gG][iI][tT]) path=${path%????} ;; esac
+            host=$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')
             [ "$protocol" = https ] && [ "$host" = {{ShellQuote(host)}} ] && [ "$path" = {{ShellQuote(path)}} ] || exit 0
             expires=$(sed -n 1p "$file")
             [ "$(date +%s)" -lt "$expires" ] || exit 0

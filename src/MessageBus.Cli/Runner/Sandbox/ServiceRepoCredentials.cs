@@ -38,7 +38,11 @@ public sealed class ServiceRepoCredentials(HttpClient http, TextWriter log) : IR
                 Content = new StringContent(json, Encoding.UTF8, new MediaTypeHeaderValue("application/json")),
             };
             using var response = await http.SendAsync(message, cancellationToken).ConfigureAwait(false);
-            if (response.StatusCode == HttpStatusCode.NoContent) return null;
+            if (response.StatusCode == HttpStatusCode.NoContent)
+            {
+                await log.WriteLineAsync($"No repository credential for {request.Repository}: the service supplied none (204).").ConfigureAwait(false);
+                return null;
+            }
             if (!response.IsSuccessStatusCode)
             {
                 await log.WriteLineAsync($"No repository credential for {request.Repository}: the service answered {(int)response.StatusCode}.").ConfigureAwait(false);
