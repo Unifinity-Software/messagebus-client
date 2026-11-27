@@ -15,9 +15,12 @@ namespace MessageBus.Cli.Commands;
 
 internal static class WorkflowCommand
 {
+    private const int MaxFileBytes = 64 * 1024;
+    private const string FilesUnavailable = "This server can't export or import workflow files yet.";
+
     internal static Command Create(CliHost host, CommonOptions options)
     {
-        var command = new Command("workflow", "List, inspect and check workflows.");
+        var command = new Command("workflow", "List, inspect, export, import and check workflows.");
         var json = ScriptRunner.JsonOption();
         var list = new Command("list", "List the workspace's workflows.") { json };
         list.SetAction((parse, ct) => WorkflowHttp.RunAsync(host, parse, options, parse.GetValue(json), async api =>
@@ -44,6 +47,9 @@ internal static class WorkflowCommand
         }, ct));
         command.Subcommands.Add(show);
 
+        command.Subcommands.Add(CreateExport(host, options));
+        command.Subcommands.Add(CreateImport(host, options));
+
         var file = new Argument<string>("file") { Description = "A workflow path JSON file." };
         var checkJson = ScriptRunner.JsonOption();
         var check = new Command("check", "Check a workflow path for errors and warnings.") { file, checkJson };
@@ -57,14 +63,104 @@ internal static class WorkflowCommand
             var errors = problems.Any(p => p?["severity"]?.ToString() != "warning");
             api.Write(result, () =>
             {
-                foreach (var problem in problems.OrderBy(p => p?["severity"]?.ToString() == "warning"))
-                    host.Out.WriteLine($"{problem?["severity"] ?? JsonValue.Create("error")}: {problem?["stepId"] ?? JsonValue.Create("path")}: {problem?["message"]}");
+                WriteProblems(host.Out, problems);
                 if (problems.Count == 0) host.Out.WriteLine("The workflow path has no problems.");
             });
             return errors ? ScriptExitCodes.InvalidInput : 0;
         }, ct));
         command.Subcommands.Add(check);
         return command;
+    }
+
+    private static Command CreateExport(CliHost host, CommonOptions options)
+    {
+        var name = new Argument<string>("name") { Description = "The workflow's name or id." };
+        var version = new Option<string?>("--version") { Description = "A published version number or draft." };
+        version.Validators.Add(result =>
+        {
+            var value = result.GetValue(version);
+            if (value != "draft" && (!int.TryParse(value, System.Globalization.NumberStyles.None,
+                    System.Globalization.CultureInfo.InvariantCulture, out var number) || number <= 0))
+                result.AddError("--version must be a positive version number or draft.");
+        });
+        var output = new Option<string?>("--output") { Description = "Write the YAML to this file." };
+        var command = new Command("export", "Export a workflow as YAML.") { name, version, output };
+        command.SetAction((parse, ct) => WorkflowHttp.RunAsync(host, parse, options, false, async api =>
+        {
+            var workflow = await api.ResolveWorkflowAsync(parse.GetValue(name)!, false, ct);
+            var route = $"workflows/{WorkflowHttp.Escape(workflow["id"]!.ToString())}/export";
+            if (parse.GetValue(version) is { } selected) route += $"?version={WorkflowHttp.Escape(selected)}";
+            using var response = await api.RequestAsync(HttpMethod.Get, route, null, ct, FilesUnavailable);
+            var yaml = await response.Content.ReadAsStringAsync(ct);
+            if (parse.GetValue(output) is { } file)
+            {
+                var path = Path.GetFullPath(file, host.CurrentDirectory);
+                await File.WriteAllTextAsync(path, yaml, ct);
+                host.Out.WriteLine(path);
+            }
+            else
+            {
+                await host.Out.WriteAsync(yaml.AsMemory(), ct);
+            }
+            return 0;
+        }, ct));
+        return command;
+    }
+
+    private static Command CreateImport(CliHost host, CommonOptions options)
+    {
+        var file = new Argument<string>("file") { Description = "A workflow YAML or repository Markdown file." };
+        var into = new Option<string?>("--into") { Description = "Replace the draft of this workflow by name or id." };
+        var name = new Option<string?>("--name") { Description = "Set the name of a new draft workflow." };
+        var json = ScriptRunner.JsonOption();
+        var command = new Command("import", "Import a workflow file as a draft.") { file, into, name, json };
+        command.SetAction((parse, ct) => WorkflowHttp.RunAsync(host, parse, options, parse.GetValue(json), async api =>
+        {
+            var path = Path.GetFullPath(parse.GetValue(file)!, host.CurrentDirectory);
+            var body = new JsonObject { ["content"] = await ReadImportFileAsync(path, ct) };
+            if (parse.GetValue(name) is { } title) body["name"] = title;
+            if (parse.GetValue(into) is { } target)
+            {
+                var existing = await api.ResolveWorkflowAsync(target, false, ct);
+                body["workflowId"] = existing["id"]!.ToString();
+            }
+
+            var result = await api.SendAsync(HttpMethod.Post, "workflows/import", body, ct, FilesUnavailable);
+            api.Write(result, () =>
+            {
+                var workflow = result!["workflow"]!;
+                var link = api.Link("workflows", workflow["id"]!.ToString());
+                host.Out.WriteLine($"Saved draft {workflow["name"]}: {link}/edit");
+                WriteProblems(host.Out, result["problems"]?.AsArray() ?? []);
+            });
+            return 0;
+        }, ct));
+        return command;
+    }
+
+    private static async Task<string> ReadImportFileAsync(string path, CancellationToken ct)
+    {
+        await using var stream = File.OpenRead(path);
+        var bytes = new byte[MaxFileBytes + 1];
+        var length = await stream.ReadAtLeastAsync(bytes, bytes.Length, false, ct);
+        if (length > MaxFileBytes)
+            throw new CliException("Workflow files must be 64 KiB or smaller.", ScriptExitCodes.InvalidInput);
+
+        var offset = bytes.AsSpan(0, length).StartsWith(Encoding.UTF8.Preamble) ? Encoding.UTF8.Preamble.Length : 0;
+        try
+        {
+            return new UTF8Encoding(false, true).GetString(bytes, offset, length - offset);
+        }
+        catch (DecoderFallbackException)
+        {
+            throw new CliException("Save the workflow file as UTF-8 and try again.", ScriptExitCodes.InvalidInput);
+        }
+    }
+
+    private static void WriteProblems(TextWriter output, JsonArray problems)
+    {
+        foreach (var problem in problems.OrderBy(p => p?["severity"]?.ToString() == "warning"))
+            output.WriteLine($"{problem?["severity"] ?? JsonValue.Create("error")}: {problem?["stepId"] ?? JsonValue.Create("path")}: {problem?["message"]}");
     }
 
     private static void WriteWorkflow(TextWriter output, JsonNode workflow)
@@ -110,7 +206,8 @@ internal sealed class WorkflowHttp(CommandContext context, HttpClient http, bool
 
     internal Task<JsonNode?> GetAsync(string path, CancellationToken ct) => SendAsync(HttpMethod.Get, path, null, ct);
 
-    internal async Task<HttpResponseMessage> RequestAsync(HttpMethod method, string path, JsonNode? body, CancellationToken ct)
+    internal async Task<HttpResponseMessage> RequestAsync(HttpMethod method, string path, JsonNode? body, CancellationToken ct,
+        string notFoundMessage = Disabled)
     {
         if (!await TargetCapabilities.SupportsWorkflowsAsync(http, ct)) throw new CliException(Disabled);
         using var request = new HttpRequestMessage(method, Route(path));
@@ -118,16 +215,17 @@ internal sealed class WorkflowHttp(CommandContext context, HttpClient http, bool
         var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
         try
         {
-            if (response.StatusCode == HttpStatusCode.NotFound) throw new CliException(Disabled);
+            if (response.StatusCode == HttpStatusCode.NotFound) throw new CliException(notFoundMessage);
             await EnsureSuccessAsync(response, ct);
             return response;
         }
         catch { response.Dispose(); throw; }
     }
 
-    internal async Task<JsonNode?> SendAsync(HttpMethod method, string path, JsonNode? body, CancellationToken ct)
+    internal async Task<JsonNode?> SendAsync(HttpMethod method, string path, JsonNode? body, CancellationToken ct,
+        string notFoundMessage = Disabled)
     {
-        using var response = await RequestAsync(method, path, body, ct);
+        using var response = await RequestAsync(method, path, body, ct, notFoundMessage);
         var text = await response.Content.ReadAsStringAsync(ct);
         return string.IsNullOrWhiteSpace(text) ? null : JsonNode.Parse(text);
     }
@@ -139,7 +237,12 @@ internal sealed class WorkflowHttp(CommandContext context, HttpClient http, bool
         try
         {
             if (JsonNode.Parse(await response.Content.ReadAsStringAsync(ct)) is JsonObject error)
-                message = error["message"]?.ToString() ?? (error["error"] as JsonObject)?["message"]?.ToString();
+                message = error["message"]?.ToString() ?? (error["error"] switch
+                {
+                    JsonObject nested => nested["message"]?.ToString(),
+                    JsonValue value when value.TryGetValue<string>(out var detail) => detail,
+                    _ => null,
+                });
         }
         catch (JsonException) { }
         throw new CliException(message ?? $"The server refused the workflow command (HTTP {(int)response.StatusCode}).", response.StatusCode switch

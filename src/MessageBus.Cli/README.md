@@ -29,6 +29,8 @@ With the service's `workflows` capability enabled:
 ```sh
 mbus workflow list
 mbus workflow show Feature
+mbus workflow export Feature --output feature.workflow.yaml
+mbus workflow import .messagebus/workflow.md
 mbus workflow check workflow.json
 mbus job start gh:example/todo-app#42 --workflow Feature
 mbus job list
@@ -40,8 +42,11 @@ mbus job retry <id> --step code-review
 
 Starting a job reports its dashboard link. Optional start flags are `--instructions`, `--limit`
 and `--runs-on` (`owner-runners` or `workspace`). `mbus project …` remains an alias for one release.
-The repository's [workflow guidance file](../../docs/workflow-file.md) is Markdown for an
-orchestrating agent; `workflow check` validates a workflow definition, not that guidance file.
+Export writes YAML to standard output unless you pass `--output <file>`. Use `--version <n>`
+or `--version draft` to select a version. Import accepts UTF-8 YAML or the repository's
+[workflow guidance file](../../docs/workflow-file.md), up to 64 KiB. Use `--name <name>` to
+name a new draft, `--into <name-or-id>` to replace an existing draft, or `--json` for the
+server's response. `workflow check` validates a JSON workflow path.
 
 ## Retarget a queued task
 

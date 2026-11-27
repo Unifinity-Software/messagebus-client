@@ -15,9 +15,10 @@ tasks, checks the replies and reports the result. The `mbus-orchestrate` skill c
 published workflow that fits the repository and work item and offers these two choices.
 Without the service's `workflows` capability or a fitting workflow, it orchestrates here as before.
 
-The Markdown file is repository guidance for an orchestrating agent, not a published workflow
-definition. The service does not read it or automatically import it into a workflow. For a
-session-driven job, it needs no registration and changes apply to the next plan. For a workflow
+The Markdown file provides repository guidance for an orchestrating agent.
+`mbus workflow import .messagebus/workflow.md` asks the service to convert its required steps
+into a draft workflow and prints a link where you can review and publish it. For a
+session-driven job, the file needs no registration and changes apply to the next plan. For a workflow
 job, configure and publish the required steps in the workflow; a repository-file edit cannot
 change an existing job's published path, commands or instructions. An **Orchestrate** agent step
 can use the file while planning its own tasks, then returns an allowed outcome to the workflow;
@@ -28,6 +29,8 @@ With workflows enabled, start and inspect a job from the terminal:
 ```sh
 mbus workflow list
 mbus workflow show Feature
+mbus workflow export Feature --output feature.workflow.yaml
+mbus workflow import .messagebus/workflow.md
 mbus job start gh:example/todo-app#42 --workflow Feature
 mbus job list
 mbus job show <id>
