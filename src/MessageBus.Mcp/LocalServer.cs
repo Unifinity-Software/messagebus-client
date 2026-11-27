@@ -81,8 +81,8 @@ public sealed record LocalServerOptions
     /// <summary>When serving a verified task, records the agent's settlement directly in the runner.</summary>
     public Action<SettleInput>? RecordVerifiedTaskSettle { get; init; }
 
-    /// <summary>Records an accepted workflow outcome in the runner after a successful settle call.</summary>
-    public Action<string>? RecordStepOutcome { get; init; }
+    /// <summary>Records an accepted workflow outcome in the runner, or clears it if the accepted settle has no outcome.</summary>
+    public Action<string?>? RecordStepOutcome { get; init; }
 
     /// <summary>For this workflow run, require full returned bundles and report why in the reply.</summary>
     public FrictionNote? FullBundleFriction { get; init; }

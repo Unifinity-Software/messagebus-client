@@ -60,7 +60,7 @@ public sealed record RunToolsRequest(RunWorkspace Workspace, TaskDelivery Delive
 
     internal Action<MessageBus.Contracts.Mcp.SettleInput>? RecordVerifiedTaskSettle { get; init; }
 
-    internal Action<string>? RecordStepOutcome { get; init; }
+    internal Action<string?>? RecordStepOutcome { get; init; }
 }
 
 /// <summary>

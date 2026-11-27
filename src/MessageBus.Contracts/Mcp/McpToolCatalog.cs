@@ -285,7 +285,7 @@ public static class McpToolCatalog
                 settle["outcome"] = new JsonObject
                 {
                     ["type"] = "string",
-                    ["description"] = "Required for workflow steps. Use an exact outcome word from the task prompt.",
+                    ["description"] = "Use an exact outcome word from the workflow step prompt. Omit if you couldn't do the step and settle as failed.",
                 };
             }
             else settle.Remove("friction");

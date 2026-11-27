@@ -1258,11 +1258,22 @@ internal sealed partial class LocalTools : IAsyncDisposable
         string? outcome = null;
         if (Delivery!.StepContext is { } step)
         {
-            if (arguments is not null && arguments.TryGetValue("outcome", out var value) && value.ValueKind == JsonValueKind.String)
-                outcome = value.GetString();
             var allowed = step.AllowedOutcomes.Where(word => word != "timed-out").ToArray();
-            if (string.IsNullOrEmpty(outcome) || !allowed.Contains(outcome, StringComparer.Ordinal))
-                throw McpToolException.Invalid("outcome", $"Use one of the allowed outcomes: {string.Join(", ", allowed)}.");
+            var succeeded = input.Result.Status == SettleStatus.Succeeded;
+            var outcomeGuidance = $"Use one of the allowed outcomes: {string.Join(", ", allowed)}.";
+            if (!succeeded)
+                outcomeGuidance += " Omit outcome if you couldn't do the step.";
+            if (arguments is not null && arguments.TryGetValue("outcome", out var value) && value.ValueKind != JsonValueKind.Null)
+            {
+                if (value.ValueKind != JsonValueKind.String)
+                    throw McpToolException.Invalid("outcome", outcomeGuidance);
+                outcome = value.GetString() is { Length: > 0 } word ? word : null;
+            }
+            if (!succeeded && outcome is not null && outcome != "failed")
+                throw McpToolException.Invalid("result.status",
+                    $"Settle as succeeded with an allowed outcome ({string.Join(", ", allowed)}) and put what you couldn't check in friction. Use failed only if you couldn't do the step at all.");
+            if (outcome is null ? succeeded : !allowed.Contains(outcome, StringComparer.Ordinal))
+                throw McpToolException.Invalid("outcome", outcomeGuidance);
         }
 
         // A pinned settle must clear any fallback written by an earlier call.
@@ -1270,7 +1281,7 @@ internal sealed partial class LocalTools : IAsyncDisposable
         try
         {
             var output = await SettleCoreAsync(input with { DeliveryId = RunnerDeliveryId(Delivery!) }, runnerTask: true, ct);
-            if (outcome is not null) _o.RecordStepOutcome?.Invoke(outcome);
+            if (Delivery.StepContext is not null) _o.RecordStepOutcome?.Invoke(outcome);
             return output;
         }
         finally

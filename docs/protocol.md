@@ -1040,10 +1040,16 @@ If the service does not advertise `workflows`, the inventory omits all
 
 - `SettleResult.outcome` is the optional outcome word selected for the step.
   The runner's local `settle` tool accepts a top-level `outcome` argument.
-  When the delivery has a step context, the tool requires an exact, case-sensitive
-  match to an entry in `allowedOutcomes`, excluding the built-in `timed-out`.
-  A missing or invalid value returns `invalid-input` for `outcome` and lists the
-  allowed words so the agent can retry. The runner sends the accepted word in its
+  For a delivery with a step context, an agent that completes the step settles as
+  `succeeded` with an exact, case-sensitive match in `allowedOutcomes`, excluding
+  the built-in `timed-out`, and reports any checks it couldn't perform as friction.
+  If the agent couldn't do the step, it settles as `failed` and can omit `outcome`.
+  An empty string is treated as an omitted outcome. The `failed`, `abandoned`,
+  and `cancelled` statuses accept an omitted outcome or the `failed` outcome
+  if the step allows that word.
+  Other outcome words paired with these statuses return `invalid-input` for
+  `result.status`. A required but missing outcome or a disallowed outcome returns
+  `invalid-input` for `outcome`. The runner sends the accepted word in its
   final `SettleResult.outcome`. A run without an accepted settle reports no
   outcome. The local tool ignores the argument for deliveries without step context.
 - `TaskDelivery.stepContext` is optional service-provided metadata with

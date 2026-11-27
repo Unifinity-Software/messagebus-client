@@ -66,7 +66,9 @@ public static class TaskPrompt
     {
         sb.Append("## Workflow step\n\n");
         sb.Append(step.StepName.ReplaceLineEndings(" ")).Append(" (round ").Append(step.Round).Append(")\n\n");
-        sb.Append("Give `settle` one of these exact `outcome` values. If the tool rejects the value, correct it and call again.\n\n");
+        sb.Append("When you have done the step's work, settle as `succeeded` with one of these exact `outcome` values. ");
+        sb.Append("Report anything you couldn't check in settle friction notes, such as an issue you couldn't read or tests you couldn't run. ");
+        sb.Append("If you couldn't do the step at all, settle as `failed` and omit `outcome`. If the tool rejects the call, correct it and try again.\n\n");
         foreach (var word in step.AllowedOutcomes.Where(word => word != "timed-out"))
         {
             var label = word.Replace('-', ' ').ReplaceLineEndings(" ");
