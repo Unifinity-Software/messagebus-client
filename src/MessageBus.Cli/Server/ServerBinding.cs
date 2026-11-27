@@ -2,8 +2,11 @@ using MessageBus.Contracts.Security;
 
 namespace MessageBus.Cli.Server;
 
-/// <summary>A terminal binding refusal. Integration must not retry credentials with v1 or another host.</summary>
-public sealed class ServerBindingException(string message, Exception? inner = null) : InvalidOperationException(message, inner);
+/// <summary>A send blocked during server binding. Integration must not retry credentials with v1 or another host.</summary>
+public sealed class ServerBindingException(string message, Exception? inner = null) : InvalidOperationException(message, inner)
+{
+    internal bool IsTransientDiscoveryFailure { get; init; }
+}
 
 /// <summary>The immutable supported isolated binding tuple. This value does not itself authorize a send.</summary>
 public sealed record ServerBinding
