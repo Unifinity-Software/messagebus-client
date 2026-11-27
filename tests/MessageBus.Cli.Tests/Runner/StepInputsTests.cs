@@ -20,6 +20,152 @@ public sealed class StepInputsTests
 {
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Full_bundles_from_shallow_steps_apply_without_a_repository_connection(bool multiple)
+    {
+        Assert.SkipWhen(CommandLocator.Find("git", Environment.GetEnvironmentVariable, []) is null, "git is not installed.");
+        var unavailable = await WindowsRunCapabilities.GitShellUnavailableAsync();
+        Assert.SkipWhen(unavailable is not null, unavailable ?? "");
+        using var inputs = new InputServer();
+        var cloneAttempts = 0;
+        var sandbox = new RecordingSandbox
+        {
+            Checkout = launch =>
+            {
+                if (!launch.Arguments.Contains("clone")) return launch;
+                cloneAttempts++;
+                // Fail locally, without contacting the task's unavailable repository.
+                return launch with { Arguments = ["mbus-test-unavailable"] };
+            },
+        };
+        using var log = new StringWriter();
+        await using var runner = new RunnerHarness(bundles: inputs.Source, sandbox: _ => sandbox, log: log);
+        var repository = Directory.CreateDirectory(Path.Combine(runner.Scratch, "source")).FullName;
+        await Git.RunAsync(repository, ["init", "--quiet", "--initial-branch=main"], Ct);
+        string[] commit = ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "--quiet"];
+        await Git.RunAsync(repository, [.. commit, "--allow-empty", "-m", "First"], Ct);
+        await Git.RunAsync(repository, [.. commit, "--allow-empty", "-m", "Second"], Ct);
+        var deeperBoundary = await Git.CommitIdAsync(repository, "HEAD", Ct);
+        await File.WriteAllTextAsync(Path.Combine(repository, "base.txt"), "The source snapshot", Ct);
+        await Git.RunAsync(repository, ["add", "base.txt"], Ct);
+        await Git.RunAsync(repository, [.. commit, "-m", "Shallow boundary"], Ct);
+        var boundary = await Git.CommitIdAsync(repository, "HEAD", Ct);
+        var producer = Path.Combine(runner.Scratch, "producer");
+        await Git.RunAsync(repository, ["clone", "--quiet", "--depth=1", new Uri(repository).AbsoluteUri, producer], Ct);
+        Assert.Equal("true", (await Git.RunAsync(producer, ["rev-parse", "--is-shallow-repository"], Ct)).Trim());
+        await Git.RunAsync(producer, ["switch", "--quiet", "-c", "feature/shallow"], Ct);
+        await File.WriteAllTextAsync(Path.Combine(producer, "change.txt"), "The code step's change", Ct);
+        await Git.RunAsync(producer, ["add", "change.txt"], Ct);
+        await Git.RunAsync(producer, [.. commit, "-m", "Code step"], Ct);
+        // The no-connection return path explicitly requests a full bundle, even from a shallow checkout.
+        var bundle = await GitBundles.CreateAsync(producer, Path.Combine(runner.Scratch, "code.bundle"), baseCommit: "", ct: Ct);
+        Assert.Empty(GitBundles.ReadHeader(bundle.Path).Prerequisites);
+        var code = await inputs.AttachmentAsync("att_code", "code.bundle", await File.ReadAllBytesAsync(bundle.Path, Ct), AttachmentFormat.GitBundle, bundle.Branch);
+        GitBundle? secondBundle = null;
+        AttachmentRef? secondCode = null;
+        if (multiple)
+        {
+            var secondProducer = Path.Combine(runner.Scratch, "second-producer");
+            await Git.RunAsync(repository, ["clone", "--quiet", "--depth=2", new Uri(repository).AbsoluteUri, secondProducer], Ct);
+            // Branch from the deeper edge so the first producer's boundary cannot hide its missing parent.
+            await Git.RunAsync(secondProducer, ["switch", "--quiet", "-c", "feature/deeper", "HEAD^"], Ct);
+            await File.WriteAllTextAsync(Path.Combine(secondProducer, "second.txt"), "Another step's change", Ct);
+            await Git.RunAsync(secondProducer, ["add", "second.txt"], Ct);
+            await Git.RunAsync(secondProducer, [.. commit, "-m", "Another step"], Ct);
+            secondBundle = await GitBundles.CreateAsync(secondProducer, Path.Combine(runner.Scratch, "second.bundle"), baseCommit: "", ct: Ct);
+            secondCode = await inputs.AttachmentAsync("att_second", "second.bundle", await File.ReadAllBytesAsync(secondBundle.Path, Ct), AttachmentFormat.GitBundle, secondBundle.Branch);
+        }
+        var task = runner.Task("dlv_shallow", environment: new RunEnvironment { Checkout = CheckoutMode.Bundle });
+        var delivery = task with
+        {
+            Envelope = task.Envelope with { Refs = [new Ref { Kind = "git.repository", Url = "https://git.example.test/team/unavailable.git" }] },
+            StepContext = multiple ? Context(new("code", "branch"), new("second", "branch")) : Context(new Input("code", "branch")),
+        };
+        inputs.Reply(delivery, "code", "Code summary", "Code details", [code]);
+        if (secondCode is not null) inputs.Reply(delivery, "second", "Another summary", "Another detail", [secondCode]);
+
+        Assert.True((await runner.DeliverAsync(delivery)).Accepted);
+        var settle = await runner.Service.SettledAsync(delivery.DeliveryId);
+        await runner.Engine.StopAsync();
+
+        Assert.True(settle.Result.Status == SettleStatus.Succeeded, settle.Result.Error);
+        Assert.True(sandbox.ProcessStarted);
+        Assert.Equal(1, cloneAttempts);
+        var work = runner.WorkTreeOf(delivery.DeliveryId);
+        Assert.Equal(bundle.Branch, sandbox.InputBranches!["code"]);
+        Assert.Equal((secondBundle ?? bundle).Branch, (await Git.RunAsync(work, ["branch", "--show-current"], Ct)).Trim());
+        Assert.Equal((secondBundle ?? bundle).HeadCommit, await Git.CommitIdAsync(work, "HEAD", Ct));
+        Assert.Equal(bundle.HeadCommit, await Git.CommitIdAsync(work, bundle.Branch, Ct));
+        Assert.Equal("The source snapshot", (await Git.RunAsync(work, ["show", bundle.Branch + ":base.txt"], Ct)).Trim());
+        Assert.Equal("The code step's change", (await Git.RunAsync(work, ["show", bundle.Branch + ":change.txt"], Ct)).Trim());
+        Assert.Equal("true", (await Git.RunAsync(work, ["rev-parse", "--is-shallow-repository"], Ct)).Trim());
+        var shallow = await File.ReadAllTextAsync(Path.Combine(work, ".git", "shallow"), Ct);
+        Assert.DoesNotContain('\r', shallow);
+        // Git may rewrite the shallow file in its own order.
+        Assert.Equal((multiple ? new[] { boundary, deeperBoundary } : [boundary]).Order(StringComparer.Ordinal),
+            shallow.Split('\n', StringSplitOptions.RemoveEmptyEntries).Order(StringComparer.Ordinal));
+        if (multiple)
+        {
+            Assert.Equal(secondBundle!.Branch, sandbox.InputBranches["second"]);
+            Assert.Equal("Another step's change", await File.ReadAllTextAsync(Path.Combine(work, "second.txt"), Ct));
+        }
+        Assert.Contains(boundary[..7], log.ToString());
+        Assert.Contains("as a shallow copy", log.ToString());
+        Assert.Equal("2", (await Git.RunAsync(work, ["rev-list", "--count", "HEAD"], Ct)).Trim());
+        await Git.RunAsync(work, ["fsck", "--connectivity-only"], Ct);
+    }
+
+    [Theory]
+    [InlineData("retry")]
+    [InlineData("cancel")]
+    [InlineData("detection")]
+    public async Task Failed_shallow_recovery_removes_its_boundary_and_keeps_the_fetch_error(string fault)
+    {
+        var git = CommandLocator.Find("git", Environment.GetEnvironmentVariable, []);
+        Assert.SkipWhen(git is null, "git isn't installed.");
+        await using var runner = new RunnerHarness();
+        var ct = TestContext.Current.CancellationToken;
+        var root = Directory.CreateDirectory(Path.Combine(runner.Scratch, Guid.NewGuid().ToString("N"))).FullName;
+        var producer = Directory.CreateDirectory(Path.Combine(root, "producer")).FullName;
+        await Git.RunAsync(producer, ["init", "--quiet", "--initial-branch=main"], ct);
+        string[] commit = ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false",
+            "commit", "--quiet", "--allow-empty"];
+        await Git.RunAsync(producer, [.. commit, "-m", "Parent"], ct);
+        await Git.RunAsync(producer, [.. commit, "-m", "Boundary"], ct);
+        var boundary = await Git.CommitIdAsync(producer, "HEAD", ct);
+        await File.WriteAllTextAsync(Path.Combine(producer, ".git", "shallow"), boundary + "\n", ct);
+        var bundle = await GitBundles.CreateAsync(producer, Path.Combine(root, "code.bundle"), baseCommit: "", ct: ct);
+        using var run = RunWorkspace.Create(root, "dlv_recovery", 1);
+        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var fetches = 0;
+        var log = new List<string>();
+        run.GitLog = log.Add;
+
+        var import = run.ImportStepBranchAsync(git!, runner.Task("dlv_recovery"), bundle.Path,
+            GitBundles.ReadHeader(bundle.Path), bundle.Branch, launch =>
+            {
+                if (launch.Arguments.Contains("fetch"))
+                {
+                    if (++fetches == 1) return launch with { Arguments = ["mbus-test-first-fetch"] };
+                    Assert.Equal(boundary + "\n", File.ReadAllText(Path.Combine(run.WorkTree, ".git", "shallow")));
+                    if (fault == "cancel") cancellation.Cancel();
+                    return launch with { Arguments = ["mbus-test-retry-fetch"] };
+                }
+                if (fault == "detection" && launch.Arguments.Contains("unbundle"))
+                    return launch with { Arguments = ["mbus-test-boundary-detection"] };
+                return launch;
+            }, cancellation.Token);
+
+        if (fault == "cancel") await Assert.ThrowsAnyAsync<OperationCanceledException>(() => import);
+        else Assert.Contains(fault == "detection" ? "mbus-test-first-fetch" : "mbus-test-retry-fetch", await import);
+        Assert.Equal(fault == "detection" ? 1 : 2, fetches);
+        Assert.False(File.Exists(Path.Combine(run.WorkTree, ".git", "shallow")));
+        Assert.Empty(Directory.EnumerateFiles(Path.Combine(run.WorkTree, ".git"), "shallow.*.tmp"));
+        Assert.Empty(log);
+    }
+
     [Fact]
     public async Task Encrypted_design_and_code_arrive_before_the_agent_starts()
     {
