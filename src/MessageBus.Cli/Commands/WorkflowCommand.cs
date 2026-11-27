@@ -215,7 +215,13 @@ internal sealed class WorkflowHttp(CommandContext context, HttpClient http, bool
         var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
         try
         {
-            if (response.StatusCode == HttpStatusCode.NotFound) throw new CliException(notFoundMessage);
+            if (response.StatusCode == HttpStatusCode.NotFound)
+            {
+                // A file route that exists answers an unknown workflow or version with its own message; a missing route has none.
+                if (notFoundMessage != Disabled && await ErrorMessageAsync(response, ct) is { } missing)
+                    throw new CliException(missing, ScriptExitCodes.InvalidInput);
+                throw new CliException(notFoundMessage);
+            }
             await EnsureSuccessAsync(response, ct);
             return response;
         }
@@ -230,14 +236,12 @@ internal sealed class WorkflowHttp(CommandContext context, HttpClient http, bool
         return string.IsNullOrWhiteSpace(text) ? null : JsonNode.Parse(text);
     }
 
-    internal static async Task EnsureSuccessAsync(HttpResponseMessage response, CancellationToken ct)
+    private static async Task<string?> ErrorMessageAsync(HttpResponseMessage response, CancellationToken ct)
     {
-        if (response.IsSuccessStatusCode) return;
-        string? message = null;
         try
         {
             if (JsonNode.Parse(await response.Content.ReadAsStringAsync(ct)) is JsonObject error)
-                message = error["message"]?.ToString() ?? (error["error"] switch
+                return error["message"]?.ToString() ?? (error["error"] switch
                 {
                     JsonObject nested => nested["message"]?.ToString(),
                     JsonValue value when value.TryGetValue<string>(out var detail) => detail,
@@ -245,6 +249,13 @@ internal sealed class WorkflowHttp(CommandContext context, HttpClient http, bool
                 });
         }
         catch (JsonException) { }
+        return null;
+    }
+
+    internal static async Task EnsureSuccessAsync(HttpResponseMessage response, CancellationToken ct)
+    {
+        if (response.IsSuccessStatusCode) return;
+        var message = await ErrorMessageAsync(response, ct);
         throw new CliException(message ?? $"The server refused the workflow command (HTTP {(int)response.StatusCode}).", response.StatusCode switch
         {
             HttpStatusCode.BadRequest => ScriptExitCodes.InvalidInput,

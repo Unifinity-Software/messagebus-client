@@ -306,6 +306,22 @@ public sealed class JobWorkflowCommandTests
         }
     }
 
+    [Fact]
+    public async Task Workflow_export_reports_the_servers_not_found_message()
+    {
+        using var machine = Machine();
+        machine.Server.On(HttpMethod.Get, Root + "workflows", _ => Json(Workflows))
+            .On(HttpMethod.Get, Root + "workflows/wf_feature/export", _ => new(HttpStatusCode.NotFound)
+            {
+                Content = new StringContent("""{"error":"Workflow or version not found."}""", Encoding.UTF8, "application/json"),
+            });
+
+        var run = await machine.RunAsync("workflow", "export", "Feature", "--version", "draft");
+
+        Assert.NotEqual(0, run.ExitCode);
+        Assert.Equal("Workflow or version not found.", run.Error.Trim());
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
