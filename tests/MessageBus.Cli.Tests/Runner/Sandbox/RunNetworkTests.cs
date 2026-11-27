@@ -76,6 +76,19 @@ public sealed class RunNetworkTests
     }
 
     [Fact]
+    public void GitHub_repository_allows_only_its_attachment_buckets()
+    {
+        var hosts = new HostAllowList(RunNetwork.RepositoryHosts(new Uri("https://github.com/example/repo")));
+        var roundTripped = new HostAllowList(hosts.Entries);
+        const string bucket = "github-production-user-asset-6210df.s3.amazonaws.com";
+        Assert.True(roundTripped.Allows(bucket));
+        Assert.False(roundTripped.Allows("github-production-user-asset-wrong.s3.amazonaws.com"));
+        Assert.False(roundTripped.Allows("evil.s3.amazonaws.com"));
+        Assert.False(roundTripped.Allows("http-intake.logs.us5.datadoghq.com"));
+        Assert.False(new HostAllowList(RunNetwork.RepositoryHosts(new Uri("https://git.example.org/repo"))).Allows(bucket));
+    }
+
+    [Fact]
     public async Task The_proxy_tunnels_to_hosts_on_the_list_and_refuses_the_rest_without_connecting()
     {
         // The stand-in for every host the proxy may open: an echo server on this computer.

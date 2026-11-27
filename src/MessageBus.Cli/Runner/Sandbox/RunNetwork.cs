@@ -9,8 +9,13 @@ namespace MessageBus.Cli.Runner.Sandbox;
 /// </summary>
 public sealed class HostAllowList
 {
+    private const string GitHubAssetPrefix = "github-production-user-asset-";
+    private const string GitHubAssetSuffix = ".s3.amazonaws.com";
+    internal const string GitHubAssetPattern = GitHubAssetPrefix + "<hex>" + GitHubAssetSuffix;
+
     private readonly HashSet<string> _exact = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<string> _suffixes = [];
+    private readonly bool _githubAssets;
 
     public HostAllowList(IEnumerable<string> entries)
     {
@@ -20,7 +25,11 @@ public sealed class HostAllowList
             {
                 continue;
             }
-            if (host.StartsWith("*.", StringComparison.Ordinal))
+            if (host == GitHubAssetPattern)
+            {
+                _githubAssets = true;
+            }
+            else if (host.StartsWith("*.", StringComparison.Ordinal))
             {
                 if (!_suffixes.Contains(host[1..], StringComparer.OrdinalIgnoreCase))
                 {
@@ -35,14 +44,22 @@ public sealed class HostAllowList
     }
 
     /// <summary>The entries, as matched (sorted).</summary>
-    public IReadOnlyList<string> Entries => [.. _exact.Concat(_suffixes.Select(s => "*" + s)).Order(StringComparer.Ordinal)];
+    public IReadOnlyList<string> Entries => [.. _exact.Concat(_suffixes.Select(s => "*" + s)).Concat(_githubAssets ? [GitHubAssetPattern] : []).Order(StringComparer.Ordinal)];
 
     /// <summary>Whether <paramref name="host"/> (a name or an IP address, no port) is on the list.</summary>
     public bool Allows(string host)
     {
         var name = host.Trim().TrimEnd('.').Trim('[', ']');
-        return name.Length > 0 && (_exact.Contains(name) || _suffixes.Any(s => name.EndsWith(s, StringComparison.OrdinalIgnoreCase) && name.Length > s.Length));
+        return name.Length > 0 && (_exact.Contains(name) || (_githubAssets && IsGitHubAsset(name))
+            || _suffixes.Any(s => name.EndsWith(s, StringComparison.OrdinalIgnoreCase) && name.Length > s.Length));
     }
+
+    private static bool IsGitHubAsset(string host) =>
+        host.Length > GitHubAssetPrefix.Length + GitHubAssetSuffix.Length
+        && host.StartsWith(GitHubAssetPrefix, StringComparison.OrdinalIgnoreCase)
+        && host.EndsWith(GitHubAssetSuffix, StringComparison.OrdinalIgnoreCase)
+        && host.AsSpan(GitHubAssetPrefix.Length, host.Length - GitHubAssetPrefix.Length - GitHubAssetSuffix.Length)
+            .IndexOfAnyExcept("0123456789abcdefABCDEF") < 0;
 
     /// <summary>The host part of an entry (<c>https://dev.azure.com/org</c> → <c>dev.azure.com</c>), lower case; null when there is none.</summary>
     internal static string? Normalize(string entry)
@@ -208,9 +225,12 @@ public sealed class RunNetwork : IDisposable
         if (host == "github.com")
         {
             hosts.Add("*.githubusercontent.com");
+            hosts.Add(HostAllowList.GitHubAssetPattern);
         }
         return hosts;
     }
+
+    internal static readonly string[] AntigravityProviderHosts = ["www.googleapis.com", "aicode.googleapis.com", "play.googleapis.com"];
 
     /// <summary>The agents' model providers and sign-in (Claude Code, Codex, GitHub Copilot CLI, OpenCode, Antigravity CLI).</summary>
     internal static readonly string[] ModelProviders =
@@ -221,6 +241,7 @@ public sealed class RunNetwork : IDisposable
         "opencode.ai", "*.opencode.ai", "models.dev",
         "cloudcode-pa.googleapis.com", "daily-cloudcode-pa.googleapis.com", "generativelanguage.googleapis.com",
         "aiplatform.googleapis.com", "oauth2.googleapis.com", "antigravity.google", "accounts.google.com",
+        .. AntigravityProviderHosts,
     ];
 
     /// <summary>Package registries builds and tests restore from (download only), and Playwright's browser downloads.</summary>

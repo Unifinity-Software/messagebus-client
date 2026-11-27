@@ -63,6 +63,8 @@ public sealed class CliHost
     internal Func<HttpClient> CreateReleaseHttpClient { get; init; } = Update.HttpReleaseSource.CreateHttpClient;
     internal Func<HttpMessageHandler> CreateLocalModelHttpHandler { get; init; } = Agents.OpenCodeReadiness.Handler;
 
+    internal Func<HttpMessageHandler> CreateAntigravityHttpHandler { get; init; } = Agents.AntigravityReadiness.Handler;
+
     /// <summary>Clock for request signatures and scan times.</summary>
     public TimeProvider Time { get; init; } = TimeProvider.System;
 

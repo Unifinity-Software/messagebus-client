@@ -225,6 +225,10 @@ internal static partial class AgentScanner
             check = await OpenCodeReadiness.ScanAsync(settings, File.Exists(locations.OpenCodeAuth), cancellationToken,
                 host.CreateLocalModelHttpHandler, host.Time).ConfigureAwait(false);
         }
+        var configured = spec.McpConfigured(locations, host.GetEnvironmentVariable);
+        var providerProblem = spec.Kind == AgentKind.Antigravity && configured
+            ? await AntigravityReadiness.CheckAsync(host.CreateAntigravityHttpHandler, host.Time, cancellationToken).ConfigureAwait(false)
+            : null;
         var agent = new DetectedAgent
         {
             Kind = spec.Kind,
@@ -232,9 +236,9 @@ internal static partial class AgentScanner
             Version = version,
             OnPath = located.OnPath,
             ExecutablePath = located.Path,
-            McpConfigured = spec.McpConfigured(locations, host.GetEnvironmentVariable),
+            McpConfigured = configured,
             SignedIn = check?.SignedIn ?? spec.SignedIn(locations, env.Get),
-            NotReady = check?.NotReady,
+            NotReady = check?.NotReady ?? providerProblem,
             Vendor = spec.Vendor,
             DefaultModel = models.Default,
             Models = models.Models,

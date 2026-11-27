@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Runtime.InteropServices;
+using MessageBus.Cli.Agents;
 using MessageBus.Cli.Configuration;
 using MessageBus.Cli.Hosting;
 using MessageBus.Cli.Security;
@@ -183,6 +184,7 @@ public sealed class EnvironmentRunnerHostContext : IRunnerHostContext
     private readonly Func<HttpMessageHandler> _createHandler;
     private readonly IReadOnlyList<string> _extraDirectories;
     private readonly TimeProvider _time;
+    internal Func<HttpMessageHandler> CreateAntigravityHttpHandler { get; init; } = AntigravityReadiness.Handler;
 
     /// <summary>Reads the variables through <paramref name="env"/>.</summary>
     /// <param name="env">Environment lookup (null when unset).</param>
@@ -281,8 +283,22 @@ public sealed class EnvironmentRunnerHostContext : IRunnerHostContext
 
     /// <inheritdoc />
     // Container runners use environment configuration and have no persisted workspace trust to check.
-    public Task<MachineInventory> BuildInventoryAsync(int slots, CancellationToken cancellationToken) =>
-        Task.FromResult(RunnerEnvironment.BasicInventory(this, slots, _time.GetUtcNow()));
+    public async Task<MachineInventory> BuildInventoryAsync(int slots, CancellationToken cancellationToken)
+    {
+        var inventory = RunnerEnvironment.BasicInventory(this, slots, _time.GetUtcNow());
+        if (!inventory.Agents.Any(a => a is { Kind: AgentKind.Antigravity, Found: true }))
+            return inventory;
+
+        var problem = await AntigravityReadiness.CheckAsync(CreateAntigravityHttpHandler, _time, cancellationToken).ConfigureAwait(false);
+        if (problem is null) return inventory;
+
+        var capability = CapabilityNames.Format(CapabilityNames.AgentPrefix, AgentKinds.Name(AgentKind.Antigravity));
+        return inventory with
+        {
+            Agents = [.. inventory.Agents.Select(a => a.Kind == AgentKind.Antigravity ? a with { NotReady = problem } : a)],
+            Capabilities = [.. inventory.Capabilities.Where(c => c != capability)],
+        };
+    }
 
     /// <inheritdoc />
     public string? GetEnvironmentVariable(string name) => _env(name);

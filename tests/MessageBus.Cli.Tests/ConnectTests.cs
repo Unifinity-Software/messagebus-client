@@ -207,6 +207,30 @@ public sealed class ConnectTests
     }
 
     [Fact]
+    public async Task Rescan_marks_connected_antigravity_not_ready_when_a_provider_is_unreachable()
+    {
+        using var machine = new TestMachine
+        {
+            AntigravityHandler = static () => new FakeServer().On(HttpMethod.Head, "/", request =>
+                request.Uri.Host == "aicode.googleapis.com"
+                    ? throw new HttpRequestException("Provider unavailable")
+                    : new(System.Net.HttpStatusCode.NotFound)),
+        };
+        machine.InstallFake("git", new("git version 2.50.1"));
+        machine.InstallAgent("agy", "1.5.14");
+        machine.WriteHomeFile(Path.Combine(".gemini", "antigravity-cli", "cache", "onboarding.json"), """{ "onboardingComplete": true }""");
+        Assert.Equal(0, (await machine.RunAsync("connect", "agy", "--yes")).ExitCode);
+
+        var run = await machine.RunAsync("connect", "--rescan", "--json");
+        Assert.Equal(0, run.ExitCode);
+        var inventory = MessageBusJson.Deserialize<MachineInventory>(run.Output)!;
+        var agent = Assert.Single(inventory.Agents, agent => agent.Kind == AgentKind.Antigravity);
+        Assert.True(agent.SignedIn);
+        Assert.Contains("cannot reach aicode.googleapis.com", agent.NotReady);
+        Assert.DoesNotContain("agent:antigravity", inventory.Capabilities);
+    }
+
+    [Fact]
     public async Task Antigravity_inventory_is_gated_by_server_capability_token()
     {
         var fullInventory = new MachineInventory

@@ -43,6 +43,8 @@ public sealed class TestMachine : IDisposable
     internal Func<HttpMessageHandler>? DiscoveryHttpHandler { get; set; }
     internal Func<HttpMessageHandler> LocalModelHandler { get; set; } = MessageBus.Cli.Agents.OpenCodeReadiness.Handler;
 
+    internal Func<HttpMessageHandler> AntigravityHandler { get; set; } = static () => new FakeServer();
+
     public FakeTimeProvider Time { get; init; } = new(new DateTimeOffset(2026, 11, 13, 9, 0, 0, TimeSpan.Zero));
 
     /// <summary>The person's browser for mbus login: records what mbus asked it to open.</summary>
@@ -157,6 +159,7 @@ public sealed class TestMachine : IDisposable
             CreateDiscoveryHttpHandler = DiscoveryHttpHandler,
             CreateReleaseHttpClient = ReleaseHttpClient ?? (() => MessageBus.Cli.Update.HttpReleaseSource.CreateTestHttpClient(Server, disposeHandler: false)),
             CreateLocalModelHttpHandler = LocalModelHandler,
+            CreateAntigravityHttpHandler = AntigravityHandler,
             Time = Time,
             Browser = Browser,
             Skills = Skills ?? new DictionarySkillSource(SkillFiles),
