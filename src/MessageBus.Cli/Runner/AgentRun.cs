@@ -367,6 +367,10 @@ internal sealed class AgentRun
                     workspace.PreparedInputs = await StepInputs.PrepareAsync(Delivery, workspace, _s.Bundles,
                         _s.Host.LocateCommand, Sandboxed, _stop.Token).ConfigureAwait(false);
                 }
+                catch (StepInputRepositoryUnavailableException ex)
+                {
+                    failure = (SettleStatus.Abandoned, ex.Message);
+                }
                 catch (UnreadableStepInputException ex)
                 {
                     unreadableInput = true;
@@ -582,7 +586,11 @@ internal sealed class AgentRun
                     try
                     {
                         if (!await commits.HasOtherNewAsync(branch).ConfigureAwait(false))
-                            returned = await send(workspace!, Delivery, branch, commits.BaseCommit, _s.Stopping).ConfigureAwait(false);
+                            returned = await send(workspace!, Delivery, branch,
+                                commits.BaseCommit, _s.Stopping).ConfigureAwait(false);
+                        if (returned && workspace!.FullBundleFriction is { } note
+                            && result.FrictionKinds.Count < 12 && !result.FrictionKinds.Contains(note.Kind))
+                            result = result with { FrictionKinds = [.. result.FrictionKinds, note.Kind] };
                         if (returned) await _s.Log.WriteLineAsync($"{DeliveryId}: returned the task branch's commits as a git bundle before cleanup.").ConfigureAwait(false);
                     }
                     catch (Exception ex)

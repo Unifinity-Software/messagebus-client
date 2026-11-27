@@ -6,12 +6,15 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using MessageBus.Attachments.Client;
 using MessageBus.Cli.Runner;
+using MessageBus.Cli.Runner.Sandbox;
+using MessageBus.Cli.Tests.Runner;
 using MessageBus.Cli.Tests.Infrastructure;
 using MessageBus.Contracts.Attachments;
 using MessageBus.Contracts.Json;
 using MessageBus.Contracts.Mcp;
 using MessageBus.Contracts.Messaging;
 using MessageBus.Contracts.Runner;
+using MessageBus.Contracts.Roles;
 using MessageBus.Contracts.Security;
 using MessageBus.Crypto;
 using MessageBus.Mcp;
@@ -141,6 +144,171 @@ public sealed class LocalBundleTests
         Assert.Contains(actual, error.Message);
         Assert.Single(machine.Server.Requests, r => r.Uri.AbsolutePath == "/api/w/ws_test/attachments/upload-link");
         Assert.DoesNotContain(machine.Server.Requests, r => r.Uri.AbsolutePath == "/mcp");
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public async Task Workflow_code_is_self_contained_when_the_repository_is_unavailable(bool hasCredential, bool publicRepository)
+    {
+        await WindowsRunCapabilities.RequireGitShellAsync();
+        var git = CommandLocator.Find("git", Environment.GetEnvironmentVariable, []);
+        Assert.SkipWhen(git is null, "git isn't installed.");
+        using var machine = new TestMachine();
+        using var pair = KeyPair.GenerateP256();
+        using var http = ConfigureServer(machine, pair);
+        await using var harness = new RunnerHarness();
+        var task = harness.Task("dlv_code", environment: new RunEnvironment { Checkout = CheckoutMode.Bundle });
+        var delivery = task with
+        {
+            Envelope = task.Envelope with { Refs = [new Ref { Kind = "git.repo", Url = "https://git.example.test/team/private.git" }] },
+            StepContext = new StepContext
+            {
+                JobId = "job_test", StepId = "code", StepName = "Code", Round = 1, AllowedOutcomes = ["done"], Inputs = [],
+            },
+        };
+        var profile = new PermissionProfile { Name = "worker" };
+        var isolation = RunIsolation.Create(new RunIsolationOptions
+        {
+            WorkRoot = harness.WorkRoot, HomeDirectory = harness.Home, Requested = IsolationLevel.Basic,
+            Credentials = hasCredential ? new CheckoutAuthenticationTests.FixtureCredential() : new NoRepoCredentials(),
+        }, TextWriter.Null);
+        var remote = delivery.Envelope.Refs[0].Url!;
+        var localRemote = Path.Combine(harness.Scratch, "remote");
+        string? remoteBase = null;
+        if (publicRepository)
+        {
+            Directory.CreateDirectory(localRemote);
+            await Git.RunAsync(localRemote, ["init", "--quiet", "--initial-branch=main"], Ct);
+            remoteBase = await CommitAsync(localRemote, "Base");
+        }
+
+        using var producer = RunWorkspace.Create(harness.WorkRoot, delivery.DeliveryId, delivery.Attempt);
+        await isolation.PrepareAsync(producer, delivery, profile, Ct);
+        try
+        {
+            if (!hasCredential)
+            {
+                var checkout = await producer.CheckOutAsync(delivery, _ => git, null, Ct, launch =>
+                    TestRepositoryRemote.Map(isolation.Wrap(launch, producer, profile), remote, localRemote));
+                Assert.Null(checkout);
+                await Git.RunAsync(producer.WorkTree, ["symbolic-ref", "HEAD", "refs/heads/main"], Ct);
+            }
+            else
+            {
+                Directory.CreateDirectory(producer.WorkTree);
+                await Git.RunAsync(producer.WorkTree, ["init", "--quiet", "--initial-branch=main"], Ct);
+            }
+            // Simulate the agent obtaining the history and making a branch in its worktree.
+            var baseCommit = remoteBase ?? await CommitAsync(producer.WorkTree, "Base");
+            await Git.RunAsync(producer.WorkTree, ["switch", "--quiet", "-c", "feature/code"], Ct);
+            var head = await CommitAsync(producer.WorkTree, "Workflow edit");
+            await using var tools = new LocalTools(ToolOptions(machine, http) with
+            {
+                Delivery = delivery, SettleFile = producer.SettleFile, Scope = RunToolScope.For(delivery, producer.Root),
+                WorkingDirectory = producer.WorkTree, FullBundleFriction = producer.FullBundleFriction,
+            });
+            var input = new SettleInput
+            {
+                ThreadId = delivery.Envelope.ThreadId, DeliveryId = delivery.DeliveryId,
+                Reply = new MessageBody { Summary = "Code ready" },
+                Result = new SettleResult { Status = SettleStatus.Succeeded },
+                Attach = [new AttachSpec { Format = AttachmentFormat.GitBundle, Base = baseCommit, ExpectedHead = head }],
+            };
+            using var json = JsonDocument.Parse(MessageBusJson.Serialize(input));
+            var arguments = json.RootElement.EnumerateObject().ToDictionary(property => property.Name, property => property.Value.Clone());
+            arguments["outcome"] = JsonSerializer.SerializeToElement("done");
+            var call = await tools.CallAsync("codex", McpToolNames.Settle, arguments, Ct);
+            Assert.False(call.IsError ?? false, call.StructuredContent.ToString());
+
+            var request = Assert.Single(machine.Server.Requests.Select(r => r.Uri.AbsolutePath == "/mcp" ? JsonNode.Parse(r.BodyText) : null),
+                node => (string?)node?["params"]?["name"] == McpToolNames.Settle);
+            var sent = MessageBusJson.Deserialize<SettleInput>(request!["params"]!["arguments"]!.ToJsonString())!;
+            var attachment = Assert.Single(sent.Attachments);
+            Assert.Equal(hasCredential || publicRepository ? baseCommit : null, attachment.BaseCommit);
+            using var keys = new KeyRing();
+            keys.Add(attachment.Encryption!.KeyId, KeyPair.FromPem(pair.ExportPem()));
+            var body = BodyCrypto.Open(sent.SealedReply!, keys);
+            var recorded = MessageBusJson.Deserialize<SettleInput>(await File.ReadAllTextAsync(producer.SettleFile, Ct))!;
+            var bundle = Path.Combine(machine.Home, "returned.bundle");
+            await using (var file = File.Create(bundle))
+                await MessageCrypto.OpenAsync(new MemoryStream(machine.Server.Single(HttpMethod.Put, $"/blobs/{attachment.Id}").Body),
+                    file, attachment.Encryption, keys, Ct);
+            var prerequisites = GitBundles.ReadHeader(bundle).Prerequisites;
+            if (hasCredential || publicRepository)
+            {
+                Assert.Contains(baseCommit, prerequisites);
+                Assert.Empty(body.Friction);
+                Assert.Empty(recorded.Result.FrictionKinds);
+                if (hasCredential) return;
+            }
+            else
+            {
+                Assert.Empty(prerequisites);
+                Assert.Equal("No repository connection for git.example.test/team/private: code was passed as a full bundle",
+                    Assert.Single(body.Friction).Note);
+                Assert.Equal("missing-context", Assert.Single(recorded.Result.FrictionKinds));
+            }
+
+            var source = new WorkflowBundleSource(new ReceivedMessage
+            {
+                Envelope = delivery.Envelope with { Attachments = [attachment] }, Body = body,
+            }, bundle);
+            await using var consumer = new RunnerHarness(bundles: source, sandbox: root =>
+                new RepositorySandbox(
+                    RunIsolation.Create(new RunIsolationOptions { WorkRoot = root, HomeDirectory = machine.Home, Requested = IsolationLevel.Basic }, TextWriter.Null),
+                    git!, remote, localRemote));
+            var review = consumer.Task("dlv_review", environment: new RunEnvironment { Checkout = CheckoutMode.Clone });
+            review = review with
+            {
+                Envelope = review.Envelope with { Refs = delivery.Envelope.Refs },
+                StepContext = delivery.StepContext with
+                {
+                    StepId = "review", Inputs = [new StepInput { FromStep = "code", What = "branch", ThreadId = delivery.Envelope.ThreadId }],
+                },
+            };
+            var accepted = await consumer.DeliverAsync(review);
+            Assert.True(accepted.Accepted, $"{accepted.Reason}: {accepted.Detail}");
+            var result = await consumer.Service.SettledAsync(review.DeliveryId);
+            await consumer.Engine.StopAsync();
+            Assert.True(result.Result.Status == SettleStatus.Succeeded, result.Result.Error);
+            var work = consumer.WorkTreeOf(review.DeliveryId);
+            Assert.Equal(head, await Git.CommitIdAsync(work, "HEAD", Ct));
+            Assert.Equal("feature/code", (await Git.RunAsync(work, ["branch", "--show-current"], Ct)).Trim());
+            if (publicRepository)
+            {
+                Assert.Equal(remote, (await Git.RunAsync(work, ["config", "--get", "remote.origin.url"], Ct)).Trim());
+                Assert.Equal(baseCommit, await Git.CommitIdAsync(work, "refs/heads/main", Ct));
+            }
+        }
+        finally { isolation.Ended(producer); }
+    }
+
+    private sealed class RepositorySandbox(IRunSandbox inner, string git, string remote, string local) : IRunSandbox
+    {
+        public Task PrepareAsync(RunWorkspace workspace, TaskDelivery delivery, PermissionProfile profile, CancellationToken cancellationToken) =>
+            inner.PrepareAsync(workspace, delivery, profile, cancellationToken);
+
+        public ProcessLaunch Wrap(ProcessLaunch launch, RunWorkspace workspace, PermissionProfile profile)
+        {
+            var wrapped = inner.Wrap(launch, workspace, profile);
+            return launch.FileName == git ? TestRepositoryRemote.Map(wrapped, remote, local) : wrapped;
+        }
+
+        public Task EndedAsync(RunWorkspace workspace) => inner.EndedAsync(workspace);
+    }
+
+    private sealed class WorkflowBundleSource(ReceivedMessage result, string bundle) : IBundleSource
+    {
+        public Task<ReceivedMessage?> ReadStepResultAsync(TaskDelivery delivery, StepInput input, CancellationToken cancellationToken) =>
+            Task.FromResult<ReceivedMessage?>(result);
+
+        public Task<string?> FetchStepAttachmentAsync(AttachmentRef attachment, string path, CancellationToken cancellationToken) =>
+            Task.FromResult<string?>(bundle);
+
+        public Task<string?> FetchAsync(TaskDelivery delivery, AttachmentRef attachment, string runDirectory, CancellationToken cancellationToken) =>
+            Task.FromResult<string?>(null);
     }
 
     [Theory]
@@ -457,6 +625,7 @@ public sealed class LocalBundleTests
             {
                 ["content"] = new JsonArray(new JsonObject { ["type"] = "text", ["text"] = (string?)args["name"] switch
                 {
+                    McpToolNames.Settle => """{"status":"working"}""",
                     McpToolNames.Send => """{"messageId":"msg_seed","threadId":"thr_seed","status":"queued"}""",
                     McpToolNames.Status when status is not null => MessageBusJson.Serialize(status),
                     McpToolNames.SendMany => MessageBusJson.Serialize(new SendManyResult

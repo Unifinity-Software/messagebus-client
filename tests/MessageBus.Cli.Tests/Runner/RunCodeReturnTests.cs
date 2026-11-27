@@ -21,7 +21,7 @@ public sealed class RunCodeReturnTests
     private static HttpResponseMessage Json(string json) => new(HttpStatusCode.OK) { Content = new StringContent(json, Encoding.UTF8, "application/json") };
 
     [Theory]
-    [InlineData(false, false, false)]
+    [InlineData(false, false, false, false, false, true)]
     [InlineData(true, false, false)]
     [InlineData(true, true, false)]
     [InlineData(false, false, true)]
@@ -29,7 +29,7 @@ public sealed class RunCodeReturnTests
     [InlineData(false, false, false, true, true)]
     [InlineData(false, false, true, true)]
     [InlineData(false, false, true, true, true)]
-    public async Task Actual_return_uses_local_keys_and_fresh_negotiated_delivery_attempt(bool roleReply, bool rotationNeeded, bool checkedReturn, bool supportsAttempt = false, bool staleAttempt = false)
+    public async Task Actual_return_uses_local_keys_and_fresh_negotiated_delivery_attempt(bool roleReply, bool rotationNeeded, bool checkedReturn, bool supportsAttempt = false, bool staleAttempt = false, bool fullBundle = false)
     {
         Assert.SkipWhen(checkedReturn && !OperatingSystem.IsLinux(), "Checked return uses the Linux-only verification toolchain.");
         Assert.SkipWhen(CommandLocator.Find("git", Environment.GetEnvironmentVariable, []) is null, "git isn't installed.");
@@ -47,14 +47,17 @@ public sealed class RunCodeReturnTests
             Sender = new SenderIdentity { Kind = SenderKind.Person, SubjectId = "person_test" },
         } };
         string? baseCommit = null;
-        if (checkedReturn)
+        if (checkedReturn || fullBundle)
         {
             baseCommit = await Git.CommitIdAsync(run.WorkTree, "HEAD");
             File.AppendAllText(Path.Combine(run.WorkTree, "change.txt"), " checked");
             await Git.RunAsync(run.WorkTree, ["add", "."]);
             await Git.RunAsync(run.WorkTree, ["-c", "user.name=Test", "-c", "user.email=test@example.com",
                 "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "Checked change"]);
-            run.VerifiedReturnRevision = await Git.CommitIdAsync(run.WorkTree, "HEAD");
+            if (checkedReturn)
+                run.VerifiedReturnRevision = await Git.CommitIdAsync(run.WorkTree, "HEAD");
+            if (fullBundle)
+                run.FullBundleFriction = new FrictionNote { Kind = "missing-context", Note = "The repository could not be reached." };
         }
         await AssertReturnAsync(h, run, task, "main", baseCommit, roleReply, rotationNeeded, supportsAttempt, staleAttempt);
     }
@@ -175,6 +178,22 @@ public sealed class RunCodeReturnTests
         Assert.Equal(key.KeyId, sent.SealedReply?.Encryption.KeyId);
         Assert.Equal(key.KeyId, Assert.Single(sent.Attachments).Encryption?.KeyId);
         Assert.True(Directory.Exists(run.WorkTree));
+
+        if (run.FullBundleFriction is { } note)
+        {
+            using var ring = new KeyRing().Add(key.KeyId, KeyPair.FromPkcs8(pair.ExportPkcs8()));
+            using var cipher = new MemoryStream(uploaded);
+            using var plaintext = new MemoryStream();
+            var attachment = Assert.Single(sent.Attachments);
+            await MessageCrypto.OpenAsync(cipher, plaintext, attachment.Encryption!, ring);
+            var bundle = Path.Combine(run.Root, "full-return.bundle");
+            File.WriteAllBytes(bundle, plaintext.ToArray());
+            Assert.NotNull(baseCommit);
+            Assert.Null(attachment.BaseCommit);
+            Assert.Empty(GitBundles.ReadHeader(bundle).Prerequisites);
+            Assert.Equal(note, Assert.Single(BodyCrypto.Open(sent.SealedReply!, ring).Friction));
+            Assert.Equal(note.Kind, Assert.Single(sent.Result.FrictionKinds));
+        }
 
         if (run.VerifiedReturnRevision is { } expected)
         {

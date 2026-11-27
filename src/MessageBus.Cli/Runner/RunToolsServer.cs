@@ -53,6 +53,7 @@ internal static class RunToolsServer
                 Refused = request.Refused,
                 RecordVerifiedTaskSettle = request.RecordVerifiedTaskSettle,
                 RecordStepOutcome = request.RecordStepOutcome,
+                FullBundleFriction = run.FullBundleFriction,
                 PrepareGit = start => InRun(start, request, git),
                 Session = request.Session,
             };

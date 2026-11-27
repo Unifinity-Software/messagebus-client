@@ -1290,6 +1290,11 @@ internal sealed partial class LocalTools : IAsyncDisposable
                 Refs = [.. refs.Where(r => !exhibits.Any(e => r.Kind == RefKinds.Exhibit && r.Id == e.Id)), .. exhibits],
             } };
         }
+        var fullBundleFriction = runnerTask && input.Attach?.Any(spec => spec?.Format == AttachmentFormat.GitBundle) == true
+            ? _o.FullBundleFriction : null;
+        if (fullBundleFriction is not null && input.SealedReply is not null)
+            throw McpToolException.Invalid("sealedReply", "Give plaintext reply with a full bundle so the local tool can seal it with the friction note.");
+
         var pinned = input.Attach?.Any(spec => spec is { Format: AttachmentFormat.GitBundle, ExpectedHead: not null }) == true;
         if (runnerTask && pinned)
             File.Delete(KeptAnswer.KeptFile(_o.SettleFile!));
@@ -1297,6 +1302,8 @@ internal sealed partial class LocalTools : IAsyncDisposable
         if (input.Friction is { Count: > 0 } notes)
         {
             if (notes.Count > 12) throw McpToolException.Invalid("friction", "Give at most 12 friction notes.");
+            if (notes.Count == 12 && fullBundleFriction is not null)
+                throw McpToolException.Invalid("friction", "Give at most 11 friction notes when the runner adds a full bundle note.");
             foreach (var (note, i) in notes.Select((n, i) => (n, i)))
             {
                 if (note is null || !FrictionKinds.IsValid(note.Kind))
@@ -1349,11 +1356,15 @@ internal sealed partial class LocalTools : IAsyncDisposable
                                    ?? asked?.Target ?? throw McpToolException.NotFound($"Thread {input.ThreadId} wasn't found.");
                 var attachments = new List<AttachmentRef>(input.Attachments ?? []);
                 var refused = new List<RefusedAttachment>();
+                var sentFullBundle = false;
                 foreach (var (spec, i) in specs.Select((s, i) => (s, i)))
                 {
                     try
                     {
-                        attachments.Add(await PackageAsync(await WithTaskBaseAsync(spec, asked, ct), to, key, input.ThreadId, $"attach[{i}]", ct));
+                        var forceFull = fullBundleFriction is not null && spec.Format == AttachmentFormat.GitBundle;
+                        var package = forceFull ? spec with { Base = "" } : await WithTaskBaseAsync(spec, asked, ct);
+                        attachments.Add(await PackageAsync(package, to, key, input.ThreadId, $"attach[{i}]", ct));
+                        sentFullBundle |= forceFull;
                     }
                     catch (Exception e) when (runnerTask && !pinned && (e as McpToolException)?.Error.Field != $"attach[{i}].expectedHead"
                         && RefusedAttachment.Why(e) is { } why)
@@ -1363,6 +1374,15 @@ internal sealed partial class LocalTools : IAsyncDisposable
                     }
                 }
                 input = input with { Attach = [], Attachments = attachments };
+                if (sentFullBundle && input.Reply is { } fullBundleReply && fullBundleFriction is { } note)
+                {
+                    FrictionNote[] friction = [.. fullBundleReply.Friction, note];
+                    input = input with
+                    {
+                        Reply = fullBundleReply with { Friction = friction },
+                        Result = input.Result with { FrictionKinds = [.. friction.Select(item => item.Kind)] },
+                    };
+                }
                 if (refused.Count > 0)
                 {
                     // The call fails so the agent settles once, answer and code together; its answer is kept in case it never does.

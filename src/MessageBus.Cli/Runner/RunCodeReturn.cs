@@ -91,10 +91,11 @@ internal static class RunCodeReturn
         // A person with no ReplyTo reads the workspace key, just as in LocalTools.SettleAsync.
         var key = await recipient(task.ReplyTo as RoleTarget, ct).ConfigureAwait(false);
         var attachments = new AttachmentClient(http, links, workspace, Directory.CreateDirectory(Path.Combine(run.Root, "tmp")).FullName);
-        var (attachmentRef, bundle) = await attachments.SendGitBundleAsync(run.WorkTree, target, key, branch, baseCommit, task.ThreadId, ct).ConfigureAwait(false);
+        var (attachmentRef, bundle) = await attachments.SendGitBundleAsync(run.WorkTree, target, key, branch, run.FullBundleFriction is null ? baseCommit : "", task.ThreadId, ct).ConfigureAwait(false);
         if (run.VerifiedReturnRevision is { } verified && bundle.HeadCommit != verified) return false;
         var body = new MessageBody
         {
+            Friction = run.FullBundleFriction is { } note ? [note] : [],
             Summary = run.VerifiedReturnRevision is null
                 ? "The runner returned the task's commits before cleaning up its worktree."
                 : "The runner returned the exact commit used for required verification.",
@@ -112,7 +113,12 @@ internal static class RunCodeReturn
         {
             ThreadId = task.ThreadId, DeliveryId = delivery.DeliveryId, ReplyOnly = true,
             Attempt = await TargetCapabilities.SupportsAsync(http, "settleAttemptV1", ct).ConfigureAwait(false) ? delivery.Attempt : null,
-            Result = new SettleResult { Status = SettleStatus.Succeeded, Summary = body.Summary, Refs = [new Ref { Kind = "git.commit", Sha = head }] },
+            Result = new SettleResult
+            {
+                Status = SettleStatus.Succeeded, Summary = body.Summary,
+                FrictionKinds = [.. body.Friction.Select(note => note.Kind)],
+                Refs = [new Ref { Kind = "git.commit", Sha = head }],
+            },
             SealedReply = sealedBody.ToSealedBody(),
             Attachments = [attachmentRef],
         };

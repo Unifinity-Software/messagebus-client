@@ -73,7 +73,7 @@ public sealed class CheckoutAuthenticationTests
         finally { isolation.Ended(run); }
     }
 
-    private sealed class FixtureCredential : IRepoCredentialSource
+    internal sealed class FixtureCredential : IRepoCredentialSource
     {
         public string Description => "Fixture repository credential";
         public Task<RepoCredential?> IssueAsync(RepoCredentialRequest request, CancellationToken cancellationToken) =>
