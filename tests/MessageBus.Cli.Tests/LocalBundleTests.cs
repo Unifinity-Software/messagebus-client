@@ -147,10 +147,12 @@ public sealed class LocalBundleTests
     }
 
     [Theory]
-    [InlineData(false, false)]
-    [InlineData(true, false)]
-    [InlineData(false, true)]
-    public async Task Workflow_code_is_self_contained_when_the_repository_is_unavailable(bool hasCredential, bool publicRepository)
+    [InlineData(false, false, false)]
+    [InlineData(true, false, false)]
+    [InlineData(false, true, false)]
+    [InlineData(false, false, true)]
+    public async Task Workflow_code_is_self_contained_without_a_workspace_repository_connection(
+        bool hasCredential, bool publicRepository, bool ownerGit)
     {
         await WindowsRunCapabilities.RequireGitShellAsync();
         var git = CommandLocator.Find("git", Environment.GetEnvironmentVariable, []);
@@ -173,15 +175,23 @@ public sealed class LocalBundleTests
         {
             WorkRoot = harness.WorkRoot, HomeDirectory = harness.Home, Requested = IsolationLevel.Basic,
             Credentials = hasCredential ? new CheckoutAuthenticationTests.FixtureCredential() : new NoRepoCredentials(),
+            UseOwnerGit = _ => ownerGit,
         }, TextWriter.Null);
         var remote = delivery.Envelope.Refs[0].Url!;
         var localRemote = Path.Combine(harness.Scratch, "remote");
         string? remoteBase = null;
-        if (publicRepository)
+        if (publicRepository || ownerGit)
         {
             Directory.CreateDirectory(localRemote);
             await Git.RunAsync(localRemote, ["init", "--quiet", "--initial-branch=main"], Ct);
             remoteBase = await CommitAsync(localRemote, "Base");
+        }
+
+        if (ownerGit)
+        {
+            Directory.CreateDirectory(harness.Home);
+            await Git.RunAsync(localRemote, ["config", "--file", Path.Combine(harness.Home, ".gitconfig"),
+                "credential.username", "fixture-owner"], Ct);
         }
 
         using var producer = RunWorkspace.Create(harness.WorkRoot, delivery.DeliveryId, delivery.Attempt);
@@ -191,8 +201,19 @@ public sealed class LocalBundleTests
             if (!hasCredential)
             {
                 var checkout = await producer.CheckOutAsync(delivery, _ => git, null, Ct, launch =>
-                    TestRepositoryRemote.Map(isolation.Wrap(launch, producer, profile), remote, localRemote));
+                {
+                    var wrapped = isolation.Wrap(launch, producer, profile);
+                    if (ownerGit && launch.Arguments.Contains("clone"))
+                    {
+                        var config = new List<string>();
+                        using var probe = AgentProcess.Start(wrapped with { Arguments = ["config", "--get", "credential.username"] }, config.Add);
+                        Assert.Equal(0, probe.WaitForExitAsync().GetAwaiter().GetResult());
+                        Assert.Contains("fixture-owner", config);
+                    }
+                    return TestRepositoryRemote.Map(wrapped, remote, localRemote);
+                });
                 Assert.Null(checkout);
+                Assert.Equal(remoteBase is null, producer.RepositoryUnavailable);
                 await Git.RunAsync(producer.WorkTree, ["symbolic-ref", "HEAD", "refs/heads/main"], Ct);
             }
             else
@@ -226,7 +247,7 @@ public sealed class LocalBundleTests
                 node => (string?)node?["params"]?["name"] == McpToolNames.Settle);
             var sent = MessageBusJson.Deserialize<SettleInput>(request!["params"]!["arguments"]!.ToJsonString())!;
             var attachment = Assert.Single(sent.Attachments);
-            Assert.Equal(hasCredential || publicRepository ? baseCommit : null, attachment.BaseCommit);
+            Assert.Equal(hasCredential ? baseCommit : null, attachment.BaseCommit);
             using var keys = new KeyRing();
             keys.Add(attachment.Encryption!.KeyId, KeyPair.FromPem(pair.ExportPem()));
             var body = BodyCrypto.Open(sent.SealedReply!, keys);
@@ -236,29 +257,27 @@ public sealed class LocalBundleTests
                 await MessageCrypto.OpenAsync(new MemoryStream(machine.Server.Single(HttpMethod.Put, $"/blobs/{attachment.Id}").Body),
                     file, attachment.Encryption, keys, Ct);
             var prerequisites = GitBundles.ReadHeader(bundle).Prerequisites;
-            if (hasCredential || publicRepository)
+            if (hasCredential)
             {
                 Assert.Contains(baseCommit, prerequisites);
                 Assert.Empty(body.Friction);
                 Assert.Empty(recorded.Result.FrictionKinds);
-                if (hasCredential) return;
+                return;
             }
-            else
-            {
-                Assert.Empty(prerequisites);
-                Assert.Equal("No repository connection for git.example.test/team/private: code was passed as a full bundle",
-                    Assert.Single(body.Friction).Note);
-                Assert.Equal("missing-context", Assert.Single(recorded.Result.FrictionKinds));
-            }
+            Assert.Empty(prerequisites);
+            Assert.Equal("No repository connection for git.example.test/team/private: code was passed as a full bundle",
+                Assert.Single(body.Friction).Note);
+            Assert.Equal("missing-context", Assert.Single(recorded.Result.FrictionKinds));
 
             var source = new WorkflowBundleSource(new ReceivedMessage
             {
                 Envelope = delivery.Envelope with { Attachments = [attachment] }, Body = body,
             }, bundle);
+            var consumerRemote = ownerGit ? Path.Combine(harness.Scratch, "unreachable") : localRemote;
             await using var consumer = new RunnerHarness(bundles: source, sandbox: root =>
                 new RepositorySandbox(
                     RunIsolation.Create(new RunIsolationOptions { WorkRoot = root, HomeDirectory = machine.Home, Requested = IsolationLevel.Basic }, TextWriter.Null),
-                    git!, remote, localRemote));
+                    git!, remote, consumerRemote));
             var review = consumer.Task("dlv_review", environment: new RunEnvironment { Checkout = CheckoutMode.Clone });
             review = review with
             {

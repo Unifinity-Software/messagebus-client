@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.ComponentModel;
 using MessageBus.Contracts.Machines;
+using MessageBus.Contracts.Messaging;
 using MessageBus.Contracts.Roles;
 using MessageBus.Contracts.Runner;
 
@@ -451,8 +452,23 @@ public sealed class RunIsolation : IRunSandbox
             Repository = repository,
             CanPush = profile.CanPush,
         }, cancellationToken).ConfigureAwait(false);
-        workspace.RepositoryCredentialNote = repository?.Scheme == Uri.UriSchemeHttps && !ownerGit && snapshot is null && credential is null
-            ? "No repository credential was available for this run. A private repository needs a workspace repository connection or a code bundle." : null;
+        if (repository?.Scheme == Uri.UriSchemeHttps && snapshot is null && credential is null)
+        {
+            if (!ownerGit)
+                workspace.RepositoryCredentialNote = "No repository credential was available for this run. A private repository needs a workspace repository connection or a code bundle.";
+
+            // A later workflow step may run on a machine without access to this repository.
+            if (delivery.StepContext is not null)
+            {
+                var name = repository.Host + repository.AbsolutePath;
+                if (name.EndsWith(".git", StringComparison.OrdinalIgnoreCase)) name = name[..^4];
+                workspace.FullBundleFriction = new FrictionNote
+                {
+                    Kind = "missing-context",
+                    Note = $"No repository connection for {name[..Math.Min(name.Length, 420)]}: code was passed as a full bundle",
+                };
+            }
+        }
         var telemetry = await _options.Telemetry.IssueAsync(delivery.DeliveryId, cancellationToken).ConfigureAwait(false);
         RunNetwork? network = null;
         if (_aci is not null || _options.LimitNetwork && profile.Network != NetworkAccess.Open)

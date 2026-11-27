@@ -91,7 +91,7 @@ public sealed partial class RunWorkspace : IDisposable
             && (!initialized || await GitAsync(git, ["-C", WorkTree, "rev-parse", "--verify", "HEAD"], wrap, ct).ConfigureAwait(false) is not null
                 && (await GitBundles.MissingPrerequisitesAsync(header, BundleGit(git, file, wrap), ct).ConfigureAwait(false)).Count > 0))
         {
-            repositoryError = await CheckOutRepositoryAsync(git, delivery, repoRef, wrap, ct).ConfigureAwait(false);
+            repositoryError = await CheckOutRepositoryAsync(git, repoRef, wrap, ct).ConfigureAwait(false);
             initialized = repositoryError is null;
             if (initialized)
                 repository = $"repository '{RepositoryUrl(repoRef)}'";
@@ -266,7 +266,7 @@ public sealed partial class RunWorkspace : IDisposable
                 if (bundle is null && delivery.RunnerAction is null
                     && RunnerGit.RepositoryRef(delivery.Envelope.Refs) is { } repositoryRef)
                 {
-                    var error = await CheckOutRepositoryAsync(git, delivery, repositoryRef, wrap, cancellationToken).ConfigureAwait(false);
+                    var error = await CheckOutRepositoryAsync(git, repositoryRef, wrap, cancellationToken).ConfigureAwait(false);
                     if (error is null)
                         return null;
                     if (RepositoryRefused) return error;
@@ -290,7 +290,7 @@ public sealed partial class RunWorkspace : IDisposable
         {
             return "The task names no repository to check out.";
         }
-        var cloneError = await CheckOutRepositoryAsync(git, delivery, repoRef, wrap, cancellationToken).ConfigureAwait(false);
+        var cloneError = await CheckOutRepositoryAsync(git, repoRef, wrap, cancellationToken).ConfigureAwait(false);
         if (cloneError is null || !RepositoryUnavailable || delivery.StepContext?.Inputs?.Any(input => input.What == "branch") != true)
             return cloneError;
 
@@ -302,7 +302,7 @@ public sealed partial class RunWorkspace : IDisposable
         return null;
     }
 
-    private async Task<string?> CheckOutRepositoryAsync(string git, TaskDelivery delivery, Ref repoRef,
+    private async Task<string?> CheckOutRepositoryAsync(string git, Ref repoRef,
         Func<ProcessLaunch, ProcessLaunch> wrap, CancellationToken cancellationToken)
     {
         var url = RepositoryUrl(repoRef)!;
@@ -321,19 +321,7 @@ public sealed partial class RunWorkspace : IDisposable
             error = await GitAsync(git, ["clone", "--quiet", "--", url, WorkTree], RemoteGit(wrap), cancellationToken).ConfigureAwait(false);
         }
         if (error is not null && RepositoryCredentialNote is not null)
-        {
             RepositoryUnavailable = true;
-            if (delivery.StepContext is not null && RunnerGit.RepositoryUri(url) is { } repository)
-            {
-                var name = repository.Host + repository.AbsolutePath;
-                if (name.EndsWith(".git", StringComparison.OrdinalIgnoreCase)) name = name[..^4];
-                FullBundleFriction = new FrictionNote
-                {
-                    Kind = "missing-context",
-                    Note = $"No repository connection for {name[..Math.Min(name.Length, 420)]}: code was passed as a full bundle",
-                };
-            }
-        }
         if (error is null && repoRef.Sha is { Length: > 0 } sha)
         {
             error = await GitAsync(git, ["-C", WorkTree, "checkout", "--quiet", sha], wrap, cancellationToken).ConfigureAwait(false);
@@ -396,7 +384,7 @@ public sealed partial class RunWorkspace : IDisposable
             {
                 var repository = RepositoryUrl(repoRef)!;
                 const string reference = "refs/remotes/mbus/task";
-                repositoryError = await CheckOutRepositoryAsync(git, delivery, repoRef, wrap, cancellationToken).ConfigureAwait(false)
+                repositoryError = await CheckOutRepositoryAsync(git, repoRef, wrap, cancellationToken).ConfigureAwait(false)
                     ?? await ApplyBundleAsync(git, file, $"repository '{repository}'", branch, reference, wrap, cancellationToken).ConfigureAwait(false)
                     ?? await GitAsync(git, ["-C", WorkTree, "checkout", "--quiet", "-B", branch, reference], wrap, cancellationToken).ConfigureAwait(false);
                 if (repositoryError is null)
