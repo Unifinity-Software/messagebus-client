@@ -69,12 +69,7 @@ public sealed class CliHost
     public TimeProvider Time { get; init; } = TimeProvider.System;
 
     internal Func<System.Diagnostics.ProcessStartInfo, CancellationToken, Task<(int ExitCode, string Output)>> RunWorkItemCommand { get; init; }
-        = async (start, ct) =>
-        {
-            var result = await Agents.CommandRunner.RunAsync(start.FileName, start.ArgumentList.ToArray(), ct,
-                environment: new Dictionary<string, string> { ["GH_PROMPT_DISABLED"] = "1" });
-            return result is null ? (1, "") : (result.ExitCode, result.Output);
-        };
+        = MessageBus.Mcp.GitHubWorkItem.RunAsync;
 
     /// <summary>Opens the approval page for <c>mbus login</c> (the original issue); tests answer it by approving through the API.</summary>
     public required IBrowser Browser { get; init; }

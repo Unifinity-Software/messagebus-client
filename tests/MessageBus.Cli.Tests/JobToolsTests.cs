@@ -51,10 +51,10 @@ public sealed class JobToolsTests
     public async Task Starts_a_job_by_workflow_name_and_returns_the_dashboard_link(bool ghWorks)
     {
         using var machine = new TestMachine();
+        System.Diagnostics.ProcessStartInfo? command = null;
         machine.WorkItemCommand = (start, _) =>
         {
-            Assert.Equal("gh", start.FileName);
-            Assert.Equal(["issue", "view", "42", "--repo", "owner/repo", "--json", "title,body"], start.ArgumentList);
+            command = start;
             return Task.FromResult(ghWorks ? (0, """{"title":"  Add due dates  ","body":"Keep the issue context."}""") : (1, ""));
         };
         SetCapability(machine, true);
@@ -69,6 +69,9 @@ public sealed class JobToolsTests
         var result = McpToolCatalog.ReadResult<StartJobResult>(await Call(tools, McpToolNames.StartJob,
             """{"workItem":"gh:owner/repo#42","workflow":"fEaTuRe","instructions":"Add tests.","limitUsd":5.50,"runsOn":"owner-runners"}"""));
 
+        Assert.NotNull(command);
+        Assert.Equal("gh", command.FileName);
+        Assert.Equal(["issue", "view", "42", "--repo", "github.com/owner/repo", "--json", "title,body"], command.ArgumentList);
         Assert.Equal("job_test", result.JobId);
         Assert.Equal(FakeServer.Url + "/jobs/job_test", result.Url);
         Assert.Equal("running", result.State);
@@ -83,6 +86,20 @@ public sealed class JobToolsTests
         }
         Assert.True(JsonNode.DeepEquals(JsonNode.Parse(request.BodyText), expected));
         Assert.Equal(3, machine.Server.Requests.Count);
+    }
+
+    [Fact]
+    public async Task Issue_lookup_preserves_the_starters_cancellation()
+    {
+        using var machine = new TestMachine();
+        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(Ct);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => GitHubWorkItem.ReadAsync(
+            "gh:owner/repo#42", machine.Time, (_, ct) =>
+            {
+                cancellation.Cancel();
+                return Task.FromCanceled<(int, string)>(ct);
+            }, cancellation.Token));
     }
 
     [Fact]

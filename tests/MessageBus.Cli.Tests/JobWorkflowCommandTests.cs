@@ -51,20 +51,20 @@ public sealed class JobWorkflowCommandTests
         Assert.Single(machine.Server.Requests, r => r.Method == HttpMethod.Post && r.Uri.AbsolutePath == Root + "jobs");
     }
 
-    [Fact]
-    public async Task Start_sends_the_locally_read_issue_within_service_limits()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Start_sends_the_locally_read_issue_within_service_limits(bool splitSurrogate)
     {
         using var machine = Machine();
+        System.Diagnostics.ProcessStartInfo? command = null;
         machine.WorkItemCommand = (start, _) =>
         {
-            Assert.Equal("gh", start.FileName);
-            Assert.Equal(["issue", "view", "42", "--repo", "acme/app", "--json", "title,body"], start.ArgumentList);
-            Assert.Equal("1", start.Environment["GH_PROMPT_DISABLED"]);
-            Assert.False(start.UseShellExecute);
-            Assert.True(start.CreateNoWindow);
+            command = start;
             return Task.FromResult((0, new JsonObject
             {
-                ["title"] = "  " + new string('t', 201) + "  ", ["body"] = new string('b', 30_001),
+                ["title"] = "  " + (splitSurrogate ? new string('t', 199) + "\U0001F600" : new string('t', 201)) + "  ",
+                ["body"] = new string('b', 30_001),
             }.ToJsonString()));
         };
         machine.Server.On(HttpMethod.Get, Root + "workflows", _ => Json(Workflows))
@@ -74,8 +74,17 @@ public sealed class JobWorkflowCommandTests
 
         Assert.Equal(0, run.ExitCode);
         Assert.Empty(run.Error);
+        Assert.NotNull(command);
+        Assert.Equal("gh", command.FileName);
+        Assert.Equal(["issue", "view", "42", "--repo", "github.com/acme/app", "--json", "title,body"], command.ArgumentList);
+        Assert.Equal("1", command.Environment["GH_PROMPT_DISABLED"]);
+        Assert.False(command.UseShellExecute);
+        Assert.True(command.CreateNoWindow);
+        Assert.True(command.RedirectStandardInput && command.RedirectStandardOutput && command.RedirectStandardError);
+        Assert.Equal(Encoding.UTF8, command.StandardOutputEncoding);
+        Assert.Equal(Encoding.UTF8, command.StandardErrorEncoding);
         var body = JsonNode.Parse(machine.Server.Single(HttpMethod.Post, Root + "jobs").BodyText)!;
-        Assert.Equal(new string('t', 200), (string?)body["workItemTitle"]);
+        Assert.Equal(new string('t', splitSurrogate ? 199 : 200), (string?)body["workItemTitle"]);
         Assert.Equal(new string('b', 30_000), (string?)body["workItemBody"]);
     }
 
@@ -86,6 +95,8 @@ public sealed class JobWorkflowCommandTests
     [InlineData("malformed")]
     [InlineData("wrong-shape")]
     [InlineData("ado")]
+    [InlineData("trailing-newline")]
+    [InlineData("unexpected-error")]
     public async Task Start_without_local_issue_context_still_starts_quietly(string reason)
     {
         using var machine = Machine();
@@ -94,6 +105,7 @@ public sealed class JobWorkflowCommandTests
         {
             calls++;
             if (reason == "missing") throw new System.ComponentModel.Win32Exception();
+            if (reason == "unexpected-error") throw new AggregateException(new IOException("Lookup failed."));
             if (reason == "timeout")
             {
                 var pending = new TaskCompletionSource<(int, string)>();
@@ -111,11 +123,17 @@ public sealed class JobWorkflowCommandTests
         machine.Server.On(HttpMethod.Get, Root + "workflows", _ => Json(Workflows))
             .On(HttpMethod.Post, Root + "jobs", _ => Json("""{"id":"job_test","state":"running"}"""));
 
-        var run = await machine.RunAsync("job", "start", reason == "ado" ? "ado:org/project#42" : "gh:acme/app#42", "--workflow", "Feature");
+        var workItem = reason switch
+        {
+            "ado" => "ado:org/project#42",
+            "trailing-newline" => "gh:acme/app#42\n",
+            _ => "gh:acme/app#42",
+        };
+        var run = await machine.RunAsync("job", "start", workItem, "--workflow", "Feature");
 
         Assert.Equal(0, run.ExitCode);
         Assert.Empty(run.Error);
-        Assert.Equal(reason == "ado" ? 0 : 1, calls);
+        Assert.Equal(reason is "ado" or "trailing-newline" ? 0 : 1, calls);
         var body = JsonNode.Parse(machine.Server.Single(HttpMethod.Post, Root + "jobs").BodyText)!.AsObject();
         Assert.False(body.ContainsKey("workItemTitle"));
         Assert.False(body.ContainsKey("workItemBody"));

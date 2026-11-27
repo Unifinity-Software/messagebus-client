@@ -1190,8 +1190,8 @@ Routes below are relative to `/api/w/{workspaceId}/`:
   and returns a job. The CLI resolves a published workflow by id or name without
   regard to case, then prints `<server base URL>/jobs/<id>` and returns immediately.
   For `gh:owner/repo#n`, both local start paths try
-  `gh issue view n --repo owner/repo --json title,body`, using the starter's existing
-  GitHub CLI sign-in, with prompts disabled and a five-second timeout. The title
+  `gh issue view n --repo github.com/owner/repo --json title,body`, using the starter's existing
+  GitHub CLI sign-in on github.com regardless of `GH_HOST`, with prompts disabled and a five-second timeout. The title
   is trimmed and capped at 200 characters; the body is capped at 30,000 characters.
   These optional strings supply context when the workspace has no tracker connection.
   Missing or failing `gh`, a timeout, or malformed output quietly leaves both fields

@@ -52,7 +52,7 @@ internal sealed partial class LocalTools
             {
                 WorkItem = input.WorkItem, WorkflowId = workflow.Id, Instructions = input.Instructions,
                 LimitUsd = input.LimitUsd, RunsOn = input.RunsOn, WorkItemTitle = issue?.Title, WorkItemBody = issue?.Body,
-            }, (JsonTypeInfo<StartJobRequest>)MessageBusJson.Options.GetTypeInfo(typeof(StartJobRequest))),
+            }, MessageBusJsonContext.Default.StartJobRequest),
         };
         var job = await SendWorkflowRequestAsync(request, WorkflowHttpJson.Default.WorkflowJobView, ct);
         return new() { JobId = job.Id, Url = JobUrl(job.Id), State = job.State, Workflow = job.Workflow };

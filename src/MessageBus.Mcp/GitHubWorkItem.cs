@@ -10,7 +10,7 @@ namespace MessageBus.Mcp;
 /// <summary>Best-effort issue context read using the starter's own GitHub CLI credentials.</summary>
 internal static partial class GitHubWorkItem
 {
-    [GeneratedRegex(@"^gh:([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#([0-9]+)$", RegexOptions.CultureInvariant)]
+    [GeneratedRegex(@"^gh:([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#([0-9]+)\z", RegexOptions.CultureInvariant)]
     private static partial Regex Key();
 
     internal static async Task<(string Title, string Body)?> ReadAsync(string workItem, TimeProvider time,
@@ -24,7 +24,7 @@ internal static partial class GitHubWorkItem
             RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true,
             StandardOutputEncoding = Encoding.UTF8, StandardErrorEncoding = Encoding.UTF8,
         };
-        foreach (var arg in new[] { "issue", "view", match.Groups[2].Value, "--repo", match.Groups[1].Value, "--json", "title,body" })
+        foreach (var arg in new[] { "issue", "view", match.Groups[2].Value, "--repo", "github.com/" + match.Groups[1].Value, "--json", "title,body" })
             start.ArgumentList.Add(arg);
         start.Environment["GH_PROMPT_DISABLED"] = "1";
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5), time);
@@ -42,8 +42,9 @@ internal static partial class GitHubWorkItem
             if (text.Length == 0) return null;
             return (Cut(text, MessageLimits.MaxTitleLength), Cut(body.GetString()!, 30_000));
         }
-        catch (OperationCanceledException) when (!ct.IsCancellationRequested) { return null; }
-        catch (Exception e) when (e is Win32Exception or IOException or InvalidOperationException or JsonException) { return null; }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        // Local context is optional: a failed lookup must not prevent starting the job.
+        catch (Exception) { return null; }
     }
 
     private static string Cut(string text, int limit) => text.Length <= limit ? text :
