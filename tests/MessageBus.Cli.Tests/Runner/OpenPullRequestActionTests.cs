@@ -29,13 +29,7 @@ public sealed class OpenPullRequestActionTests
         var credentials = new Credentials();
         var action = new OpenPullRequestAction(credentials, http, remote);
 
-        await GitAsync(context.WorkDirectory, "init");
-        await GitAsync(context.WorkDirectory, "switch", "-c", "topic/reviewed");
-        await GitAsync(context.WorkDirectory, "-c", "user.name=Example", "-c", "user.email=dev@example.test",
-            "-c", "commit.gpgSign=false", "-c", "core.hooksPath=" + (OperatingSystem.IsWindows() ? "NUL" : "/dev/null"),
-            "commit", "--allow-empty", "-m", "Reviewed work");
-        await GitAsync(context.WorkDirectory, "switch", "-c", "unrelated");
-        await GitAsync(directory.Path, "init", "--bare", remote);
+        await PreparePushAsync(context, remote);
         var input = Directory.CreateDirectory(Path.Combine(context.InputsDirectory, "implement")).FullName;
         await File.WriteAllTextAsync(Path.Combine(input, "branch.txt"), "topic/reviewed\n", TestContext.Current.CancellationToken);
         await File.WriteAllTextAsync(Path.Combine(input, "summary.txt"), "Implemented due dates.", TestContext.Current.CancellationToken);
@@ -84,14 +78,132 @@ public sealed class OpenPullRequestActionTests
         Assert.DoesNotContain(Token, log.ToString());
     }
 
-    private static RunnerActionContext CreateContext(RunnerHarness harness, string root, TextWriter log, bool autoMerge)
+    [Theory]
+    [InlineData("create", "POST,PATCH", true)]
+    [InlineData("existing", "", false)]
+    [InlineData("conflict", "POST,GET", false)]
+    [InlineData("reject", "", false)]
+    public async Task Pushes_source_and_handles_azure_devops_pull_request(string scenario, string followup, bool bearer)
+    {
+        const string jwt = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJleGFtcGxlIn0.signature";
+        const string azurePull = """{"pullRequestId":42,"createdBy":{"id":"example-creator"}}""";
+        const string pulls = "/acme/Example%20Project/_apis/git/repositories/example-repo/pullrequests";
+        const string version = "?api-version=7.1";
+        const string source = "refs/heads/topic/reviewed";
+        const string target = "refs/heads/main";
+        const string repo = "acme/Example Project/example-repo";
+        const string repositoryUrl = "https://dev.azure.com/acme/Example%20Project/_git/example-repo";
+        var ct = TestContext.Current.CancellationToken;
+        await using var harness = new RunnerHarness();
+        using var directory = new ScratchDirectory();
+        using var log = new StringWriter();
+        var context = CreateContext(harness, directory.Path, log, autoMerge: scenario != "conflict", azureRepo: repo) with
+        {
+            InputBranches = new Dictionary<string, string> { ["implement"] = "topic/reviewed" },
+        };
+        var remote = Path.Combine(directory.Path, "remote.git");
+        await PreparePushAsync(context, remote);
+        var input = Directory.CreateDirectory(Path.Combine(context.InputsDirectory, "implement")).FullName;
+        var summary = "Implemented due dates. " + new string('x', 4000);
+        await File.WriteAllTextAsync(Path.Combine(input, "summary.txt"), summary, ct);
+        var secret = bearer ? jwt : Token;
+        var credentials = new Credentials(secret);
+        var methods = new List<string>();
+        using var http = new HttpClient(new FakeAzureDevOps(async (request, token) =>
+        {
+            methods.Add(request.Method.Method);
+            Assert.Equal("api.example.test", request.RequestUri!.Host);
+            Assert.Equal(bearer ? "Bearer" : "Basic", request.Headers.Authorization?.Scheme);
+            Assert.Equal(bearer ? jwt : Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(":" + Token)),
+                request.Headers.Authorization?.Parameter);
+            if (request.Method == HttpMethod.Get)
+            {
+                Assert.Equal(source, await GitAsync(remote, "for-each-ref", "--format=%(refname)"));
+                Assert.Equal(pulls, request.RequestUri.AbsolutePath);
+                Assert.Equal("?searchCriteria.sourceRefName=refs%2Fheads%2Ftopic%2Freviewed"
+                    + "&searchCriteria.targetRefName=refs%2Fheads%2Fmain&searchCriteria.status=active" + "&api-version=7.1",
+                    request.RequestUri.Query);
+                if (scenario == "reject")
+                    return new(HttpStatusCode.Forbidden) { Content = new StringContent(secret) };
+                var existing = scenario == "existing"
+                    ? """{"pullRequestId":42,"autoCompleteSetBy":{"id":"example-creator"}}"""
+                    : methods.Count > 1 ? azurePull : "";
+                return new(HttpStatusCode.OK) { Content = new StringContent($$"""{"value":[{{existing}}]}""") };
+            }
+
+            Assert.Equal(version, request.RequestUri.Query);
+            using var json = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(token));
+            var body = json.RootElement;
+            if (request.Method == HttpMethod.Post)
+            {
+                Assert.Equal(pulls, request.RequestUri.AbsolutePath);
+                Assert.Equal(source, body.GetProperty("sourceRefName").GetString());
+                Assert.Equal(target, body.GetProperty("targetRefName").GetString());
+                Assert.Equal("Add due dates", body.GetProperty("title").GetString());
+                Assert.Equal(($"## implement{Environment.NewLine}{Environment.NewLine}{summary}")[..4000],
+                    body.GetProperty("description").GetString());
+                return scenario == "conflict" ? new(HttpStatusCode.Conflict)
+                    : new(HttpStatusCode.Created) { Content = new StringContent(azurePull) };
+            }
+
+            Assert.Equal(HttpMethod.Patch, request.Method);
+            Assert.Equal(pulls + "/42", request.RequestUri.AbsolutePath);
+            Assert.Equal("example-creator", body.GetProperty("autoCompleteSetBy").GetProperty("id").GetString());
+            Assert.Equal("squash", body.GetProperty("completionOptions").GetProperty("mergeStrategy").GetString());
+            Assert.Equal(2, body.EnumerateObject().Count());
+            return new(HttpStatusCode.OK);
+        })) { BaseAddress = new Uri("https://api.example.test/") };
+
+        var result = await new OpenPullRequestAction(credentials, pushDestination: remote, azureDevOpsHttp: http)
+            .RunAsync(context, ct);
+
+        Assert.True(credentials.Request?.CanPush);
+        Assert.Equal(repositoryUrl, credentials.Request?.Repository.AbsoluteUri);
+        Assert.Equal(followup.Length == 0 ? "GET" : "GET," + followup, string.Join(",", methods));
+        Assert.DoesNotContain(secret, log.ToString());
+        if (scenario == "reject")
+        {
+            Assert.Equal(SettleStatus.Failed, result.Status);
+            Assert.Equal("failed", result.Outcome);
+            Assert.Equal("Look up the open pull request failed (HTTP 403).", result.Summary);
+            Assert.Equal(result.Summary, result.Error);
+            Assert.Empty(result.Refs);
+            return;
+        }
+
+        Assert.Equal(SettleStatus.Succeeded, result.Status);
+        Assert.Equal("opened", result.Outcome);
+        var reference = Assert.Single(result.Refs);
+        Assert.Equal("ado.pr", reference.Kind);
+        Assert.Equal(repo, reference.Repo);
+        Assert.Equal(42, reference.Number);
+        Assert.Equal(repositoryUrl + "/pullrequest/42", reference.Url);
+    }
+
+    private static async Task PreparePushAsync(RunnerActionContext context, string remote)
+    {
+        await GitAsync(context.WorkDirectory, "init");
+        await GitAsync(context.WorkDirectory, "switch", "-c", "topic/reviewed");
+        await GitAsync(context.WorkDirectory, "-c", "user.name=Example", "-c", "user.email=dev@example.test",
+            "-c", "commit.gpgSign=false", "-c", "core.hooksPath=" + (OperatingSystem.IsWindows() ? "NUL" : "/dev/null"),
+            "commit", "--allow-empty", "-m", "Reviewed work");
+        await GitAsync(context.WorkDirectory, "switch", "-c", "unrelated");
+        await GitAsync(context.RunDirectory, "init", "--bare", remote);
+    }
+
+    private static RunnerActionContext CreateContext(RunnerHarness harness, string root, TextWriter log, bool autoMerge,
+        string? azureRepo = null)
     {
         var delivery = harness.Task("dlv_open_pr");
         return new RunnerActionContext
         {
             Delivery = delivery with
             {
-                Envelope = delivery.Envelope with { Refs = [new Ref { Kind = "github.issue", Repo = "example/repo" }] },
+                Envelope = delivery.Envelope with
+                {
+                    Refs = [azureRepo is null ? new Ref { Kind = "github.issue", Repo = "example/repo" }
+                        : new Ref { Kind = "ado.workitem", Repo = azureRepo }],
+                },
                 RunnerAction = new RunnerAction
                 {
                     Kind = RunnerActionKinds.OpenPullRequest,
@@ -129,7 +241,7 @@ public sealed class OpenPullRequestActionTests
         public void Dispose() => MessageBus.Cli.Runner.RunWorkspace.TryDelete(Path);
     }
 
-    private sealed class Credentials : IRepoCredentialSource
+    private sealed class Credentials(string secret = Token) : IRepoCredentialSource
     {
         public string Description => "Test credentials";
         public RepoCredentialRequest? Request { get; private set; }
@@ -139,9 +251,16 @@ public sealed class OpenPullRequestActionTests
             Request = request;
             return Task.FromResult<RepoCredential?>(new RepoCredential
             {
-                UserName = "x-access-token", Secret = Token, ExpiresAt = DateTimeOffset.MaxValue,
+                UserName = "x-access-token", Secret = secret, ExpiresAt = DateTimeOffset.MaxValue,
             });
         }
+    }
+
+    private sealed class FakeAzureDevOps(Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> respond)
+        : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct) =>
+            respond(request, ct);
     }
 
     private sealed class FakeGitHub(bool existing, bool reject = false) : HttpMessageHandler
