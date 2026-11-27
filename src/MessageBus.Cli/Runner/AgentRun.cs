@@ -788,7 +788,7 @@ internal sealed class AgentRun
                 return Result(SettleStatus.Cancelled, stopDetail);
             case StopReason.CostCapReached:
                 // Final (the original issue): another attempt would cost as much again.
-                return Result(SettleStatus.Failed, stopDetail);
+                return Result(SettleStatus.Failed, stopDetail) with { FailureCategory = "cost-cap" };
             case StopReason.TimedOut or StopReason.LeaseLost or StopReason.Drained or StopReason.Shutdown:
                 return Result(SettleStatus.Abandoned, stopDetail);
         }
@@ -1123,7 +1123,7 @@ internal sealed class AgentRun
         if (cost > cap.MaxUsd)
         {
             Stop(StopReason.CostCapReached,
-                $"Stopped at an estimated {Money(cost)}, over the role's most cost per run of {Money(cap.MaxUsd)}.");
+                $"Stopped at an estimated {Money(cost)}, over the most this run may cost ({Money(cap.MaxUsd)}).");
         }
     }
 

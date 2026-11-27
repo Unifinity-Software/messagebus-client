@@ -41,6 +41,7 @@ internal static class ContractSamples
     {
         StepId = "review", Round = 2, State = "waiting", Outcome = "changes-needed", Agent = "reviewer", MachineId = "mch_example",
         WaitingOn = MessageBusJson.Deserialize<JsonElement>("""{"kind":"agent","role":"reviewer"}"""),
+        ThreadId = Thr, Error = "Review stopped.", CostUsd = 0.25m,
     };
 
     public static readonly RoleTarget RoleTo = new() { Role = "developer" };
@@ -582,6 +583,13 @@ internal static class ContractSamples
         {
             JobId = "job_example", Url = "https://example.test/jobs/job_example", State = "needs-you", SpentUsd = 2.5m,
             LimitUsd = 25m, ActiveStepIds = ["review"], Steps = [JobStep],
+            DrivenBy = "session",
+            TakenOver = MessageBusJson.Deserialize<JsonElement>("""{"who":{"id":"user_example","name":"Ada"},"at":"2026-01-02T03:04:05Z"}"""),
+            WorkItem = MessageBusJson.Deserialize<JsonElement>("""{"key":"gh:owner/repo#42"}"""),
+            Path = MessageBusJson.Deserialize<JsonElement>("""
+                {"schema":1,"steps":[{"id":"start","type":"start"},{"id":"review","type":"agent"}],
+                 "arrows":[{"from":"start","to":"review"}]}
+                """),
         },
         JobStep,
         new FindProjectInput { Key = "gh:owner/repo#42" },

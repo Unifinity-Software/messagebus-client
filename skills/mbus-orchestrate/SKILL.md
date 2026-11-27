@@ -36,7 +36,7 @@ If the user already asked to orchestrate here, go directly to the session proced
    optional `instructions`, `limitUsd` and `runsOn` only as chosen by the user. Report the returned
    `url`, `jobId`, `state` and selected `workflow` version, then hand control to the service.
    Don't also claim a session job or dispatch its steps. Use `job_status {jobId}` when asked for
-   progress; it returns `url`, `state`, `spentUsd`, `limitUsd`, `activeStepIds` and `steps`.
+   progress, spending and step runs.
 5. With no fitting workflow, capability off, workspace workflows unavailable, a file-only work
    item (the start tool takes a tracker key), or the user's choice to orchestrate here, follow the
    session procedure below exactly as before. When capability is off, don't call workflow tools:
@@ -54,6 +54,20 @@ start_job { "workItem": "gh:example/todo-app#42", "workflow": "Feature", "runsOn
 
 The start result is `{jobId, url, state, workflow?}`. Use that `jobId` in
 `job_status { "jobId": "<returned jobId>" }`; share the returned link rather than inventing one.
+
+## Pick up a job you took over
+
+When the user gives a job link or id, read it with `job_status {jobId}`. For a work item, use
+`find_job {key}` with its tracker key to get `project.projectId` first. Resume this way only when
+`job_status` reports `drivenBy: "session"` and includes `takenOver`.
+
+1. Use `find_job` with the job's `workItem.key` to get the stored `project.key`,
+   `project.title` and `project.executionScope`. Check that it resolves to the same job id.
+2. Call `ensure_job {key, title, executionScope, claimedWorkItems: [workItem.key]}` in this
+   session's coordinator inbox. Continue only on `coordinationAcquired: true`. On conflict, stop
+   and report who holds coordination if the service identifies them.
+3. Read finished step results with `status {threadId}` for each finished step that has a thread.
+   Use the job's `path` as the plan and its `activeStepIds` and step runs to resume where it stopped.
 
 ## Rules that always apply
 

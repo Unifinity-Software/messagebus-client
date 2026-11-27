@@ -64,6 +64,7 @@ internal sealed partial class LocalTools
         {
             JobId = job.Id, Url = JobUrl(job.Id), State = job.State, SpentUsd = job.SpentUsd,
             LimitUsd = job.LimitUsd, ActiveStepIds = job.ActiveStepIds ?? [], Steps = job.Steps ?? [],
+            DrivenBy = job.DrivenBy, TakenOver = job.TakenOver, WorkItem = job.WorkItem, Path = job.Path,
         };
     }
 
@@ -118,7 +119,8 @@ internal sealed partial class LocalTools
 internal sealed record NewWorkflowJob(string WorkItem, string WorkflowId, string? Instructions, decimal? LimitUsd, string? RunsOn);
 
 internal sealed record WorkflowJobView(string Id, string State, JsonElement? Workflow, decimal SpentUsd,
-    decimal? LimitUsd, IReadOnlyList<string>? ActiveStepIds, IReadOnlyList<JobStepRun>? Steps);
+    decimal? LimitUsd, IReadOnlyList<string>? ActiveStepIds, IReadOnlyList<JobStepRun>? Steps,
+    string? DrivenBy, JsonElement? TakenOver, JsonElement? WorkItem, JsonElement? Path);
 
 [JsonSourceGenerationOptions(JsonSerializerDefaults.Web, DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull)]
 [JsonSerializable(typeof(NewWorkflowJob))]
