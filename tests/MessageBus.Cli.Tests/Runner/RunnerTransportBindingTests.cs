@@ -25,8 +25,12 @@ public sealed class RunnerTransportBindingTests(ITestOutputHelper output)
     private const string Legacy = """{"product":"messagebus.ai","signIn":{"microsoft":true}}""";
     private const string Isolated = """{"product":"messagebus.ai","stamp":{"stampId":"eu","geography":"eu","azureRegion":"westeurope","url":"https://eu.runner.example.test","aliases":[]},"signIn":{"authority":{"version":1,"stampId":"eu","issuer":"https://eu.runner.example.test","audience":"https://eu.runner.example.test"},"machineSignature":{"version":2,"required":true}}}""";
 
-    [Fact(Timeout = 30_000)]
-    public async Task Reconnect_recovers_from_discovery_and_upgrade_outages_then_stops_on_coded_refusal()
+    [Theory(Timeout = 30_000)]
+    [InlineData(401, true)]
+    [InlineData(403, true)]
+    [InlineData(401, false)]
+    [InlineData(403, false)]
+    public async Task Reconnect_recovers_from_outages_then_stops_on_uncoded_refusal(int refusalStatus, bool refuseDiscovery)
     {
         var ct = TestContext.Current.CancellationToken;
         using var machine = new TestMachine();
@@ -41,6 +45,8 @@ public sealed class RunnerTransportBindingTests(ITestOutputHelper output)
                 2 or 3 => new(HttpStatusCode.BadGateway),
                 4 => throw new HttpRequestException("Fixture connection failure."),
                 5 => throw new TaskCanceledException("Fixture discovery timeout."),
+                8 when refuseDiscovery => new((HttpStatusCode)refusalStatus),
+                > 8 => new(HttpStatusCode.NotFound),
                 _ => new(HttpStatusCode.OK) { Content = new StringContent(Legacy) },
             }));
         var upgrades = 0;
@@ -48,10 +54,11 @@ public sealed class RunnerTransportBindingTests(ITestOutputHelper output)
         {
             var response = Interlocked.Increment(ref upgrades) switch
             {
-                1 or 4 => null,
+                1 or 3 => null,
                 2 => "HTTP/1.1 503 Unavailable\r\nRetry-After: 300\r\n",
-                3 => "HTTP/1.1 403 Forbidden\r\n",
-                _ => $"HTTP/1.1 403 Forbidden\r\n{MbusHeaders.Error}: machine-removed\r\n",
+                _ => refusalStatus == 401
+                    ? "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Machine\r\n"
+                    : "HTTP/1.1 403 Forbidden\r\n",
             };
             if (response is null)
                 await IsolatedHttpsServer.UpgradeAsync(request, stream, token);
@@ -89,13 +96,13 @@ public sealed class RunnerTransportBindingTests(ITestOutputHelper output)
 
         Assert.Equal(2, connected);
         Assert.Equal(2, dropped);
-        Assert.Equal(9, discoveries);
-        Assert.Equal(5, upgrades);
-        Assert.Equal(8, retryDelays.Count);
+        Assert.Equal(8, discoveries);
+        Assert.Equal(refuseDiscovery ? 3 : 4, upgrades);
+        Assert.Equal(7, retryDelays.Count);
         Assert.All(retryDelays, delay => Assert.InRange(delay, TimeSpan.FromMilliseconds(1), TimeSpan.FromSeconds(60)));
         Assert.Equal(TimeSpan.FromSeconds(60), retryDelays[5]);
         Assert.Equal(ReverseConnectionStopReason.Refused, stop.Reason);
-        Assert.Equal(403, stop.StatusCode);
+        Assert.Equal(refuseDiscovery ? null : refusalStatus, stop.StatusCode);
     }
 
     [Theory]

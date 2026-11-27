@@ -1,7 +1,6 @@
 using System.Globalization;
 using System.Net.WebSockets;
 using Groundhog.Protocol;
-using MessageBus.Contracts.Http;
 using MessageBus.Runner.Transport.Internal;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Connections;
@@ -292,9 +291,7 @@ public sealed class ReverseConnectionClient(ReverseConnectionClientOptions optio
         if (status < 400)
             return new ConnectOutcome.Retry("Couldn't reach the server.", null); // DNS, TCP or TLS failed.
 
-        var authFailure = status is 401 or 403;
-        if (ConnectRefusal.IsPermanent(status)
-            && (!authFailure || !string.IsNullOrWhiteSpace(Header(webSocket, MbusHeaders.Error))))
+        if (ConnectRefusal.IsPermanent(status))
         {
             var detail = status == ConnectRefusal.Unauthorized && Header(webSocket, "WWW-Authenticate") is { } accepted
                 ? $" It accepts: {accepted}."

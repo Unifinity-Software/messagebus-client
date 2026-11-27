@@ -1,7 +1,6 @@
 using System.Collections.Concurrent;
 using MessageBus.Cli.Configuration;
 using MessageBus.Cli.Hosting;
-using MessageBus.Contracts.Http;
 
 namespace MessageBus.Cli.Server;
 
@@ -110,12 +109,9 @@ public sealed class ServerSendGate : IDisposable
             var status = (int)response.StatusCode;
             if (!response.IsSuccessStatusCode)
             {
-                var hasErrorCode = response.Headers.TryGetValues(MbusHeaders.Error, out var codes)
-                    && codes.Any(code => !string.IsNullOrWhiteSpace(code));
                 throw new ServerBindingException($"Anonymous discovery refused ({status}); credentials were not sent.")
                 {
-                    IsTransientDiscoveryFailure = status is >= 500 and <= 599 or 408 or 429
-                        || status is 401 or 403 && !hasErrorCode,
+                    IsTransientDiscoveryFailure = status is >= 500 and <= 599 or 408 or 429,
                 };
             }
             return ServerDiscoveryParser.Parse(await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false));
