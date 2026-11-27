@@ -138,8 +138,9 @@ Ownership acquire/release events, including job, subject, inbox, item list and t
 atomically with the transition in `projectkeys` under `ownership-audit|<ownership-id>|acquired` and
 `...|released`; idempotent resume emits no duplicate. Release uses conditional atomic deletes, so
 concurrent cleanup cannot remove a replacement claim. Completed or cancelled jobs cannot acquire
-coordination or accept new tasks. A person can explicitly hand a workflow job over to a session with
-**Take over**, and the hand-over requires that action even after an inbox expires.
+coordination or accept new tasks. The one exception is **Take over** on the dashboard: a person
+deliberately hands a workflow job to their own session, and only their next `ensure_job` for it
+acquires coordination. It is never automatic and never caused by an inbox expiring.
 
 File-only jobs may still use `ensure_job` without claims, but file paths have no tracker
 coordination guarantee. State this limitation for file-only requests; do not describe a job key
