@@ -41,6 +41,8 @@ public sealed class TestMachine : IDisposable
     internal Func<HttpClient>? ReleaseHttpClient { get; set; }
     internal Func<HttpMessageHandler>? ApiHttpHandler { get; set; }
     internal Func<HttpMessageHandler>? DiscoveryHttpHandler { get; set; }
+    internal Func<System.Diagnostics.ProcessStartInfo, CancellationToken, Task<(int ExitCode, string Output)>> WorkItemCommand { get; set; }
+        = static (_, _) => Task.FromResult((1, ""));
     internal Func<HttpMessageHandler> LocalModelHandler { get; set; } = MessageBus.Cli.Agents.OpenCodeReadiness.Handler;
 
     internal Func<HttpMessageHandler> AntigravityHandler { get; set; } = static () => new FakeServer();
@@ -161,6 +163,7 @@ public sealed class TestMachine : IDisposable
             CreateLocalModelHttpHandler = LocalModelHandler,
             CreateAntigravityHttpHandler = AntigravityHandler,
             Time = Time,
+            RunWorkItemCommand = WorkItemCommand,
             Browser = Browser,
             Skills = Skills ?? new DictionarySkillSource(SkillFiles),
             McpServer = McpServer,

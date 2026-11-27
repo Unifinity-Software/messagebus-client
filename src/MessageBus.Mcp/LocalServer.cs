@@ -11,6 +11,9 @@ namespace MessageBus.Mcp;
 /// <summary>What the local server needs; <see cref="LocalServer.Options"/> builds it from what <c>mbus mcp</c> prepared.</summary>
 public sealed record LocalServerOptions
 {
+    internal Func<System.Diagnostics.ProcessStartInfo, CancellationToken, Task<(int ExitCode, string Output)>> RunWorkItemCommand { get; init; }
+        = GitHubWorkItem.RunAsync;
+
     // Runner-owned tools use the existing authenticated transport without depending on the CLI.
     internal Tool? AdditionalRunTool { get; init; }
     internal Func<IDictionary<string, System.Text.Json.JsonElement>?, CancellationToken, Task<CallToolResult>>? CallRunTool { get; init; }

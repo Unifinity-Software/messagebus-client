@@ -45,10 +45,18 @@ public sealed class JobToolsTests
         }
     }
 
-    [Fact]
-    public async Task Starts_a_job_by_workflow_name_and_returns_the_dashboard_link()
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Starts_a_job_by_workflow_name_and_returns_the_dashboard_link(bool ghWorks)
     {
         using var machine = new TestMachine();
+        System.Diagnostics.ProcessStartInfo? command = null;
+        machine.WorkItemCommand = (start, _) =>
+        {
+            command = start;
+            return Task.FromResult(ghWorks ? (0, """{"title":"  Add due dates  ","body":"Keep the issue context."}""") : (1, ""));
+        };
         SetCapability(machine, true);
         machine.Server
             .On(HttpMethod.Get, "/api/w/ws_test/workflows", _ =>
@@ -61,14 +69,37 @@ public sealed class JobToolsTests
         var result = McpToolCatalog.ReadResult<StartJobResult>(await Call(tools, McpToolNames.StartJob,
             """{"workItem":"gh:owner/repo#42","workflow":"fEaTuRe","instructions":"Add tests.","limitUsd":5.50,"runsOn":"owner-runners"}"""));
 
+        Assert.NotNull(command);
+        Assert.Equal("gh", command.FileName);
+        Assert.Equal(["issue", "view", "42", "--repo", "github.com/owner/repo", "--json", "title,body"], command.ArgumentList);
         Assert.Equal("job_test", result.JobId);
         Assert.Equal(FakeServer.Url + "/jobs/job_test", result.Url);
         Assert.Equal("running", result.State);
         Assert.Equal("wf_feature", result.Workflow!.Value.GetProperty("id").GetString());
         var request = machine.Server.Single(HttpMethod.Post, "/api/w/ws_test/jobs");
-        Assert.True(JsonNode.DeepEquals(JsonNode.Parse(request.BodyText), JsonNode.Parse(
-            """{"workItem":"gh:owner/repo#42","workflowId":"wf_feature","instructions":"Add tests.","limitUsd":5.50,"runsOn":"owner-runners"}""")));
+        var expected = JsonNode.Parse(
+            """{"workItem":"gh:owner/repo#42","workflowId":"wf_feature","instructions":"Add tests.","limitUsd":5.50,"runsOn":"owner-runners"}""")!;
+        if (ghWorks)
+        {
+            expected["workItemTitle"] = "Add due dates";
+            expected["workItemBody"] = "Keep the issue context.";
+        }
+        Assert.True(JsonNode.DeepEquals(JsonNode.Parse(request.BodyText), expected));
         Assert.Equal(3, machine.Server.Requests.Count);
+    }
+
+    [Fact]
+    public async Task Issue_lookup_preserves_the_starters_cancellation()
+    {
+        using var machine = new TestMachine();
+        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(Ct);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => GitHubWorkItem.ReadAsync(
+            "gh:owner/repo#42", machine.Time, (_, ct) =>
+            {
+                cancellation.Cancel();
+                return Task.FromCanceled<(int, string)>(ct);
+            }, cancellation.Token));
     }
 
     [Fact]
@@ -190,6 +221,7 @@ public sealed class JobToolsTests
     {
         Http = http, Links = http, WorkspaceId = "ws_test", ConfigDirectory = machine.Home,
         Input = Stream.Null, Output = Stream.Null, Time = machine.Time,
+        RunWorkItemCommand = machine.WorkItemCommand,
     });
 
     private static HttpResponseMessage Json(string json, HttpStatusCode status = HttpStatusCode.OK) => new(status)

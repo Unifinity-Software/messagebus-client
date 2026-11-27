@@ -6,6 +6,7 @@ using MessageBus.Cli.Configuration;
 using MessageBus.Cli.Hosting;
 using MessageBus.Cli.Scripts;
 using MessageBus.Contracts.Json;
+using MessageBus.Contracts.Mcp;
 using MessageBus.Contracts.Messaging;
 using MessageBus.Crypto;
 using MessageBus.Mcp;
@@ -41,10 +42,13 @@ internal static class JobCommand
         {
             if (parse.GetValue(limit) is < 0) throw new CliException("The spending limit cannot be negative.", ScriptExitCodes.InvalidInput);
             var selected = await api.ResolveWorkflowAsync(parse.GetValue(workflow)!, true, ct);
-            var body = new JsonObject { ["workItem"] = parse.GetValue(item), ["workflowId"] = selected["id"]!.ToString() };
-            if (parse.GetValue(instructions) is { } text) body["instructions"] = text;
-            if (parse.GetValue(limit) is { } usd) body["limitUsd"] = usd;
-            if (parse.GetValue(runsOn) is { } scope) body["runsOn"] = scope;
+            var issue = await GitHubWorkItem.ReadAsync(parse.GetValue(item)!, host.Time, host.RunWorkItemCommand, ct);
+            var body = JsonNode.Parse(MessageBusJson.Serialize(new StartJobRequest
+            {
+                WorkItem = parse.GetValue(item)!, WorkflowId = selected["id"]!.ToString(),
+                Instructions = parse.GetValue(instructions), LimitUsd = parse.GetValue(limit), RunsOn = parse.GetValue(runsOn),
+                WorkItemTitle = issue?.Title, WorkItemBody = issue?.Body,
+            }));
             var result = await api.SendAsync(HttpMethod.Post, "jobs", body, ct);
             api.Write(result, () => host.Out.WriteLine(api.Link("jobs", result!["id"]!.ToString())));
             return 0;

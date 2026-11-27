@@ -68,6 +68,9 @@ public sealed class CliHost
     /// <summary>Clock for request signatures and scan times.</summary>
     public TimeProvider Time { get; init; } = TimeProvider.System;
 
+    internal Func<System.Diagnostics.ProcessStartInfo, CancellationToken, Task<(int ExitCode, string Output)>> RunWorkItemCommand { get; init; }
+        = MessageBus.Mcp.GitHubWorkItem.RunAsync;
+
     /// <summary>Opens the approval page for <c>mbus login</c> (the original issue); tests answer it by approving through the API.</summary>
     public required IBrowser Browser { get; init; }
 

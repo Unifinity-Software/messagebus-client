@@ -1112,6 +1112,8 @@ switched on for this workspace.”
 - `start_job {workItem, workflow, instructions?, limitUsd?, runsOn?}` resolves
   `workflow` as a case-insensitive id or name using `GET workflows` and
   posts the resolved `workflowId` with the other fields to `POST jobs`.
+  For GitHub items, the local tool also tries the starter's own `gh` to supply
+  the optional `workItemTitle` and `workItemBody` described below.
   It returns `{jobId, url, state, workflow}` as soon as the job is created.
   The service runs the job after the calling session closes.
 - `job_status {jobId}` reads `GET jobs/{id}` and returns `{jobId, url, state,
@@ -1184,9 +1186,17 @@ Routes below are relative to `/api/w/{workspaceId}/`:
   Problems have `kind`, `message`, optional `stepId` and optional `severity`;
   missing severity means error. The CLI prints errors before warnings and exits
   successfully only when there are no errors.
-- `POST jobs` accepts `{workItem, workflowId, instructions?, limitUsd?, runsOn?}`
+- `POST jobs` accepts `{workItem, workflowId, instructions?, limitUsd?, runsOn?, workItemTitle?, workItemBody?}`
   and returns a job. The CLI resolves a published workflow by id or name without
   regard to case, then prints `<server base URL>/jobs/<id>` and returns immediately.
+  For `gh:owner/repo#n`, both local start paths try
+  `gh issue view n --repo github.com/owner/repo --json title,body`, using the starter's existing
+  GitHub CLI sign-in on github.com regardless of `GH_HOST`, with prompts disabled and a five-second timeout. The title
+  is trimmed and capped at 200 characters; the body is capped at 30,000 characters.
+  These optional strings supply context when the workspace has no tracker connection.
+  Missing or failing `gh`, a timeout, or malformed output quietly leaves both fields
+  out of the request; Azure DevOps items skip the lookup. Null fields are omitted
+  and older servers ignore the additional fields.
 - `GET jobs?state=&workflowId=&startedBy=` returns a plain job array.
   `--mine` resolves `startedBy` from `GET /api/caller`'s `subjectId`.
   `GET jobs/{id}` returns `id`, `title`, `workItem`, `drivenBy`, optional
