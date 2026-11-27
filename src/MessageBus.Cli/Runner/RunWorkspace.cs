@@ -63,8 +63,10 @@ public sealed partial class RunWorkspace : IDisposable
     private FileStream? _lock;
 
     internal Action<string>? GitLog { get; set; }
+    internal bool RepositoryUnavailable { get; private set; }
     internal bool RepositoryRefused { get; private set; }
     internal string? RepositoryCredentialNote { get; set; }
+    internal FrictionNote? FullBundleFriction { get; set; }
     // Prepared by isolation before checkout, also used by runner-owned Git outside an OS wrapper.
     internal IReadOnlyDictionary<string, string?> GitEnvironment { get; set; } = new Dictionary<string, string?>();
     internal Uri? LocalModelEndpoint { get; set; }
@@ -85,11 +87,11 @@ public sealed partial class RunWorkspace : IDisposable
         string? repositoryError = null;
         var initialized = Path.Exists(Path.Combine(WorkTree, ".git"));
         // Only replace an empty checkout. Existing branches may belong to earlier steps.
-        if (repoRef is not null && header.Prerequisites.Count > 0
+        if (!RepositoryUnavailable && repoRef is not null && header.Prerequisites.Count > 0
             && (!initialized || await GitAsync(git, ["-C", WorkTree, "rev-parse", "--verify", "HEAD"], wrap, ct).ConfigureAwait(false) is not null
                 && (await GitBundles.MissingPrerequisitesAsync(header, BundleGit(git, file, wrap), ct).ConfigureAwait(false)).Count > 0))
         {
-            repositoryError = await CheckOutRepositoryAsync(git, repoRef, wrap, ct).ConfigureAwait(false);
+            repositoryError = await CheckOutRepositoryAsync(git, delivery, repoRef, wrap, ct).ConfigureAwait(false);
             initialized = repositoryError is null;
             if (initialized)
                 repository = $"repository '{RepositoryUrl(repoRef)}'";
@@ -101,19 +103,23 @@ public sealed partial class RunWorkspace : IDisposable
 
         var reference = "refs/remotes/mbus-input/" + Guid.NewGuid().ToString("N");
         var error = await GitAsync(git, ["-C", WorkTree, "check-ref-format", "refs/heads/" + branch], wrap, ct).ConfigureAwait(false)
-            ?? await ApplyBundleAsync(git, file, repository, branch, reference, wrap, ct).ConfigureAwait(false)
+            ?? await ApplyBundleAsync(git, file, repository, branch, reference, wrap, ct, stepInput: true).ConfigureAwait(false)
             ?? await GitAsync(git, ["-C", WorkTree, "checkout", "--quiet", "-B", branch, reference], wrap, ct).ConfigureAwait(false);
         return error is null || repositoryError is null ? error : repositoryError + " " + error;
     }
 
     private async Task<string?> ApplyBundleAsync(string git, string file, string repository, string branch, string destination,
-        Func<ProcessLaunch, ProcessLaunch> wrap, CancellationToken ct)
+        Func<ProcessLaunch, ProcessLaunch> wrap, CancellationToken ct, bool stepInput = false)
     {
         try
         {
             await GitBundles.ApplyAsync(file, repository, [$"+refs/heads/{branch}:{destination}"],
                 BundleGit(git, file, wrap), writeFetchHead: true, ct).ConfigureAwait(false);
             return null;
+        }
+        catch (GitException ex) when (stepInput && RepositoryUnavailable && ex.Input == "repository")
+        {
+            throw new StepInputRepositoryUnavailableException();
         }
         catch (GitException ex)
         {
@@ -260,7 +266,7 @@ public sealed partial class RunWorkspace : IDisposable
                 if (bundle is null && delivery.RunnerAction is null
                     && RunnerGit.RepositoryRef(delivery.Envelope.Refs) is { } repositoryRef)
                 {
-                    var error = await CheckOutRepositoryAsync(git, repositoryRef, wrap, cancellationToken).ConfigureAwait(false);
+                    var error = await CheckOutRepositoryAsync(git, delivery, repositoryRef, wrap, cancellationToken).ConfigureAwait(false);
                     if (error is null)
                         return null;
                     if (RepositoryRefused) return error;
@@ -284,10 +290,19 @@ public sealed partial class RunWorkspace : IDisposable
         {
             return "The task names no repository to check out.";
         }
-        return await CheckOutRepositoryAsync(git, repoRef, wrap, cancellationToken).ConfigureAwait(false);
+        var cloneError = await CheckOutRepositoryAsync(git, delivery, repoRef, wrap, cancellationToken).ConfigureAwait(false);
+        if (cloneError is null || !RepositoryUnavailable || delivery.StepContext?.Inputs?.Any(input => input.What == "branch") != true)
+            return cloneError;
+
+        if (!TryDelete(WorkTree))
+            return $"Couldn't remove the incomplete repository checkout. {cloneError}";
+
+        GitLog?.Invoke($"Repository checkout failed. Starting with an empty folder for step inputs. {cloneError}");
+        Directory.CreateDirectory(WorkTree);
+        return null;
     }
 
-    private async Task<string?> CheckOutRepositoryAsync(string git, Ref repoRef,
+    private async Task<string?> CheckOutRepositoryAsync(string git, TaskDelivery delivery, Ref repoRef,
         Func<ProcessLaunch, ProcessLaunch> wrap, CancellationToken cancellationToken)
     {
         var url = RepositoryUrl(repoRef)!;
@@ -304,6 +319,20 @@ public sealed partial class RunWorkspace : IDisposable
         {
             TryDelete(WorkTree);
             error = await GitAsync(git, ["clone", "--quiet", "--", url, WorkTree], RemoteGit(wrap), cancellationToken).ConfigureAwait(false);
+        }
+        if (error is not null && RepositoryCredentialNote is not null)
+        {
+            RepositoryUnavailable = true;
+            if (delivery.StepContext is not null && RunnerGit.RepositoryUri(url) is { } repository)
+            {
+                var name = repository.Host + repository.AbsolutePath;
+                if (name.EndsWith(".git", StringComparison.OrdinalIgnoreCase)) name = name[..^4];
+                FullBundleFriction = new FrictionNote
+                {
+                    Kind = "missing-context",
+                    Note = $"No repository connection for {name[..Math.Min(name.Length, 420)]}: code was passed as a full bundle",
+                };
+            }
         }
         if (error is null && repoRef.Sha is { Length: > 0 } sha)
         {
@@ -367,7 +396,7 @@ public sealed partial class RunWorkspace : IDisposable
             {
                 var repository = RepositoryUrl(repoRef)!;
                 const string reference = "refs/remotes/mbus/task";
-                repositoryError = await CheckOutRepositoryAsync(git, repoRef, wrap, cancellationToken).ConfigureAwait(false)
+                repositoryError = await CheckOutRepositoryAsync(git, delivery, repoRef, wrap, cancellationToken).ConfigureAwait(false)
                     ?? await ApplyBundleAsync(git, file, $"repository '{repository}'", branch, reference, wrap, cancellationToken).ConfigureAwait(false)
                     ?? await GitAsync(git, ["-C", WorkTree, "checkout", "--quiet", "-B", branch, reference], wrap, cancellationToken).ConfigureAwait(false);
                 if (repositoryError is null)

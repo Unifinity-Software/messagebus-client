@@ -84,6 +84,9 @@ public sealed record LocalServerOptions
     /// <summary>Records an accepted workflow outcome in the runner after a successful settle call.</summary>
     public Action<string>? RecordStepOutcome { get; init; }
 
+    /// <summary>For this workflow run, require full returned bundles and report why in the reply.</summary>
+    public FrictionNote? FullBundleFriction { get; init; }
+
     /// <summary><c>MBUS_AGENT</c>: which of the machine's agents this is (id or kind); else the delivery's, else from the MCP client's name.</summary>
     public string? Agent { get; init; }
 

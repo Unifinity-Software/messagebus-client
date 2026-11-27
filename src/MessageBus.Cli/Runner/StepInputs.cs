@@ -12,6 +12,9 @@ internal sealed record PreparedStepInputs(IReadOnlyList<string> Files, IReadOnly
 internal sealed class UnreadableStepInputException(string step, Exception inner)
     : IOException($"Could not read the result from step '{step}': {inner.Message}", inner);
 
+internal sealed class StepInputRepositoryUnavailableException()
+    : IOException("The earlier step's code can't be applied here because its base commits are missing and the repository can't be reached. Re-run the earlier step with mbus 1.8.6 or later, or connect the repository.");
+
 internal static class StepInputs
 {
     internal static async Task<PreparedStepInputs> PrepareAsync(TaskDelivery delivery, RunWorkspace workspace, IBundleSource? source,
@@ -55,7 +58,7 @@ internal static class StepInputs
 
                 if (previous.Input is null) prepared.Add((input, result));
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            catch (Exception ex) when (ex is not (OperationCanceledException or StepInputRepositoryUnavailableException))
             {
                 throw new UnreadableStepInputException(input.FromStep, ex);
             }
