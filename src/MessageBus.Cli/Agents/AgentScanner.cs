@@ -125,9 +125,7 @@ internal static partial class AgentScanner
         {
             CapabilityNames.Format(CapabilityNames.OsPrefix, os == MachineOs.MacOs ? "macos" : os.ToString()),
         };
-        capabilities.AddRange(agents
-            .Where(a => a is { Found: true, SignedIn: true, NotReady: null })
-            .Select(a => CapabilityNames.Format(CapabilityNames.AgentPrefix, KindName(a.Kind))));
+        capabilities.AddRange(AgentCapabilities(agents, requireSignIn: true));
         capabilities.AddRange(MachineTools.Capabilities(scan.Tools));
 
         return new MachineInventory
@@ -147,6 +145,10 @@ internal static partial class AgentScanner
             ScannedAt = host.Time.GetUtcNow(),
         };
     }
+
+    internal static IEnumerable<string> AgentCapabilities(IEnumerable<DetectedAgent> agents, bool requireSignIn) =>
+        agents.Where(a => a is { Found: true, NotReady: null } && (!requireSignIn || a.SignedIn))
+            .Select(a => CapabilityNames.Format(CapabilityNames.AgentPrefix, KindName(a.Kind)));
 
     /// <summary>The contract name of an agent kind (<c>claude-code</c>).</summary>
     public static string KindName(AgentKind kind) => kind switch
@@ -226,9 +228,6 @@ internal static partial class AgentScanner
                 host.CreateLocalModelHttpHandler, host.Time).ConfigureAwait(false);
         }
         var configured = spec.McpConfigured(locations, host.GetEnvironmentVariable);
-        var providerProblem = spec.Kind == AgentKind.Antigravity && configured
-            ? await AntigravityReadiness.CheckAsync(host.CreateAntigravityHttpHandler, host.Time, cancellationToken).ConfigureAwait(false)
-            : null;
         var agent = new DetectedAgent
         {
             Kind = spec.Kind,
@@ -238,12 +237,14 @@ internal static partial class AgentScanner
             ExecutablePath = located.Path,
             McpConfigured = configured,
             SignedIn = check?.SignedIn ?? spec.SignedIn(locations, env.Get),
-            NotReady = check?.NotReady ?? providerProblem,
+            NotReady = check?.NotReady,
             Vendor = spec.Vendor,
             DefaultModel = models.Default,
             Models = models.Models,
             ModelsPartial = models.Partial,
         };
+        if (agent.Kind == AgentKind.Antigravity && configured)
+            agent = await AntigravityReadiness.CheckAsync(agent, host.CreateAntigravityHttpHandler, host.Time, cancellationToken).ConfigureAwait(false);
         return new(agent, check?.Warning);
     }
 

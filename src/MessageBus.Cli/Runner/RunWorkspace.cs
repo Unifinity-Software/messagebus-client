@@ -72,25 +72,32 @@ public sealed partial class RunWorkspace : IDisposable
 
     internal PreparedStepInputs? PreparedInputs { get; set; }
 
-    internal async Task<string?> ImportStepBranchAsync(string git, TaskDelivery delivery, string file, string branch,
+    private const string WorkingCopyDescription = "this machine's working copy";
+
+    internal async Task<string?> ImportStepBranchAsync(string git, TaskDelivery delivery, string file, BundleHeader header, string branch,
         Func<ProcessLaunch, ProcessLaunch> wrap, CancellationToken ct)
     {
         Directory.CreateDirectory(WorkTree);
         var repoRef = delivery.Envelope.Refs.FirstOrDefault(r => RepositoryUrl(r) is not null);
-        if (repoRef is not null && await GitAsync(git, ["-C", WorkTree, "rev-parse", "--verify", "HEAD"], wrap, ct).ConfigureAwait(false) is not null)
+        var repository = WorkingCopyDescription;
+        var initialized = Path.Exists(Path.Combine(WorkTree, ".git"));
+        // Only replace an empty checkout. Existing branches may belong to earlier steps.
+        if (repoRef is not null && header.Prerequisites.Count > 0
+            && (!initialized || await GitAsync(git, ["-C", WorkTree, "rev-parse", "--verify", "HEAD"], wrap, ct).ConfigureAwait(false) is not null
+                && (await GitBundles.MissingPrerequisitesAsync(header, BundleGit(git, file, wrap), ct).ConfigureAwait(false)).Count > 0))
         {
-            if (await CheckOutRepositoryAsync(git, repoRef, wrap, ct).ConfigureAwait(false) is { } cloneError)
-                return cloneError;
+            initialized = await CheckOutRepositoryAsync(git, repoRef, wrap, ct).ConfigureAwait(false) is null;
+            if (initialized)
+                repository = $"repository '{RepositoryUrl(repoRef)}'";
+            else
+                TryDelete(WorkTree);
         }
-        else if (!Directory.Exists(Path.Combine(WorkTree, ".git"))
-            && await GitAsync(git, ["init", "--quiet", WorkTree], wrap, ct).ConfigureAwait(false) is { } initError)
-        {
+        if (!initialized && await GitAsync(git, ["init", "--quiet", WorkTree], wrap, ct).ConfigureAwait(false) is { } initError)
             return initError;
-        }
 
         var reference = "refs/remotes/mbus-input/" + Guid.NewGuid().ToString("N");
         return await GitAsync(git, ["-C", WorkTree, "check-ref-format", "refs/heads/" + branch], wrap, ct).ConfigureAwait(false)
-            ?? await ApplyBundleAsync(git, file, repoRef is null ? WorkTree : RepositoryUrl(repoRef)!, branch, reference, wrap, ct).ConfigureAwait(false)
+            ?? await ApplyBundleAsync(git, file, repository, branch, reference, wrap, ct).ConfigureAwait(false)
             ?? await GitAsync(git, ["-C", WorkTree, "checkout", "--quiet", "-B", branch, reference], wrap, ct).ConfigureAwait(false);
     }
 
@@ -99,19 +106,28 @@ public sealed partial class RunWorkspace : IDisposable
     {
         try
         {
-            await GitBundles.ApplyAsync(file, repository, [$"+refs/heads/{branch}:{destination}"], async (args, token) =>
-            {
-                var (output, error) = await RunGitAsync(git, ["-C", WorkTree, .. args], wrap, token).ConfigureAwait(false);
-                if (error is not null) throw new GitException(error, rawOutput: true);
-                return output;
-            }, ct).ConfigureAwait(false);
+            await GitBundles.ApplyAsync(file, repository, [$"+refs/heads/{branch}:{destination}"],
+                BundleGit(git, file, wrap), writeFetchHead: true, ct).ConfigureAwait(false);
             return null;
         }
         catch (GitException ex)
         {
             return ex.Message;
         }
+        catch (IOException)
+        {
+            return "Couldn't read the task's bundle.";
+        }
     }
+
+    private Func<IReadOnlyList<string>, CancellationToken, Task<string>> BundleGit(string git, string file,
+        Func<ProcessLaunch, ProcessLaunch> wrap) => async (args, ct) =>
+    {
+        var (output, error) = await RunGitAsync(git, ["-C", WorkTree, .. args], wrap, ct).ConfigureAwait(false);
+        if (error is not null)
+            throw new GitException(RunnerGit.DescribePath(error, Path.GetFullPath(file), "the task's bundle"), rawOutput: true);
+        return output;
+    };
 
     // Chosen from the trusted adapter, before checkout, never from task content.
     internal Contracts.Machines.AgentKind? AgentKind { get; set; }
@@ -287,9 +303,9 @@ public sealed partial class RunWorkspace : IDisposable
         {
             header = Attachments.Client.GitBundles.ReadHeader(file);
         }
-        catch (Exception ex) when (ex is Attachments.Client.GitException or IOException)
+        catch (Exception ex) when (ex is GitException or IOException)
         {
-            return "The code sent with the task isn't a git bundle: " + ex.Message;
+            return ex is GitException ? "The code sent with the task isn't a git bundle: " + ex.Message : "Couldn't read the code sent with the task.";
         }
         var branch = bundle.Branch is { Length: > 0 } named ? named
             : header.Refs.Keys.FirstOrDefault(r => r.StartsWith("refs/heads/", StringComparison.Ordinal))?["refs/heads/".Length..];
@@ -309,7 +325,7 @@ public sealed partial class RunWorkspace : IDisposable
                 var reference = $"refs/remotes/origin/{branch}";
                 return await GitAsync(git, ["init", "--quiet", WorkTree], wrap, cancellationToken).ConfigureAwait(false)
                     ?? await GitAsync(git, ["-C", WorkTree, "remote", "add", "origin", Path.GetFullPath(file)], wrap, cancellationToken).ConfigureAwait(false)
-                    ?? await ApplyBundleAsync(git, file, WorkTree, branch, reference, wrap, cancellationToken).ConfigureAwait(false)
+                    ?? await ApplyBundleAsync(git, file, WorkingCopyDescription, branch, reference, wrap, cancellationToken).ConfigureAwait(false)
                     ?? await GitAsync(git, ["-C", WorkTree, "checkout", "--quiet", "-b", branch, "--track", "origin/" + branch], wrap, cancellationToken).ConfigureAwait(false);
             }
         }
@@ -321,7 +337,7 @@ public sealed partial class RunWorkspace : IDisposable
                 var repository = RepositoryUrl(repoRef)!;
                 const string reference = "refs/remotes/mbus/task";
                 repositoryError = await CheckOutRepositoryAsync(git, repoRef, wrap, cancellationToken).ConfigureAwait(false)
-                    ?? await ApplyBundleAsync(git, file, repository, branch, reference, wrap, cancellationToken).ConfigureAwait(false)
+                    ?? await ApplyBundleAsync(git, file, $"repository '{repository}'", branch, reference, wrap, cancellationToken).ConfigureAwait(false)
                     ?? await GitAsync(git, ["-C", WorkTree, "checkout", "--quiet", "-B", branch, reference], wrap, cancellationToken).ConfigureAwait(false);
                 if (repositoryError is null)
                     return null;
@@ -334,7 +350,7 @@ public sealed partial class RunWorkspace : IDisposable
             if (history is null)
             {
                 return ask is null
-                    ? repositoryError ?? $"The code sent with the task starts after commits missing from repository '{WorkTree}': {string.Join(", ", header.Prerequisites)}."
+                    ? repositoryError ?? $"The code sent with the task starts after commits missing from {WorkingCopyDescription}: {string.Join(", ", header.Prerequisites)}."
                     : (repositoryError is null ? "" : repositoryError + " ") + $"This machine has no copy of the repository's earlier history, and the sender's mbus didn't send it within {minutes} minutes "
                       + "(the session that sent the task may have closed). Send the task again from an open session.";
             }
@@ -343,9 +359,9 @@ public sealed partial class RunWorkspace : IDisposable
             {
                 whole = Attachments.Client.GitBundles.ReadHeader(history);
             }
-            catch (Exception ex) when (ex is Attachments.Client.GitException or IOException)
+            catch (Exception ex) when (ex is GitException or IOException)
             {
-                return "The earlier history the sender sent isn't a git bundle: " + ex.Message;
+                return ex is GitException ? "The earlier history the sender sent isn't a git bundle: " + ex.Message : "Couldn't read the earlier history the sender sent.";
             }
             var (taken, error) = await mirrors.TakeInHistoryAsync(git, workspace, history, whole, cancellationToken).ConfigureAwait(false);
             if (taken is null)
@@ -652,8 +668,10 @@ public sealed partial class RunWorkspace : IDisposable
         if (exit == 0) RemoveOwnedIndexLock(existed, DateTime.UtcNow);
         lock (output)
         {
-            return exit == 0 ? (string.Join('\n', output), null)
-                : ("", $"git {args[0]} failed (exit {exit}): {string.Join(" ", process.Tail()).Trim()}");
+            if (exit == 0) return (string.Join('\n', output), null);
+            var tail = RunnerGit.DescribePath(string.Join(" ", process.Tail()).Trim(), WorkTree, WorkingCopyDescription);
+            tail = RunnerGit.DescribePath(tail, Root, "this machine's run folder");
+            return ("", $"git {args[0]} failed (exit {exit}): {tail}");
         }
     }
 }

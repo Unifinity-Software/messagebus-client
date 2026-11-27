@@ -76,13 +76,13 @@ public sealed class RunNetworkTests
     }
 
     [Fact]
-    public void GitHub_repository_allows_only_its_attachment_buckets()
+    public void GitHub_repository_allows_only_its_attachment_bucket()
     {
         var hosts = new HostAllowList(RunNetwork.RepositoryHosts(new Uri("https://github.com/example/repo")));
         var roundTripped = new HostAllowList(hosts.Entries);
         const string bucket = "github-production-user-asset-6210df.s3.amazonaws.com";
         Assert.True(roundTripped.Allows(bucket));
-        Assert.False(roundTripped.Allows("github-production-user-asset-wrong.s3.amazonaws.com"));
+        Assert.False(roundTripped.Allows("github-production-user-asset-deadbe.s3.amazonaws.com"));
         Assert.False(roundTripped.Allows("evil.s3.amazonaws.com"));
         Assert.False(roundTripped.Allows("http-intake.logs.us5.datadoghq.com"));
         Assert.False(new HostAllowList(RunNetwork.RepositoryHosts(new Uri("https://git.example.org/repo"))).Allows(bucket));

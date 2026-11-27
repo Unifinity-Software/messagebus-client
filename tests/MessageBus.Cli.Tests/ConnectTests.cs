@@ -211,10 +211,17 @@ public sealed class ConnectTests
     {
         using var machine = new TestMachine
         {
-            AntigravityHandler = static () => new FakeServer().On(HttpMethod.Head, "/", request =>
-                request.Uri.Host == "aicode.googleapis.com"
-                    ? throw new HttpRequestException("Provider unavailable")
-                    : new(System.Net.HttpStatusCode.NotFound)),
+            AntigravityHandler = static () =>
+            {
+                var playAttempts = 0;
+                return new FakeServer().On(HttpMethod.Head, "/", request => request.Uri.Host switch
+                {
+                    "aicode.googleapis.com" => throw new HttpRequestException("Provider unavailable"),
+                    "play.googleapis.com" when Interlocked.Increment(ref playAttempts) == 1 =>
+                        throw new HttpRequestException("Transient connection failure"),
+                    _ => new(System.Net.HttpStatusCode.ServiceUnavailable),
+                });
+            },
         };
         machine.InstallFake("git", new("git version 2.50.1"));
         machine.InstallAgent("agy", "1.5.14");
@@ -226,7 +233,7 @@ public sealed class ConnectTests
         var inventory = MessageBusJson.Deserialize<MachineInventory>(run.Output)!;
         var agent = Assert.Single(inventory.Agents, agent => agent.Kind == AgentKind.Antigravity);
         Assert.True(agent.SignedIn);
-        Assert.Contains("cannot reach aicode.googleapis.com", agent.NotReady);
+        Assert.Contains("cannot reach aicode.googleapis.com.", agent.NotReady);
         Assert.DoesNotContain("agent:antigravity", inventory.Capabilities);
     }
 

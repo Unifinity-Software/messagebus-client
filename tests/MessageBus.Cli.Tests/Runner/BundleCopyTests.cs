@@ -231,6 +231,31 @@ public sealed class BundleCopyTests(BundleCopyTests.Code code) : IClassFixture<B
     }
 
     [Fact]
+    public async Task A_runner_without_a_copy_clones_the_task_repository_before_applying_its_bundle()
+    {
+        code.RequireLocalFetch();
+        var ct = TestContext.Current.CancellationToken;
+        var remote = Path.Combine(code.Root, "task-repository.git");
+        await Git.RunAsync(code.Root, ["clone", "--bare", "--branch", "main", code.Whole, remote], ct);
+        Assert.NotEqual(code.C, await Git.CommitIdAsync(remote, "refs/heads/main", ct));
+
+        var source = new Bundles { File = code.Next };
+        using var run = RunWorkspace.Create(Path.Combine(code.Root, "cold-checkout"), "dlv_clone", 1);
+        var delivery = Delivery("dlv_clone", "main");
+        delivery = delivery with
+        {
+            Envelope = delivery.Envelope with { Refs = [new Ref { Kind = "git.repo", Url = remote }] },
+        };
+
+        var error = await run.CheckOutAsync(delivery, _ => code.Git, source, ct, ask: source.AskAsync);
+        Assert.True(error is null, error);
+        Assert.Equal(0, source.Asked);
+        Assert.Equal(code.C, await Git.CommitIdAsync(run.WorkTree, "HEAD", ct));
+        Assert.Equal("main", (await Git.RunAsync(run.WorkTree, ["branch", "--show-current"], ct)).Trim());
+        Assert.Equal("three", await File.ReadAllTextAsync(Path.Combine(run.WorkTree, "README.md"), ct));
+    }
+
+    [Fact]
     public async Task A_runner_without_a_copy_asks_the_sender_in_its_progress_and_fails_plainly_when_the_history_never_comes()
     {
         code.RequireLocalFetch();

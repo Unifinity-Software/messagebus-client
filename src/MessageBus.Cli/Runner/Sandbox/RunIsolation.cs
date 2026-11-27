@@ -458,7 +458,8 @@ public sealed class RunIsolation : IRunSandbox
         if (_aci is not null || _options.LimitNetwork && profile.Network != NetworkAccess.Open)
         {
             // the original issue: its own proxy, with the hosts every run may reach plus its repository and its role's hosts.
-            IEnumerable<string> hosts = [.. _options.NetworkHosts, .. repository is null ? [] : RunNetwork.RepositoryHosts(repository), .. profile.AllowedHosts];
+            IEnumerable<string> hosts = [.. _options.NetworkHosts, .. repository is null ? [] : RunNetwork.RepositoryHosts(repository), .. profile.AllowedHosts,
+                .. workspace.AgentKind == AgentKind.Antigravity ? RunNetwork.AntigravityProviderHosts : []];
             var allow = new HostAllowList(hosts);
             if (_aci is not null)
             {

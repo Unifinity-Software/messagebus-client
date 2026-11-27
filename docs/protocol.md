@@ -12,6 +12,8 @@ capability `agent:antigravity` and vendor `google`. Reporting `antigravity` in `
 the client sends the `antigravity` agent entry and `agent:antigravity` capability only when the service advertises
 `agentKindAntigravityV1` in `GET /api/server` `capabilities`. Services that do not advertise `agentKindAntigravityV1`
 receive `MachineInventory` without `antigravity` on the first request.
+The client probes the Antigravity provider hosts during readiness checks. Any HTTP response confirms reachability.
+A host that fails to connect on both attempts populates `notReady` and suppresses `agent:antigravity`.
 
 For Codex, `signedIn` describes local credential configuration. The existing `agent:codex` capability permits
 dispatch before a model request has verified access. A provider refusal before model use can clear that capability

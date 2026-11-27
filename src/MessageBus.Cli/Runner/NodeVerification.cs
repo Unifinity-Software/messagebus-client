@@ -157,14 +157,14 @@ internal sealed class NodeVerification(string remote, IVerificationProcess proce
         if (!bundle.Exists || bundle.LinkTarget is not null) return null;
         try
         {
-            await GitBundles.ApplyAsync(bundle.FullName, fresh.WorkTree, [BranchRef + ":refs/mbus/result"], async (args, token) =>
+            await GitBundles.ApplyAsync(bundle.FullName, "the verification working copy", [BranchRef + ":refs/mbus/result"], async (args, token) =>
             {
                 var importing = args.Contains(bundle.FullName, StringComparer.Ordinal);
                 var command = args.Select(arg => arg == bundle.FullName ? "/input" : arg).ToArray();
                 var run = await GitAsync(fresh.WorkTree, command, token, input: importing ? bundle.FullName : null).ConfigureAwait(false);
                 if (run.ExitCode != 0) throw new GitException("Git could not import the verification bundle.", rawOutput: true);
                 return run.Output;
-            }, ct).ConfigureAwait(false);
+            }, writeFetchHead: true, ct).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is GitException or IOException)
         {

@@ -58,7 +58,7 @@ public sealed class StepInputsTests
         var settle = await runner.Service.SettledAsync(delivery.DeliveryId);
         await runner.Engine.StopAsync();
 
-        Assert.Equal(SettleStatus.Succeeded, settle.Result.Status);
+        Assert.True(settle.Result.Status == SettleStatus.Succeeded, settle.Result.Error);
         Assert.True(sandbox.ProcessStarted);
         Assert.Equal("feature/example", sandbox.InputBranches!["code"]);
         var work = runner.WorkTreeOf(delivery.DeliveryId);

@@ -52,6 +52,13 @@ public static class GitBundles
         {
             var remotes = (await Git.RunAsync(repository, ["remote"], ct))
                 .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            var upstream = (await Git.RunAsync(repository,
+                ["for-each-ref", "--format=%(upstream:remotename)", source], ct)).Trim();
+            if (remotes.Contains(upstream, StringComparer.Ordinal))
+                remotes = [upstream];
+            else if (remotes.Contains("origin", StringComparer.Ordinal))
+                remotes = ["origin"];
+
             // refs/remotes/mbus can hold received bundles without representing a configured remote.
             if (remotes.Length > 0 && string.IsNullOrWhiteSpace(await Git.RunAsync(repository,
                 ["for-each-ref", "--contains", @base, .. remotes.Select(remote => $"refs/remotes/{remote}/")], ct)))
@@ -142,8 +149,8 @@ public static class GitBundles
         var bundle = Path.GetFullPath(bundlePath);
 
         var target = into is null ? $"refs/remotes/mbus/{branch}" : into.StartsWith("refs/", StringComparison.Ordinal) ? into : $"refs/heads/{into}";
-        await ApplyAsync(bundle, repository, [$"+refs/heads/{branch}:{target}"],
-            (args, token) => Git.RunAsync(repository, args, token), ct);
+        await ApplyAsync(bundle, $"repository '{repository}'", [$"+refs/heads/{branch}:{target}"],
+            (args, token) => Git.RunAsync(repository, args, token), writeFetchHead: true, ct);
         return await Git.CommitIdAsync(repository, target, ct);
     }
 
@@ -152,40 +159,56 @@ public static class GitBundles
     /// <param name="repository">Repository description for errors.</param>
     /// <param name="refSpecs">Refs to fetch from the bundle.</param>
     /// <param name="run">Runs git in the receiving repository and throws <see cref="GitException"/> on failure.</param>
-    /// <param name="ct">Cancels the operation.</param>
     /// <param name="writeFetchHead">Whether the bundle fetch writes FETCH_HEAD.</param>
-    public static async Task ApplyAsync(string bundle, string repository, IReadOnlyList<string> refSpecs,
-        Func<IReadOnlyList<string>, CancellationToken, Task<string>> run, CancellationToken ct, bool writeFetchHead = true)
+    /// <param name="ct">Cancels the operation.</param>
+    internal static async Task ApplyAsync(string bundle, string repository, IReadOnlyList<string> refSpecs,
+        Func<IReadOnlyList<string>, CancellationToken, Task<string>> run, bool writeFetchHead, CancellationToken ct)
     {
         bundle = Path.GetFullPath(bundle);
         var missing = await MissingPrerequisitesAsync(ReadHeader(bundle), run, ct);
-        if (missing.Count > 0)
+        var temporaryRefs = new List<string>();
+        try
         {
-            var remotes = (await run(["remote"], ct)).Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-            foreach (var remote in remotes.OrderBy(r => r == "origin" ? 0 : 1))
-            {
-                foreach (var commit in missing)
-                    await TryRunAsync(run, ["fetch", "--quiet", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head", "--", remote, commit], ct);
-
-                missing = await MissingAsync(missing, run, ct);
-                if (missing.Count > 0 && (await run(["rev-parse", "--is-shallow-repository"], ct)).Trim() == "true")
-                {
-                    await TryRunAsync(run, ["fetch", "--quiet", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head", "--unshallow", "--", remote], ct);
-                    missing = await MissingAsync(missing, run, ct);
-                }
-                if (missing.Count == 0) break;
-            }
             if (missing.Count > 0)
-                throw new GitException($"The bundle needs commits missing from repository '{repository}': {string.Join(", ", missing)}. Fetch them or ask the sender to resend with base: \"\" for the whole history.", input: "repository");
+            {
+                var prefix = $"refs/mbus/prerequisites/{Guid.NewGuid():N}/";
+                string[] fetch = ["fetch", "--quiet", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head"];
+                var remotes = (await run(["remote"], ct)).Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                foreach (var remote in remotes.OrderBy(r => r == "origin" ? 0 : 1))
+                {
+                    var refs = missing.Select(commit => (Commit: commit, Ref: prefix + commit)).ToArray();
+                    temporaryRefs.AddRange(refs.Select(entry => entry.Ref));
+                    await TryRunAsync(run, [.. fetch, "--", remote, .. refs.Select(entry => $"{entry.Commit}:{entry.Ref}")], ct);
+                    missing = await MissingAsync(missing, run, ct);
+                    if (missing.Count > 0)
+                    {
+                        await TryRunAsync(run, [.. fetch, "--", remote], ct);
+                        missing = await MissingAsync(missing, run, ct);
+                    }
+                    if (missing.Count > 0 && (await run(["rev-parse", "--is-shallow-repository"], ct)).Trim() == "true")
+                    {
+                        await TryRunAsync(run, [.. fetch, "--unshallow", "--", remote], ct);
+                        missing = await MissingAsync(missing, run, ct);
+                    }
+                    if (missing.Count == 0) break;
+                }
+                if (missing.Count > 0)
+                    throw new GitException($"The bundle needs commits missing from {repository}: {string.Join(", ", missing)}. Fetch them or ask the sender to resend with base: \"\" for the whole history.", input: "repository");
+            }
+            var args = new List<string> { "fetch", "--quiet", "--no-tags", "--no-recurse-submodules" };
+            if (!writeFetchHead) args.Add("--no-write-fetch-head");
+            args.AddRange(["--", bundle, .. refSpecs]);
+            await run(args, ct);
         }
-        var args = new List<string> { "fetch", "--quiet", "--no-tags", "--no-recurse-submodules" };
-        if (!writeFetchHead) args.Add("--no-write-fetch-head");
-        args.AddRange(["--", bundle, .. refSpecs]);
-        await run(args, ct);
+        finally
+        {
+            foreach (var reference in temporaryRefs.Distinct(StringComparer.Ordinal))
+                await TryRunAsync(run, ["update-ref", "-d", reference], CancellationToken.None);
+        }
     }
 
     /// <summary>Returns the bundle's prerequisite commits absent from the receiving repository.</summary>
-    public static Task<List<string>> MissingPrerequisitesAsync(BundleHeader header,
+    internal static Task<List<string>> MissingPrerequisitesAsync(BundleHeader header,
         Func<IReadOnlyList<string>, CancellationToken, Task<string>> run, CancellationToken ct) =>
         MissingAsync(header.Prerequisites, run, ct);
 

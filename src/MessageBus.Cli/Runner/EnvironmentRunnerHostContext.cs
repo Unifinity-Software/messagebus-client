@@ -151,7 +151,7 @@ public static class RunnerEnvironment
             return new DetectedAgent { Kind = kind, Found = path is not null, ExecutablePath = path, OnPath = path is not null };
         }).ToList();
         var capabilities = new List<string> { CapabilityNames.Format(CapabilityNames.OsPrefix, os == MachineOs.MacOs ? "macos" : os.ToString()) };
-        capabilities.AddRange(agents.Where(a => a.Found).Select(a => CapabilityNames.Format(CapabilityNames.AgentPrefix, AgentKinds.Name(a.Kind))));
+        capabilities.AddRange(AgentScanner.AgentCapabilities(agents, requireSignIn: false));
         return new MachineInventory
         {
             MachineId = host.MachineId ?? "",
@@ -286,17 +286,16 @@ public sealed class EnvironmentRunnerHostContext : IRunnerHostContext
     public async Task<MachineInventory> BuildInventoryAsync(int slots, CancellationToken cancellationToken)
     {
         var inventory = RunnerEnvironment.BasicInventory(this, slots, _time.GetUtcNow());
-        if (!inventory.Agents.Any(a => a is { Kind: AgentKind.Antigravity, Found: true }))
-            return inventory;
+        var agent = inventory.Agents.FirstOrDefault(a => a is { Kind: AgentKind.Antigravity, Found: true });
+        if (agent is null) return inventory;
 
-        var problem = await AntigravityReadiness.CheckAsync(CreateAntigravityHttpHandler, _time, cancellationToken).ConfigureAwait(false);
-        if (problem is null) return inventory;
-
-        var capability = CapabilityNames.Format(CapabilityNames.AgentPrefix, AgentKinds.Name(AgentKind.Antigravity));
+        var checkedAgent = await AntigravityReadiness.CheckAsync(agent, CreateAntigravityHttpHandler, _time, cancellationToken).ConfigureAwait(false);
+        var agents = inventory.Agents.Select(a => a.Kind == agent.Kind ? checkedAgent : a).ToArray();
+        var otherCapabilities = inventory.Capabilities.Except(AgentScanner.AgentCapabilities(inventory.Agents, requireSignIn: false));
         return inventory with
         {
-            Agents = [.. inventory.Agents.Select(a => a.Kind == AgentKind.Antigravity ? a with { NotReady = problem } : a)],
-            Capabilities = [.. inventory.Capabilities.Where(c => c != capability)],
+            Agents = agents,
+            Capabilities = [.. otherCapabilities, .. AgentScanner.AgentCapabilities(agents, requireSignIn: false)],
         };
     }
 
