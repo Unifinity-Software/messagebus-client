@@ -4,7 +4,7 @@ namespace MessageBus.Attachments.Client;
 /// <param name="Path">The bundle file.</param>
 /// <param name="Branch">The branch it carries (<c>refs/heads/{Branch}</c> inside the bundle).</param>
 /// <param name="HeadCommit">The branch's commit when bundled.</param>
-/// <param name="BaseCommit">The resolved exclusion revision; null when no base was requested.</param>
+/// <param name="BaseCommit">The resolved exclusion revision; null for a full bundle.</param>
 public sealed record GitBundle(string Path, string Branch, string HeadCommit, string? BaseCommit)
 {
     /// <summary>The prerequisite commit IDs advertised by a Git bundle.</summary>
@@ -31,7 +31,7 @@ public static class GitBundles
     /// <summary>
     /// Writes <paramref name="branch"/> (default: the checked-out branch) of <paramref name="repository"/>
     /// to a bundle at <paramref name="outputPath"/>: the commits after <paramref name="baseCommit"/>, or the
-    /// whole history when it is null or empty.
+    /// whole history when it is null, empty, or local-only in a repository with a remote.
     /// </summary>
     /// <param name="repository">The repository (or a worktree of it).</param>
     /// <param name="outputPath">Where to write the bundle.</param>
@@ -46,6 +46,10 @@ public static class GitBundles
         var head = await Git.CommitIdAsync(repository, source, ct);
         var @base = string.IsNullOrEmpty(baseCommit) ? null : await Git.CommitIdAsync(repository, baseCommit, ct);
         if (@base == head) throw new GitException($"Nothing to send: {branch} has no commits after {baseCommit}.");
+
+        if (@base is not null && !string.IsNullOrWhiteSpace(await Git.RunAsync(repository, ["remote"], ct))
+            && string.IsNullOrWhiteSpace(await Git.RunAsync(repository, ["for-each-ref", "--contains", @base, "refs/remotes"], ct)))
+            @base = null;
 
         List<string> args = ["bundle", "create", "--quiet", Path.GetFullPath(outputPath), source];
         if (@base is not null) args.Add($"^{@base}");
@@ -99,11 +103,70 @@ public static class GitBundles
         Directory.CreateDirectory(repository);
         if (!IsRepository(repository)) await Git.RunAsync(repository, ["init", "--quiet"], ct);
         var bundle = Path.GetFullPath(bundlePath);
-        await Git.RunAsync(repository, ["bundle", "verify", bundle], ct);
 
         var target = into is null ? $"refs/remotes/mbus/{branch}" : into.StartsWith("refs/", StringComparison.Ordinal) ? into : $"refs/heads/{into}";
-        await Git.RunAsync(repository, ["fetch", "--quiet", "--no-tags", bundle, $"+refs/heads/{branch}:{target}"], ct);
+        await ApplyAsync(bundle, repository, [$"+refs/heads/{branch}:{target}"],
+            (args, token) => Git.RunAsync(repository, args, token), ct);
         return await Git.CommitIdAsync(repository, target, ct);
+    }
+
+    /// <summary>Applies a bundle in an initialized repository, recovering missing prerequisites from its remotes.</summary>
+    /// <param name="bundle">The bundle file.</param>
+    /// <param name="repository">Repository description for errors.</param>
+    /// <param name="refSpecs">Refs to fetch from the bundle.</param>
+    /// <param name="run">Runs git in the receiving repository and throws <see cref="GitException"/> on failure.</param>
+    /// <param name="ct">Cancels the operation.</param>
+    /// <param name="writeFetchHead">Whether the bundle fetch writes FETCH_HEAD.</param>
+    public static async Task ApplyAsync(string bundle, string repository, IReadOnlyList<string> refSpecs,
+        Func<IReadOnlyList<string>, CancellationToken, Task<string>> run, CancellationToken ct, bool writeFetchHead = true)
+    {
+        bundle = Path.GetFullPath(bundle);
+        var missing = await MissingPrerequisitesAsync(ReadHeader(bundle), run, ct);
+        if (missing.Count > 0)
+        {
+            var remotes = (await run(["remote"], ct)).Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            foreach (var remote in remotes.OrderBy(r => r == "origin" ? 0 : 1))
+            {
+                foreach (var commit in missing)
+                    await TryRunAsync(run, ["fetch", "--quiet", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head", "--", remote, commit], ct);
+
+                missing = await MissingAsync(missing, run, ct);
+                if (missing.Count > 0 && (await run(["rev-parse", "--is-shallow-repository"], ct)).Trim() == "true")
+                {
+                    await TryRunAsync(run, ["fetch", "--quiet", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head", "--unshallow", "--", remote], ct);
+                    missing = await MissingAsync(missing, run, ct);
+                }
+                if (missing.Count == 0) break;
+            }
+            if (missing.Count > 0)
+                throw new GitException($"The bundle needs commits missing from repository '{repository}': {string.Join(", ", missing)}. Fetch them or ask the sender to resend with base: \"\" for the whole history.", input: "repository");
+        }
+        var args = new List<string> { "fetch", "--quiet", "--no-tags", "--no-recurse-submodules" };
+        if (!writeFetchHead) args.Add("--no-write-fetch-head");
+        args.AddRange(["--", bundle, .. refSpecs]);
+        await run(args, ct);
+    }
+
+    /// <summary>Returns the bundle's prerequisite commits absent from the receiving repository.</summary>
+    public static Task<List<string>> MissingPrerequisitesAsync(BundleHeader header,
+        Func<IReadOnlyList<string>, CancellationToken, Task<string>> run, CancellationToken ct) =>
+        MissingAsync(header.Prerequisites, run, ct);
+
+    private static async Task<List<string>> MissingAsync(IReadOnlyList<string> commits,
+        Func<IReadOnlyList<string>, CancellationToken, Task<string>> run, CancellationToken ct)
+    {
+        var missing = new List<string>();
+        foreach (var commit in commits)
+            if (!await TryRunAsync(run, ["cat-file", "-e", commit + "^{commit}"], ct))
+                missing.Add(commit);
+        return missing;
+    }
+
+    private static async Task<bool> TryRunAsync(Func<IReadOnlyList<string>, CancellationToken, Task<string>> run,
+        IReadOnlyList<string> args, CancellationToken ct)
+    {
+        try { await run(args, ct); return true; }
+        catch (GitException e) when (e.RawOutput) { return false; }
     }
 
     /// <summary>
@@ -349,7 +412,8 @@ public static class GitBundles
         }
     }
 
-    /// <summary>A repository or worktree rooted here (<c>.git</c> is a folder, or a file in a worktree), not a parent folder's.</summary>
+    /// <summary>A repository or worktree rooted here, including a bare repository.</summary>
     private static bool IsRepository(string directory) =>
-        Directory.Exists(Path.Combine(directory, ".git")) || File.Exists(Path.Combine(directory, ".git"));
+        Directory.Exists(Path.Combine(directory, ".git")) || File.Exists(Path.Combine(directory, ".git"))
+        || (File.Exists(Path.Combine(directory, "HEAD")) && Directory.Exists(Path.Combine(directory, "objects")));
 }

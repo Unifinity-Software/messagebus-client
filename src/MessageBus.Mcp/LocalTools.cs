@@ -1524,18 +1524,7 @@ internal sealed partial class LocalTools : IAsyncDisposable
         {
             var repository = LocalPath(input.Repository, "repository");
             var into = input.Into ?? $"refs/remotes/mbus/{attachment.Branch}";
-            string commit;
-            try
-            {
-                commit = await _keys.WithRingAsync(ring => _attachments.ReceiveBundleAsync(attachment, link, ring, repository, into, ct), ct);
-            }
-            catch (GitException e) when (e.StandardError is { } stderr
-                && Regex.IsMatch(stderr, @"(?m)^error: Repository lacks these prerequisite commits:\r?$"))
-            {
-                var commits = Regex.Matches(e.StandardError, @"(?m)^error: ([0-9a-f]{40}|[0-9a-f]{64})(?=\s|$)")
-                    .Select(m => m.Groups[1].Value).Distinct();
-                throw McpToolException.Invalid("repository", $"The bundle needs commits this repository doesn't have: {string.Join(", ", commits)}. Fetch into a repository that has them, or ask the sender to resend with base: \"\" for the whole history.");
-            }
+            var commit = await _keys.WithRingAsync(ring => _attachments.ReceiveBundleAsync(attachment, link, ring, repository, into, ct), ct);
             _fetchedCode.Record(_ws, "attachment", attachment.Id, commit);
             return new FetchAttachmentResult { AttachmentId = attachment.Id, Format = attachment.Format, Commit = commit, Ref = into };
         }

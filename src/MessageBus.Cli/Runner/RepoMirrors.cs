@@ -1,3 +1,4 @@
+using MessageBus.Attachments.Client;
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text;
@@ -258,9 +259,10 @@ public sealed class RepoMirrors(string root, TimeProvider? time = null)
         {
             return null;
         }
+        var header = GitBundles.ReadHeader(bundle);
         foreach (var copy in Directory.EnumerateDirectories(Root, CodePrefix(workspaceId) + "*.git").OrderByDescending(LastUsed))
         {
-            if (await GitAsync(git, Root, ["-C", copy, "bundle", "verify", "--quiet", Path.GetFullPath(bundle)], cancellationToken).ConfigureAwait(false) is null)
+            if ((await GitBundles.MissingPrerequisitesAsync(header, BundleGit(git, copy), cancellationToken).ConfigureAwait(false)).Count == 0)
             {
                 return copy;
             }
@@ -285,7 +287,7 @@ public sealed class RepoMirrors(string root, TimeProvider? time = null)
         try
         {
             var error = await GitAsync(git, Root, ["init", "--bare", "--quiet", incoming], cancellationToken).ConfigureAwait(false)
-                        ?? await GitAsync(git, Root, ["-C", incoming, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head", Path.GetFullPath(bundle), .. RefSpecs(header)], cancellationToken).ConfigureAwait(false);
+                        ?? await ApplyBundleAsync(git, incoming, bundle, header, cancellationToken).ConfigureAwait(false);
             if (error is not null)
             {
                 return (null, error);
@@ -350,7 +352,7 @@ public sealed class RepoMirrors(string root, TimeProvider? time = null)
             }
             var file = Path.GetFullPath(bundle);
             // A new repository fetching one commit from the copy: its own objects, no shared files, nothing else of the copy's.
-            var error = await GitAsync(git, Root, ["-C", copy, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head", file, .. RefSpecs(header)], cancellationToken).ConfigureAwait(false)
+            var error = await ApplyBundleAsync(git, copy, file, header, cancellationToken).ConfigureAwait(false)
                         ?? await GitAsync(git, Root, ["init", "--quiet", workTree], cancellationToken).ConfigureAwait(false)
                         ?? await GitAsync(git, Root, ["-C", workTree, "remote", "add", "origin", file], cancellationToken).ConfigureAwait(false)
                         ?? await GitAsync(git, Root, ["-C", workTree, "fetch", RunnerGit.LocalUploadPack, "--quiet", "--no-tags", "--no-write-fetch-head", Path.GetFullPath(copy),
@@ -371,6 +373,23 @@ public sealed class RepoMirrors(string root, TimeProvider? time = null)
             gate.Release();
         }
     }
+
+    private static async Task<string?> ApplyBundleAsync(string git, string repository, string bundle, BundleHeader header, CancellationToken ct)
+    {
+        try
+        {
+            await GitBundles.ApplyAsync(bundle, repository, [.. RefSpecs(header)], BundleGit(git, repository), ct, writeFetchHead: false).ConfigureAwait(false);
+            return null;
+        }
+        catch (GitException ex)
+        {
+            return ex.Message;
+        }
+    }
+
+    private static Func<IReadOnlyList<string>, CancellationToken, Task<string>> BundleGit(string git, string repository) =>
+        async (args, ct) => await OutputAsync(git, ["-C", repository, .. args], ct).ConfigureAwait(false)
+            ?? throw new GitException($"git {args[0]} failed for repository '{repository}'.", rawOutput: true);
 
     /// <summary>Each branch in the bundle kept under its commit.</summary>
     private static IEnumerable<string> RefSpecs(Attachments.Client.BundleHeader header) =>

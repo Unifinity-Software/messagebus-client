@@ -1,3 +1,4 @@
+using MessageBus.Attachments.Client;
 using MessageBus.Contracts.Messaging;
 using MessageBus.Contracts.Mcp;
 using MessageBus.Contracts.Roles;
@@ -71,17 +72,45 @@ public sealed partial class RunWorkspace : IDisposable
 
     internal PreparedStepInputs? PreparedInputs { get; set; }
 
-    internal async Task<string?> ImportStepBranchAsync(string git, string file, string branch,
+    internal async Task<string?> ImportStepBranchAsync(string git, TaskDelivery delivery, string file, string branch,
         Func<ProcessLaunch, ProcessLaunch> wrap, CancellationToken ct)
     {
         Directory.CreateDirectory(WorkTree);
-        if (!Directory.Exists(Path.Combine(WorkTree, ".git"))
-            && await GitAsync(git, ["init", "--quiet", WorkTree], wrap, ct).ConfigureAwait(false) is { } initError) return initError;
+        var repoRef = delivery.Envelope.Refs.FirstOrDefault(r => RepositoryUrl(r) is not null);
+        if (repoRef is not null && await GitAsync(git, ["-C", WorkTree, "rev-parse", "--verify", "HEAD"], wrap, ct).ConfigureAwait(false) is not null)
+        {
+            if (await CheckOutRepositoryAsync(git, repoRef, wrap, ct).ConfigureAwait(false) is { } cloneError)
+                return cloneError;
+        }
+        else if (!Directory.Exists(Path.Combine(WorkTree, ".git"))
+            && await GitAsync(git, ["init", "--quiet", WorkTree], wrap, ct).ConfigureAwait(false) is { } initError)
+        {
+            return initError;
+        }
+
         var reference = "refs/remotes/mbus-input/" + Guid.NewGuid().ToString("N");
         return await GitAsync(git, ["-C", WorkTree, "check-ref-format", "refs/heads/" + branch], wrap, ct).ConfigureAwait(false)
-            ?? await GitAsync(git, ["-C", WorkTree, "bundle", "verify", file], wrap, ct).ConfigureAwait(false)
-            ?? await GitAsync(git, ["-C", WorkTree, "fetch", "--quiet", "--no-tags", file, "refs/heads/" + branch + ":" + reference], wrap, ct).ConfigureAwait(false)
+            ?? await ApplyBundleAsync(git, file, repoRef is null ? WorkTree : RepositoryUrl(repoRef)!, branch, reference, wrap, ct).ConfigureAwait(false)
             ?? await GitAsync(git, ["-C", WorkTree, "checkout", "--quiet", "-B", branch, reference], wrap, ct).ConfigureAwait(false);
+    }
+
+    private async Task<string?> ApplyBundleAsync(string git, string file, string repository, string branch, string destination,
+        Func<ProcessLaunch, ProcessLaunch> wrap, CancellationToken ct)
+    {
+        try
+        {
+            await GitBundles.ApplyAsync(file, repository, [$"+refs/heads/{branch}:{destination}"], async (args, token) =>
+            {
+                var (output, error) = await RunGitAsync(git, ["-C", WorkTree, .. args], wrap, token).ConfigureAwait(false);
+                if (error is not null) throw new GitException(error, rawOutput: true);
+                return output;
+            }, ct).ConfigureAwait(false);
+            return null;
+        }
+        catch (GitException ex)
+        {
+            return ex.Message;
+        }
     }
 
     // Chosen from the trusted adapter, before checkout, never from task content.
@@ -215,6 +244,12 @@ public sealed partial class RunWorkspace : IDisposable
         {
             return "The task names no repository to check out.";
         }
+        return await CheckOutRepositoryAsync(git, repoRef, wrap, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<string?> CheckOutRepositoryAsync(string git, Ref repoRef,
+        Func<ProcessLaunch, ProcessLaunch> wrap, CancellationToken cancellationToken)
+    {
         var url = RepositoryUrl(repoRef)!;
         var mirrors = RepoMirrors.For(Path.GetDirectoryName(Root)!);
         var error = mirrors.Has(url) ? await CopyFromMirrorAsync(git, mirrors, url, wrap, cancellationToken).ConfigureAwait(false) : "no mirror";
@@ -264,6 +299,17 @@ public sealed partial class RunWorkspace : IDisposable
         }
         var mirrors = RepoMirrors.For(Path.GetDirectoryName(Root)!);
         var workspace = delivery.Envelope.WorkspaceId;
+        string? repositoryError = null;
+        if (header.Prerequisites.Count > 0 && delivery.Envelope.Refs.FirstOrDefault(r => RepositoryUrl(r) is not null) is { } repoRef)
+        {
+            var repository = RepositoryUrl(repoRef)!;
+            const string reference = "refs/remotes/mbus/task";
+            repositoryError = await CheckOutRepositoryAsync(git, repoRef, wrap, cancellationToken).ConfigureAwait(false)
+                ?? await ApplyBundleAsync(git, file, repository, branch, reference, wrap, cancellationToken).ConfigureAwait(false);
+            if (repositoryError is null)
+                return await GitAsync(git, ["-C", WorkTree, "checkout", "--quiet", "-B", branch, reference], wrap, cancellationToken).ConfigureAwait(false);
+            TryDelete(WorkTree);
+        }
         string? copy;
         if (header.Prerequisites.Count == 0)
         {
@@ -271,7 +317,11 @@ public sealed partial class RunWorkspace : IDisposable
             copy = (await mirrors.TakeInHistoryAsync(git, workspace, file, header, cancellationToken).ConfigureAwait(false)).Copy;
             if (copy is null)
             {
-                return await GitAsync(git, ["clone", "--quiet", "--branch", branch, file, WorkTree], wrap, cancellationToken).ConfigureAwait(false);
+                var reference = $"refs/remotes/origin/{branch}";
+                return await GitAsync(git, ["init", "--quiet", WorkTree], wrap, cancellationToken).ConfigureAwait(false)
+                    ?? await GitAsync(git, ["-C", WorkTree, "remote", "add", "origin", Path.GetFullPath(file)], wrap, cancellationToken).ConfigureAwait(false)
+                    ?? await ApplyBundleAsync(git, file, WorkTree, branch, reference, wrap, cancellationToken).ConfigureAwait(false)
+                    ?? await GitAsync(git, ["-C", WorkTree, "checkout", "--quiet", "-b", branch, "--track", "origin/" + branch], wrap, cancellationToken).ConfigureAwait(false);
             }
         }
         else if ((copy = await mirrors.FindCodeAsync(git, workspace, file, cancellationToken).ConfigureAwait(false)) is null)
@@ -282,8 +332,8 @@ public sealed partial class RunWorkspace : IDisposable
             if (history is null)
             {
                 return ask is null
-                    ? "The code sent with the task starts after commits this machine doesn't have."
-                    : $"This machine has no copy of the repository's earlier history, and the sender's mbus didn't send it within {minutes} minutes "
+                    ? repositoryError ?? $"The code sent with the task starts after commits missing from repository '{WorkTree}': {string.Join(", ", header.Prerequisites)}."
+                    : (repositoryError is null ? "" : repositoryError + " ") + $"This machine has no copy of the repository's earlier history, and the sender's mbus didn't send it within {minutes} minutes "
                       + "(the session that sent the task may have closed). Send the task again from an open session.";
             }
             Attachments.Client.BundleHeader whole;
@@ -570,11 +620,16 @@ public sealed partial class RunWorkspace : IDisposable
     }
 
     private async Task<string?> GitAsync(string git, IReadOnlyList<string> args, Func<ProcessLaunch, ProcessLaunch> wrap, CancellationToken cancellationToken)
+        => (await RunGitAsync(git, args, wrap, cancellationToken, captureOutput: false).ConfigureAwait(false)).Error;
+
+    private async Task<(string Output, string? Error)> RunGitAsync(string git, IReadOnlyList<string> args,
+        Func<ProcessLaunch, ProcessLaunch> wrap, CancellationToken cancellationToken, bool captureOutput = true)
     {
         // Only a lock absent before our command can be ours. Never touch a pre-existing lock,
         // a resumed session, or a gitdir outside this new, private working copy.
         var indexLock = Path.Combine(WorkTree, ".git", "index.lock");
         var existed = File.Exists(indexLock);
+        var output = new List<string>();
         using var process = AgentProcess.Start(wrap(new ProcessLaunch
         {
             FileName = git,
@@ -583,13 +638,20 @@ public sealed partial class RunWorkspace : IDisposable
             Arguments = RunnerGit.Arguments(args),
             WorkingDirectory = Root,
             Environment = new Dictionary<string, string?> { ["GIT_TERMINAL_PROMPT"] = "0" },
-        }), tailLines: 20);
+        }), captureOutput ? line =>
+        {
+            lock (output) output.Add(line);
+        } : null, tailLines: 20);
         using var kill = cancellationToken.Register(process.Kill);
         var exit = await process.WaitForExitAsync().ConfigureAwait(false);
         // WaitForExitAsync above is deliberately uncancellable: cancellation kills the tree and
         // reaps git before handing the folder to anybody else. Cancelled runs skip cleanup.
         cancellationToken.ThrowIfCancellationRequested();
         if (exit == 0) RemoveOwnedIndexLock(existed, DateTime.UtcNow);
-        return exit == 0 ? null : $"git {args[0]} failed (exit {exit}): {string.Join(" ", process.Tail()).Trim()}";
+        lock (output)
+        {
+            return exit == 0 ? (string.Join('\n', output), null)
+                : ("", $"git {args[0]} failed (exit {exit}): {string.Join(" ", process.Tail()).Trim()}");
+        }
     }
 }

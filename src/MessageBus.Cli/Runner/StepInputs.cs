@@ -48,7 +48,7 @@ internal static class StepInputs
                     var branch = bundle.Branch ?? header.Refs.Keys.Single(r => r.StartsWith("refs/heads/", StringComparison.Ordinal))["refs/heads/".Length..];
                     if (!header.Refs.ContainsKey("refs/heads/" + branch)) throw new IOException("The bundle does not contain its named branch.");
                     var git = locate("git") ?? throw new IOException("git is not installed.");
-                    if (await workspace.ImportStepBranchAsync(git, path, branch, wrap, ct).ConfigureAwait(false) is { } error)
+                    if (await workspace.ImportStepBranchAsync(git, delivery, path, branch, wrap, ct).ConfigureAwait(false) is { } error)
                         throw new IOException(error);
                     branches[input.FromStep] = branch;
                 }

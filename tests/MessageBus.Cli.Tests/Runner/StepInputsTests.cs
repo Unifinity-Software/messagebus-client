@@ -30,15 +30,27 @@ public sealed class StepInputsTests
         Assert.SkipWhen(CommandLocator.Find("git", Environment.GetEnvironmentVariable, []) is null, "git is not installed.");
         var unavailable = await WindowsRunCapabilities.GitShellUnavailableAsync();
         Assert.SkipWhen(unavailable is not null, unavailable ?? "");
-        await Git.RunAsync(repository, ["init", "--quiet", "--initial-branch=feature/example"], Ct);
+        await Git.RunAsync(repository, ["init", "--quiet", "--initial-branch=main"], Ct);
+        string[] commit = ["-c", "user.name=Test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false", "commit", "--quiet"];
+        await Git.RunAsync(repository, [.. commit, "--allow-empty", "-m", "Base"], Ct);
+        var @base = await Git.CommitIdAsync(repository, "HEAD", Ct);
+        var remote = Path.Combine(runner.Scratch, "origin.git");
+        await Git.RunAsync(repository, ["clone", "--quiet", "--bare", repository, remote], Ct);
+        await Git.RunAsync(repository, ["switch", "--quiet", "-c", "feature/example"], Ct);
         await File.WriteAllTextAsync(Path.Combine(repository, "README.md"), "The earlier step's code", Ct);
         await Git.RunAsync(repository, ["add", "README.md"], Ct);
-        await Git.RunAsync(repository, ["-c", "user.name=Test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "Example code"], Ct);
-        var bundle = await GitBundles.CreateAsync(repository, Path.Combine(runner.Scratch, "code.bundle"), ct: Ct);
+        await Git.RunAsync(repository, [.. commit, "-m", "Example code"], Ct);
+        var bundle = await GitBundles.CreateAsync(repository, Path.Combine(runner.Scratch, "code.bundle"), baseCommit: @base, ct: Ct);
+        Assert.Contains(@base, bundle.Prerequisites);
         var code = await inputs.AttachmentAsync("att_code", "code.bundle", await File.ReadAllBytesAsync(bundle.Path, Ct), AttachmentFormat.GitBundle, bundle.Branch);
         var document = await inputs.AttachmentAsync("att_design", "design.md", "Design notes"u8.ToArray());
         var exhibits = new[] { new Ref { Kind = RefKinds.Exhibit, Exhibit = new ExhibitRef { Name = "Design", MediaType = "text/markdown", Size = 12, Caption = "Approved design" } } };
-        var delivery = runner.Task("dlv_inputs") with { StepContext = Context(new("design", "result"), new("code", "branch")) };
+        var task = runner.Task("dlv_inputs", environment: new RunEnvironment { Checkout = CheckoutMode.Bundle });
+        var delivery = task with
+        {
+            Envelope = task.Envelope with { Refs = [new Ref { Kind = "git.repository", Url = new Uri(remote).AbsoluteUri, Sha = @base }] },
+            StepContext = Context(new("design", "result"), new("code", "branch")),
+        };
         inputs.Reply(delivery, "design", "Design summary", "Design details", [document], exhibits, stored: true);
         inputs.Reply(delivery, "code", "Code summary", "Code details", [code]);
 
@@ -57,6 +69,7 @@ public sealed class StepInputsTests
         Assert.Equal("Code summary", await ReadAsync("code", "summary.txt"));
         Assert.Equal("feature/example", await ReadAsync("code", "branch.txt"));
         Assert.Equal("feature/example", (await Git.RunAsync(work, ["branch", "--show-current"], Ct)).Trim());
+        Assert.Equal(@base, await Git.CommitIdAsync(work, "HEAD^", Ct));
         using var metadata = JsonDocument.Parse(await ReadAsync("design", "exhibits.json"));
         Assert.Equal("Approved design", metadata.RootElement[0].GetProperty("caption").GetString());
         Assert.False(File.Exists(Path.Combine(work, ".mbus", "inputs", "code", "exhibits.json")));
