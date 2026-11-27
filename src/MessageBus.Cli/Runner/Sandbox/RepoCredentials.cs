@@ -16,7 +16,13 @@ public interface IRepoCredentialSource
 
     /// <summary>A credential for <see cref="RepoCredentialRequest.Repository"/>, or null when this source has none for it.</summary>
     Task<RepoCredential?> IssueAsync(RepoCredentialRequest request, CancellationToken cancellationToken);
+
+    // A source that only supplies credentials cannot confirm why one was unavailable.
+    internal async Task<RepoCredentialResult> IssueWithStatusAsync(RepoCredentialRequest request, CancellationToken cancellationToken) =>
+        new(await IssueAsync(request, cancellationToken).ConfigureAwait(false), NoConnection: false);
 }
+
+internal readonly record struct RepoCredentialResult(RepoCredential? Credential, bool NoConnection);
 
 /// <summary>What a run asks for.</summary>
 public sealed record RepoCredentialRequest
@@ -55,6 +61,9 @@ public sealed class NoRepoCredentials : IRepoCredentialSource
 
     /// <inheritdoc />
     public Task<RepoCredential?> IssueAsync(RepoCredentialRequest request, CancellationToken cancellationToken) => Task.FromResult<RepoCredential?>(null);
+
+    Task<RepoCredentialResult> IRepoCredentialSource.IssueWithStatusAsync(RepoCredentialRequest request, CancellationToken cancellationToken) =>
+        Task.FromResult(new RepoCredentialResult(null, NoConnection: true));
 }
 
 /// <summary>

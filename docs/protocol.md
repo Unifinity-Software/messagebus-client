@@ -748,6 +748,11 @@ complete. Native runtime, old-server and combined review gates remain required b
 4. Queues are the durable record; the socket is the fast path. A runner that reconnects is offered whatever is still
    waiting for it.
 
+For HTTPS workflow runs that use the machine owner's Git sign-in, the runner can call
+`repo-credential` with `canPush: false` to check whether the workspace has a repository
+connection. The runner discards any credential returned by that check. HTTP 204 signals an
+absent connection. Request failures leave connection status unknown.
+
 Runner status and machine inventory report `slotCeiling`, the maximum concurrency the runner
 accepts. Current runners report 64 and clamp startup and dashboard settings to the range 1–64.
 The service honors the ceiling reported by older runners. `slotMachineMax` continues to carry

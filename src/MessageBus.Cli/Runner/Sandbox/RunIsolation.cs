@@ -445,20 +445,26 @@ public sealed class RunIsolation : IRunSandbox
         var repository = snapshot is not null ? new Uri(snapshot.Remote)
             : RunnerGit.RepositoryUri(RunnerGit.RepositoryRef(delivery.Envelope.Refs) is { } repoRef ? RunWorkspace.RepositoryUrl(repoRef) : null);
         var ownerGit = !_options.RequireAciSandbox && snapshot is null && _options.UseOwnerGit?.Invoke(delivery) == true;
-        var credential = repository?.Scheme != Uri.UriSchemeHttps || ownerGit || snapshot is not null ? null : await _options.Credentials.IssueAsync(new RepoCredentialRequest
+        RepoCredential? credential = null;
+        if (repository?.Scheme == Uri.UriSchemeHttps && snapshot is null && (!ownerGit || delivery.StepContext is not null))
         {
-            DeliveryId = delivery.DeliveryId,
-            WorkspaceId = delivery.Envelope.WorkspaceId,
-            Repository = repository,
-            CanPush = profile.CanPush,
-        }, cancellationToken).ConfigureAwait(false);
-        if (repository?.Scheme == Uri.UriSchemeHttps && snapshot is null && credential is null)
-        {
+            // Owner-git workflow steps check the connection for code return and use the owner's sign-in for Git.
+            var issued = await _options.Credentials.IssueWithStatusAsync(new RepoCredentialRequest
+            {
+                DeliveryId = delivery.DeliveryId,
+                WorkspaceId = delivery.Envelope.WorkspaceId,
+                Repository = repository,
+                CanPush = !ownerGit && profile.CanPush,
+            }, cancellationToken).ConfigureAwait(false);
             if (!ownerGit)
-                workspace.RepositoryCredentialNote = "No repository credential was available for this run. A private repository needs a workspace repository connection or a code bundle.";
+            {
+                credential = issued.Credential;
+                if (credential is null)
+                    workspace.RepositoryCredentialNote = "No repository credential was available for this run. A private repository needs a workspace repository connection or a code bundle.";
+            }
 
             // A later workflow step may run on a machine without access to this repository.
-            if (delivery.StepContext is not null)
+            if (delivery.StepContext is not null && issued.NoConnection)
             {
                 var name = repository.Host + repository.AbsolutePath;
                 if (name.EndsWith(".git", StringComparison.OrdinalIgnoreCase)) name = name[..^4];
