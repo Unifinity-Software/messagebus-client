@@ -103,7 +103,9 @@ public sealed class StepInputsTests
         Assert.Equal("true", (await Git.RunAsync(work, ["rev-parse", "--is-shallow-repository"], Ct)).Trim());
         var shallow = await File.ReadAllTextAsync(Path.Combine(work, ".git", "shallow"), Ct);
         Assert.DoesNotContain('\r', shallow);
-        Assert.Equal(multiple ? new[] { boundary, deeperBoundary } : [boundary], shallow.Split('\n', StringSplitOptions.RemoveEmptyEntries));
+        // Git may rewrite the shallow file in its own order.
+        Assert.Equal((multiple ? new[] { boundary, deeperBoundary } : [boundary]).Order(StringComparer.Ordinal),
+            shallow.Split('\n', StringSplitOptions.RemoveEmptyEntries).Order(StringComparer.Ordinal));
         if (multiple)
         {
             Assert.Equal(secondBundle!.Branch, sandbox.InputBranches["second"]);
