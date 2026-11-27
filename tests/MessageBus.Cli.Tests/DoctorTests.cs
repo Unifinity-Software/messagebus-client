@@ -231,6 +231,33 @@ public sealed class DoctorTests
         Assert.Contains(".NET tests cannot run on Windows", doctor.Output);
     }
 
+    [Fact(SkipUnless = nameof(IsWindows), Skip = "cmd.exe's PATH limit is Windows-specific.")]
+    public async Task A_cmd_agent_that_cannot_start_because_PATH_is_too_long_for_cmd_is_found_but_not_ready()
+    {
+        using var machine = new TestMachine();
+        machine.InstallFake("git", new("git version 2.50.1"));
+        // What npm's codex.cmd says when cmd.exe has ignored a PATH that is too long and can't find node.
+        machine.InstallFake("codex", new("'node' is not recognized as an internal or external command,\noperable program or batch file.", 1, ToStderr: true));
+        var padding = Enumerable.Range(0, 200).Select(i => Path.Combine(machine.Home, "unused", $"tool-folder-{i:D3}-{new string('x', 20)}"));
+        machine.Env["PATH"] = string.Join(';', [machine.Bin, .. padding]);
+        Assert.True(machine.Env["PATH"].Length > 8191);
+        var length = machine.Env["PATH"].Length.ToString("N0", System.Globalization.CultureInfo.InvariantCulture);
+
+        var inventory = await RescanAsync(machine);
+        var codex = inventory.Agents.Single(a => a.Kind == AgentKind.Codex);
+
+        Assert.True(codex.Found);
+        Assert.Equal($"Windows can't start Codex: your PATH is longer than the command prompt can read ({length} of 8,191 characters). "
+            + "Remove folders you no longer need from your user PATH.", codex.NotReady);
+        Assert.DoesNotContain("agent:codex", inventory.Capabilities);
+
+        var doctor = await machine.RunAsync("doctor");
+        Assert.Equal(1, doctor.ExitCode);
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(doctor.Output, "longer than the command prompt can read"));
+        Assert.Contains($"{length} of 8,191 characters", doctor.Output);
+        Assert.Contains("Codex: Windows can't start it because PATH is too long (see PATH above).", doctor.Output);
+    }
+
     private static readonly FakeAnswer ClaudeVersion = new("2.1.3 (Claude Code)");
 
     [Fact]
