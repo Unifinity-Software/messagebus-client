@@ -130,13 +130,18 @@ public sealed class AttachmentClient(HttpClient api, HttpClient links, string wo
         SendGitBundleAsync(repository, target, recipient, branch, baseCommit, threadId, expectedHead: null, ct);
 
     /// <summary>Packages and uploads a bundle, checking its advertised branch against <paramref name="expectedHead"/> before upload when supplied.</summary>
+    public Task<(AttachmentRef Attachment, GitBundle Bundle)> SendGitBundleAsync(string repository, MessageTarget target, PublicKeyInfo recipient,
+        string? branch, string? baseCommit, string? threadId, string? expectedHead, CancellationToken ct) =>
+        SendGitBundleAsync(repository, target, recipient, branch, baseCommit, threadId, expectedHead, usePublishedBaseFallback: false, ct);
+
+    /// <summary>Packages and uploads a bundle, optionally allowing a published base fallback for a base inferred from send history.</summary>
     public async Task<(AttachmentRef Attachment, GitBundle Bundle)> SendGitBundleAsync(string repository, MessageTarget target, PublicKeyInfo recipient,
-        string? branch, string? baseCommit, string? threadId, string? expectedHead, CancellationToken ct)
+        string? branch, string? baseCommit, string? threadId, string? expectedHead, bool usePublishedBaseFallback, CancellationToken ct)
     {
         var dir = TempFolders.Create(tempDirectory, "mbus-bundle-");
         try
         {
-            var bundle = await GitBundles.CreateAsync(repository, Path.Combine(dir.FullName, "branch.bundle"), branch, baseCommit, ct);
+            var bundle = await GitBundles.CreateAsync(repository, Path.Combine(dir.FullName, "branch.bundle"), branch, baseCommit, usePublishedBaseFallback, ct);
             if (expectedHead is not null && !string.Equals(expectedHead, bundle.HeadCommit, StringComparison.OrdinalIgnoreCase))
                 throw new GitException($"Expected bundle head {expectedHead}, but {bundle.Branch} advertises {bundle.HeadCommit}.", input: "expectedHead");
 

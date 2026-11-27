@@ -31,16 +31,23 @@ public static class GitBundles
     /// <summary>
     /// Writes <paramref name="branch"/> (default: the checked-out branch) of <paramref name="repository"/>
     /// to a bundle at <paramref name="outputPath"/>: the commits after <paramref name="baseCommit"/>, or the
-    /// whole history when it is null or empty. With a configured remote, a local-only base is replaced
-    /// by a shared published ancestor when one exists, otherwise by the whole history.
+    /// whole history when it is null or empty.
     /// </summary>
     /// <param name="repository">The repository (or a worktree of it).</param>
     /// <param name="outputPath">Where to write the bundle.</param>
     /// <param name="branch">A local or remote-tracking branch to send; default the current one.</param>
     /// <param name="baseCommit">A commit the receiver has (any revision); null or empty for the whole history.</param>
     /// <param name="ct">Cancels.</param>
-    public static async Task<GitBundle> CreateAsync(string repository, string outputPath, string? branch = null, string? baseCommit = null,
-        CancellationToken ct = default)
+    public static Task<GitBundle> CreateAsync(string repository, string outputPath, string? branch = null, string? baseCommit = null,
+        CancellationToken ct = default) =>
+        CreateAsync(repository, outputPath, branch, baseCommit, usePublishedBaseFallback: false, ct);
+
+    /// <summary>
+    /// Creates a bundle. For a base inferred from send history, <paramref name="usePublishedBaseFallback"/>
+    /// allows replacing a local-only base with a published ancestor or whole history when a remote is configured.
+    /// </summary>
+    public static async Task<GitBundle> CreateAsync(string repository, string outputPath, string? branch, string? baseCommit,
+        bool usePublishedBaseFallback, CancellationToken ct)
     {
         var source = branch is not null && IsBranchRef(branch) ? branch : await ResolveBranchAsync(repository, branch, ct);
         branch = BundleBranch(source);
@@ -48,7 +55,7 @@ public static class GitBundles
         var @base = string.IsNullOrEmpty(baseCommit) ? null : await Git.CommitIdAsync(repository, baseCommit, ct);
         if (@base == head) throw new GitException($"Nothing to send: {branch} has no commits after {baseCommit}.");
 
-        if (@base is not null)
+        if (usePublishedBaseFallback && @base is not null)
         {
             var remotes = (await Git.RunAsync(repository, ["remote"], ct))
                 .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);

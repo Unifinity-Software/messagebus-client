@@ -275,6 +275,26 @@ public sealed class LocalBundleTests
     }
 
     [Fact]
+    public async Task Explicit_local_only_base_is_kept_when_a_remote_is_configured()
+    {
+        using var machine = new TestMachine();
+        var repo = await InitAsync(machine);
+        var published = await CommitAsync(repo, "Published base");
+        var remote = Path.Combine(machine.Home, "origin.git");
+        await Git.RunAsync(repo, ["clone", "--quiet", "--bare", repo, remote], Ct);
+        await Git.RunAsync(repo, ["remote", "add", "origin", remote], Ct);
+        await Git.RunAsync(repo, ["fetch", "--quiet", "origin"], Ct);
+        Assert.Equal(published, await Git.CommitIdAsync(repo, "refs/remotes/origin/main", Ct));
+        var localBase = await CommitAsync(repo, "Local base");
+        await CommitAsync(repo, "Worker result");
+
+        var bundle = await GitBundles.CreateAsync(repo, Path.Combine(machine.Home, "explicit.bundle"), "main", localBase, Ct);
+
+        Assert.Equal(localBase, bundle.BaseCommit);
+        Assert.Equal(localBase, Assert.Single(bundle.Prerequisites));
+    }
+
+    [Fact]
     public async Task Local_only_base_uses_the_nearest_published_ancestor_or_whole_history()
     {
         using var machine = new TestMachine();
@@ -289,7 +309,7 @@ public sealed class LocalBundleTests
         var localBase = await CommitAsync(repo, "Local base");
         var tip = await CommitAsync(repo, "Worker result");
         await Git.RunAsync(repo, ["update-ref", "refs/remotes/mbus/returned", localBase], Ct);
-        var bundle = await GitBundles.CreateAsync(repo, Path.Combine(machine.Home, "incremental.bundle"), "main", localBase, Ct);
+        var bundle = await GitBundles.CreateAsync(repo, Path.Combine(machine.Home, "incremental.bundle"), "main", localBase, usePublishedBaseFallback: true, Ct);
 
         Assert.Equal(published, bundle.BaseCommit);
         Assert.Equal(published, Assert.Single(bundle.Prerequisites));
@@ -300,7 +320,7 @@ public sealed class LocalBundleTests
         await Git.RunAsync(repo, ["checkout", "--quiet", "--orphan", "unrelated"], Ct);
         var unrelatedBase = await CommitAsync(repo, "Unrelated root");
         var unrelatedTip = await CommitAsync(repo, "Unrelated result");
-        var whole = await GitBundles.CreateAsync(repo, Path.Combine(machine.Home, "whole.bundle"), "unrelated", unrelatedBase, Ct);
+        var whole = await GitBundles.CreateAsync(repo, Path.Combine(machine.Home, "whole.bundle"), "unrelated", unrelatedBase, usePublishedBaseFallback: true, Ct);
 
         Assert.Null(whole.BaseCommit);
         Assert.Empty(whole.Prerequisites);

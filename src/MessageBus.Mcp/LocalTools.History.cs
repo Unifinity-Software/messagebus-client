@@ -62,7 +62,8 @@ internal sealed partial class LocalTools
         if (baseCommit is null && _o.IncrementalBundles && root is { Length: > 0 }
             && _sentCode.LastSent(_ws, to.ToString(), root) is { } last)
             baseCommit = await GitBundles.SuggestBaseAsync(path, branch, last, ct);
-        var (attachment, bundle) = await _attachments.SendGitBundleAsync(path, to, key, branch, baseCommit, threadId, spec.ExpectedHead, ct);
+        var (attachment, bundle) = await _attachments.SendGitBundleAsync(path, to, key, branch, baseCommit, threadId, spec.ExpectedHead,
+            usePublishedBaseFallback: spec.Base is null && baseCommit is not null, ct);
         if (!primary && bundle.Prerequisites.Count > 0)
             notice = (notice is null ? "" : notice + " ") +
                 $"Companion bundle {bundle.Branch} requires the following commits: {string.Join(", ", bundle.Prerequisites)} in the receiver's repository. Use an empty base to send its whole history.";
