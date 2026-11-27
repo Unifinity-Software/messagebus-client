@@ -1,5 +1,6 @@
 using MessageBus.Attachments.Client;
 using MessageBus.Cli.Runner;
+using MessageBus.Cli.Runner.Sandbox;
 using MessageBus.Cli.Tests.Infrastructure;
 using MessageBus.Contracts.Messaging;
 using MessageBus.Contracts.Roles;
@@ -87,12 +88,13 @@ public sealed class BundleCopyTests(BundleCopyTests.Code code) : IClassFixture<B
         var ct = TestContext.Current.CancellationToken;
         var delivery = Delivery("dlv_no_bundle", "main");
         var remote = missingRemote ? Path.Combine(code.Root, "missing.git") : code.Remote;
+        const string url = "https://git.example.test/team/app.git";
         delivery = delivery with
         {
             Envelope = delivery.Envelope with
             {
                 Attachments = [],
-                Refs = [new Ref { Kind = "git.repository", Url = new Uri(remote).AbsoluteUri, Sha = revision }],
+                Refs = [new Ref { Kind = "git.repository", Url = url, Sha = revision }],
             },
             StepContext = new StepContext { JobId = "job_test", StepId = "code", StepName = "Code", Round = 1, AllowedOutcomes = [], Inputs = [] },
         };
@@ -100,7 +102,8 @@ public sealed class BundleCopyTests(BundleCopyTests.Code code) : IClassFixture<B
         var log = new List<string>();
         run.GitLog = log.Add;
 
-        var error = await run.CheckOutAsync(delivery, _ => code.Git, bundles: null, ct);
+        var error = await run.CheckOutAsync(delivery, _ => code.Git, bundles: null, ct,
+            launch => TestRepositoryRemote.Map(launch, url, remote));
 
         Assert.True(error is null, error);
         if (missingRemote || revision is not null)
@@ -115,6 +118,245 @@ public sealed class BundleCopyTests(BundleCopyTests.Code code) : IClassFixture<B
             Assert.Equal("main", (await Git.RunAsync(run.WorkTree, ["branch", "--show-current"], ct)).Trim());
             Assert.Equal(code.C, await Git.CommitIdAsync(run.WorkTree, "HEAD", ct));
         }
+    }
+
+    [Theory]
+    [InlineData("/srv/private/repo.git")]
+    [InlineData("../private/repo.git")]
+    [InlineData("./repo")]
+    [InlineData("repo.git")]
+    [InlineData("C:\\private\\repo.git")]
+    [InlineData("C:repo.git")]
+    [InlineData("\\\\files.example.test\\private\\repo.git")]
+    [InlineData("//files.example.test/private/repo.git")]
+    [InlineData("file:///srv/private/repo.git")]
+    [InlineData("http://git.example.test/team/repo.git")]
+    [InlineData("git://git.example.test/team/repo.git")]
+    [InlineData("ext::command.git")]
+    public async Task Checkout_refuses_local_and_unsupported_repository_addresses_before_starting_git(string address)
+    {
+        using var run = RunWorkspace.Create(code.Root, "dlv_refused", 1);
+        var task = Delivery("dlv_refused", "main");
+        task = task with
+        {
+            RunEnvironment = new RunEnvironment { Checkout = CheckoutMode.Clone },
+            Envelope = task.Envelope with { Refs = [new Ref { Kind = "git.repository", Url = address }] },
+        };
+        var error = await run.CheckOutAsync(task, _ => "git", null, TestContext.Current.CancellationToken,
+            _ => throw new InvalidOperationException("A refused address must never start git."));
+
+        Assert.Equal("The repository address must use HTTPS or SSH. Local folders and file addresses aren't allowed.", error);
+        Assert.False(Directory.Exists(run.WorkTree));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Bundle_checkout_never_copies_a_task_supplied_local_repository(bool incremental)
+    {
+        code.RequireLocalFetch();
+        var task = Delivery("dlv_local", "main");
+        task = task with
+        {
+            Envelope = task.Envelope with
+            {
+                Attachments = incremental ? task.Envelope.Attachments : [],
+                Refs = [new Ref { Kind = "git.repo", Url = code.Remote }],
+            },
+        };
+        using var run = RunWorkspace.Create(Path.Combine(code.Root, Guid.NewGuid().ToString("N")), "dlv_local", 1);
+        var log = new List<string>();
+        run.GitLog = log.Add;
+        var error = await run.CheckOutAsync(task, _ => code.Git, new Bundles { File = code.Next }, TestContext.Current.CancellationToken,
+            launch =>
+            {
+                Assert.DoesNotContain("clone", launch.Arguments);
+                return launch;
+            });
+
+        Assert.Contains("Local folders and file addresses aren't allowed", error);
+        Assert.True(run.RepositoryRefused);
+        Assert.False(File.Exists(Path.Combine(run.WorkTree, "README.md")));
+    }
+
+    [Theory]
+    [InlineData(CheckoutMode.Clone, false)]
+    [InlineData(CheckoutMode.Bundle, false)]
+    [InlineData(CheckoutMode.Bundle, true)]
+    public async Task Checkout_clone_uses_the_prepared_runs_credential(CheckoutMode mode, bool incremental)
+    {
+        code.RequireLocalFetch();
+        var ct = TestContext.Current.CancellationToken;
+        const string url = "https://git.example.test/team/private.git";
+        var root = Path.Combine(code.Root, Guid.NewGuid().ToString("N"));
+        using var run = RunWorkspace.Create(root, "dlv_credential", 1);
+        var task = Delivery("dlv_credential", "main");
+        task = task with
+        {
+            RunEnvironment = new RunEnvironment { Checkout = mode },
+            Envelope = task.Envelope with
+            {
+                Attachments = incremental ? task.Envelope.Attachments : [],
+                Refs = [new Ref { Kind = "git.repo", Url = "../private/repo.git" }, new Ref { Kind = "git.repository", Url = url }],
+            },
+        };
+        var isolation = RunIsolation.Create(new RunIsolationOptions
+        {
+            WorkRoot = root, HomeDirectory = root, Requested = IsolationLevel.Basic, Credentials = new CheckoutCredentials(),
+        }, TextWriter.Null);
+        var profile = new PermissionProfile { Name = "worker" };
+        await isolation.PrepareAsync(run, task, profile, ct);
+        ProcessLaunch? clone = null;
+        try
+        {
+            var error = await run.CheckOutAsync(task, _ => code.Git, new Bundles { File = code.Next }, ct, launch =>
+            {
+                launch = isolation.Wrap(launch, run, profile);
+                if (launch.Arguments.Contains("clone")) clone = launch;
+                return TestRepositoryRemote.Map(launch, url, code.Remote);
+            });
+            Assert.True(error is null, error);
+            Assert.NotNull(clone);
+            Assert.Equal(Path.Combine(run.Root, RunGitConfig.ConfigFileName), clone.Environment["GIT_CONFIG_GLOBAL"]);
+            Assert.Contains(RunGitConfig.SshWrapperFileName, clone.Environment["GIT_SSH_COMMAND"]);
+            Assert.Equal("0", clone.Environment["GIT_TERMINAL_PROMPT"]);
+            Assert.Equal("never", clone.Environment["GCM_INTERACTIVE"]);
+            Assert.Equal("https:ssh", clone.Environment["GIT_ALLOW_PROTOCOL"]);
+            // Ask Git itself using exactly the clone's environment: only the run helper can answer.
+            var lines = new List<string>();
+            using var credential = AgentProcess.Start(clone with
+            {
+                Arguments = ["credential", "fill"],
+                StandardInput = "protocol=https\nhost=git.example.test\npath=team/private.git\n\n",
+            }, lines.Add);
+            Assert.Equal(0, await credential.WaitForExitAsync());
+            Assert.Contains("username=run-reader", lines);
+            Assert.Contains("password=example-run-password", lines);
+            Assert.Equal(code.C, await Git.CommitIdAsync(run.WorkTree, "HEAD", ct));
+        }
+        finally
+        {
+            isolation.Ended(run);
+        }
+    }
+
+    private sealed class CheckoutCredentials : IRepoCredentialSource
+    {
+        public string Description => "Test checkout credential";
+        public Task<RepoCredential?> IssueAsync(RepoCredentialRequest request, CancellationToken cancellationToken) =>
+            Task.FromResult<RepoCredential?>(new RepoCredential
+            {
+                UserName = "run-reader", Secret = "example-run-password", ExpiresAt = DateTimeOffset.UtcNow.AddHours(1),
+            });
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Step_bundle_base_fetch_uses_run_credentials_and_refuses_an_owner_rewrite_to_a_local_folder(bool localRewrite)
+    {
+        code.RequireLocalFetch();
+        var ct = TestContext.Current.CancellationToken;
+        const string url = "https://git.example.test/team/private.git";
+        var root = Directory.CreateDirectory(Path.Combine(code.Root, Guid.NewGuid().ToString("N"))).FullName;
+        if (localRewrite)
+            await Git.RunAsync(root, ["config", "--file", Path.Combine(root, ".gitconfig"),
+                $"url.{code.Remote.Replace('\\', '/')}.insteadOf", url], ct);
+        using var run = RunWorkspace.Create(root, "dlv_step_base", 1);
+        Directory.CreateDirectory(run.WorkTree);
+        await Git.RunAsync(run.WorkTree, ["init", "--quiet"], ct);
+        await Git.RunAsync(run.WorkTree, ["-c", "user.name=Test", "-c", "user.email=test@example.test", "-c", "commit.gpgsign=false",
+            "commit", "--quiet", "--allow-empty", "-m", "Existing step"], ct);
+        await Git.RunAsync(run.WorkTree, ["remote", "add", "origin", url], ct);
+        var task = Delivery("dlv_step_base", "main");
+        task = task with { Envelope = task.Envelope with { Refs = [new Ref { Kind = "git.repo", Url = url }] } };
+        var profile = new PermissionProfile { Name = "worker" };
+        var isolation = RunIsolation.Create(new RunIsolationOptions
+        {
+            WorkRoot = root, HomeDirectory = root, Requested = IsolationLevel.Basic,
+            Credentials = new CheckoutCredentials(), UseOwnerGit = _ => localRewrite,
+        }, TextWriter.Null);
+        await isolation.PrepareAsync(run, task, profile, ct);
+        var fetches = new List<ProcessLaunch>();
+        try
+        {
+            var error = await run.ImportStepBranchAsync(code.Git!, task, code.Next, GitBundles.ReadHeader(code.Next), "main", launch =>
+            {
+                launch = isolation.Wrap(launch, run, profile);
+                if (launch.Arguments.Contains("fetch")) fetches.Add(launch);
+                return localRewrite ? launch : TestRepositoryRemote.Map(launch, url, code.Remote);
+            }, ct);
+            Assert.NotEmpty(fetches);
+            foreach (var fetch in fetches)
+            {
+                Assert.Equal(Path.Combine(run.Root, RunGitConfig.ConfigFileName), fetch.Environment["GIT_CONFIG_GLOBAL"]);
+                Assert.Equal("never", fetch.Environment["GCM_INTERACTIVE"]);
+                if (fetch.Arguments.Contains("origin"))
+                    Assert.Equal("https:ssh", fetch.Environment["GIT_ALLOW_PROTOCOL"]);
+                else
+                    Assert.False(fetch.Environment.TryGetValue("GIT_ALLOW_PROTOCOL", out var allowed) && allowed == "https:ssh");
+            }
+            Assert.Contains(fetches, f => f.Arguments.Contains("origin"));
+            if (localRewrite)
+            {
+                Assert.Contains("needs commits missing", error);
+                Assert.DoesNotContain(fetches, f => f.Arguments.Contains(Path.GetFullPath(code.Next)));
+                await Assert.ThrowsAsync<GitException>(() => Git.CommitIdAsync(run.WorkTree, code.C, ct));
+            }
+            else
+            {
+                Assert.True(error is null, error);
+                Assert.Contains(fetches, f => f.Arguments.Contains(Path.GetFullPath(code.Next)));
+                Assert.Equal(code.C, await Git.CommitIdAsync(run.WorkTree, "HEAD", ct));
+            }
+        }
+        finally { isolation.Ended(run); }
+    }
+
+    [Fact]
+    public async Task Step_bundle_error_keeps_the_repository_refusal_reason()
+    {
+        code.RequireLocalFetch();
+        using var run = RunWorkspace.Create(code.Root, "dlv_step_refused", 1);
+        var task = Delivery("dlv_step_refused", "main");
+        task = task with { Envelope = task.Envelope with { Refs = [new Ref { Kind = "git.repo", Url = "../private/repo.git" }] } };
+        var error = await run.ImportStepBranchAsync(code.Git!, task, code.Next, GitBundles.ReadHeader(code.Next), "main", l => l,
+            TestContext.Current.CancellationToken);
+        Assert.Contains("Local folders and file addresses aren't allowed", error);
+        Assert.Contains("needs commits missing", error);
+    }
+
+    [Fact]
+    public async Task A_service_without_a_repository_credential_explains_why_the_checkout_could_not_authenticate()
+    {
+        code.RequireLocalFetch();
+        var ct = TestContext.Current.CancellationToken;
+        var log = new StringWriter();
+        using var server = new FakeServer().On(HttpMethod.Post, ServiceRoutes.RepoCredential,
+            _ => new(System.Net.HttpStatusCode.NoContent));
+        using var http = new HttpClient(server) { BaseAddress = new Uri(FakeServer.Url) };
+        var root = Path.Combine(code.Root, Guid.NewGuid().ToString("N"));
+        using var run = RunWorkspace.Create(root, "dlv_no_credential", 1);
+        run.GitLog = log.WriteLine;
+        const string url = "https://git.example.test/team/private.git";
+        var task = Delivery("dlv_no_credential", "main");
+        task = task with { Envelope = task.Envelope with { Attachments = [], Refs = [new Ref { Kind = "git.repo", Url = url }] } };
+        var profile = new PermissionProfile { Name = "worker" };
+        var isolation = RunIsolation.Create(new RunIsolationOptions
+        {
+            WorkRoot = root, HomeDirectory = root, Requested = IsolationLevel.Basic,
+            Credentials = new ServiceRepoCredentials(http, log),
+        }, log);
+        await isolation.PrepareAsync(run, task, profile, ct);
+        try
+        {
+            Assert.Null(await run.CheckOutAsync(task, _ => code.Git, null, ct,
+                launch => TestRepositoryRemote.Map(isolation.Wrap(launch, run, profile), url, Path.Combine(root, "missing.git"))));
+            Assert.Contains("the service supplied none (204)", log.ToString());
+            Assert.Contains("No repository credential was available for this run", log.ToString());
+            Assert.False(File.Exists(Path.Combine(run.WorkTree, "README.md")));
+        }
+        finally { isolation.Ended(run); }
     }
 
     [Fact]
@@ -282,14 +524,16 @@ public sealed class BundleCopyTests(BundleCopyTests.Code code) : IClassFixture<B
         Assert.NotEqual(code.C, await Git.CommitIdAsync(remote, "refs/heads/main", ct));
 
         var source = new Bundles { File = code.Next };
+        const string url = "https://git.example.test/team/base.git";
         using var run = RunWorkspace.Create(Path.Combine(code.Root, "cold-checkout"), "dlv_clone", 1);
         var delivery = Delivery("dlv_clone", "main");
         delivery = delivery with
         {
-            Envelope = delivery.Envelope with { Refs = [new Ref { Kind = "git.repo", Url = remote }] },
+            Envelope = delivery.Envelope with { Refs = [new Ref { Kind = "git.repo", Url = url }] },
         };
 
-        var error = await run.CheckOutAsync(delivery, _ => code.Git, source, ct, ask: source.AskAsync);
+        var error = await run.CheckOutAsync(delivery, _ => code.Git, source, ct,
+            launch => TestRepositoryRemote.Map(launch, url, remote), ask: source.AskAsync);
         Assert.True(error is null, error);
         Assert.Equal(0, source.Asked);
         Assert.Equal(code.C, await Git.CommitIdAsync(run.WorkTree, "HEAD", ct));

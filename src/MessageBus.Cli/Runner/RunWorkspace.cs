@@ -63,6 +63,10 @@ public sealed partial class RunWorkspace : IDisposable
     private FileStream? _lock;
 
     internal Action<string>? GitLog { get; set; }
+    internal bool RepositoryRefused { get; private set; }
+    internal string? RepositoryCredentialNote { get; set; }
+    // Prepared by isolation before checkout, also used by runner-owned Git outside an OS wrapper.
+    internal IReadOnlyDictionary<string, string?> GitEnvironment { get; set; } = new Dictionary<string, string?>();
     internal Uri? LocalModelEndpoint { get; set; }
     internal string? PrivateSocketDirectory { get; set; }
 
@@ -76,15 +80,17 @@ public sealed partial class RunWorkspace : IDisposable
         Func<ProcessLaunch, ProcessLaunch> wrap, CancellationToken ct)
     {
         Directory.CreateDirectory(WorkTree);
-        var repoRef = delivery.Envelope.Refs.FirstOrDefault(r => RepositoryUrl(r) is not null);
+        var repoRef = RunnerGit.RepositoryRef(delivery.Envelope.Refs);
         var repository = WorkingCopyDescription;
+        string? repositoryError = null;
         var initialized = Path.Exists(Path.Combine(WorkTree, ".git"));
         // Only replace an empty checkout. Existing branches may belong to earlier steps.
         if (repoRef is not null && header.Prerequisites.Count > 0
             && (!initialized || await GitAsync(git, ["-C", WorkTree, "rev-parse", "--verify", "HEAD"], wrap, ct).ConfigureAwait(false) is not null
                 && (await GitBundles.MissingPrerequisitesAsync(header, BundleGit(git, file, wrap), ct).ConfigureAwait(false)).Count > 0))
         {
-            initialized = await CheckOutRepositoryAsync(git, repoRef, wrap, ct).ConfigureAwait(false) is null;
+            repositoryError = await CheckOutRepositoryAsync(git, repoRef, wrap, ct).ConfigureAwait(false);
+            initialized = repositoryError is null;
             if (initialized)
                 repository = $"repository '{RepositoryUrl(repoRef)}'";
             else
@@ -94,9 +100,10 @@ public sealed partial class RunWorkspace : IDisposable
             return initError;
 
         var reference = "refs/remotes/mbus-input/" + Guid.NewGuid().ToString("N");
-        return await GitAsync(git, ["-C", WorkTree, "check-ref-format", "refs/heads/" + branch], wrap, ct).ConfigureAwait(false)
+        var error = await GitAsync(git, ["-C", WorkTree, "check-ref-format", "refs/heads/" + branch], wrap, ct).ConfigureAwait(false)
             ?? await ApplyBundleAsync(git, file, repository, branch, reference, wrap, ct).ConfigureAwait(false)
             ?? await GitAsync(git, ["-C", WorkTree, "checkout", "--quiet", "-B", branch, reference], wrap, ct).ConfigureAwait(false);
+        return error is null || repositoryError is null ? error : repositoryError + " " + error;
     }
 
     private async Task<string?> ApplyBundleAsync(string git, string file, string repository, string branch, string destination,
@@ -121,7 +128,10 @@ public sealed partial class RunWorkspace : IDisposable
     private Func<IReadOnlyList<string>, CancellationToken, Task<string>> BundleGit(string git, string file,
         Func<ProcessLaunch, ProcessLaunch> wrap) => async (args, ct) =>
     {
-        var (output, error) = await RunGitAsync(git, ["-C", WorkTree, .. args], wrap, ct).ConfigureAwait(false);
+        var transport = args.FirstOrDefault() == "fetch" && args.Contains("--")
+            && args.SkipWhile(a => a != "--").Skip(1).FirstOrDefault() != Path.GetFullPath(file)
+            ? RemoteGit(wrap) : wrap;
+        var (output, error) = await RunGitAsync(git, ["-C", WorkTree, .. args], transport, ct).ConfigureAwait(false);
         if (error is not null)
             throw new GitException(RunnerGit.DescribePath(error, Path.GetFullPath(file), "the task's bundle"), rawOutput: true);
         return output;
@@ -248,11 +258,12 @@ public sealed partial class RunWorkspace : IDisposable
                     return "The workflow action could not check out the task's code bundle.";
 
                 if (bundle is null && delivery.RunnerAction is null
-                    && delivery.Envelope.Refs.FirstOrDefault(r => RepositoryUrl(r) is not null) is { } repositoryRef)
+                    && RunnerGit.RepositoryRef(delivery.Envelope.Refs) is { } repositoryRef)
                 {
                     var error = await CheckOutRepositoryAsync(git, repositoryRef, wrap, cancellationToken).ConfigureAwait(false);
                     if (error is null)
                         return null;
+                    if (RepositoryRefused) return error;
 
                     if (!TryDelete(WorkTree))
                         return $"Couldn't remove the incomplete repository checkout. {error}";
@@ -268,7 +279,7 @@ public sealed partial class RunWorkspace : IDisposable
 
         // Clone: the first ref that names a repository, with the run's own repository credential when
         // a sandbox gives it one (the original issue).
-        var repoRef = delivery.Envelope.Refs.FirstOrDefault(r => RepositoryUrl(r) is not null);
+        var repoRef = RunnerGit.RepositoryRef(delivery.Envelope.Refs);
         if (repoRef is null)
         {
             return "The task names no repository to check out.";
@@ -280,12 +291,19 @@ public sealed partial class RunWorkspace : IDisposable
         Func<ProcessLaunch, ProcessLaunch> wrap, CancellationToken cancellationToken)
     {
         var url = RepositoryUrl(repoRef)!;
+        if (!RunnerGit.IsRemoteRepository(url))
+        {
+            RepositoryRefused = true;
+            return Uri.TryCreate(url, UriKind.Absolute, out var uri) && uri.Scheme == "https" && uri.UserInfo.Contains(':')
+                ? "Repository addresses must not contain passwords."
+                : "The repository address must use HTTPS or SSH. Local folders and file addresses aren't allowed.";
+        }
         var mirrors = RepoMirrors.For(Path.GetDirectoryName(Root)!);
         var error = mirrors.Has(url) ? await CopyFromMirrorAsync(git, mirrors, url, wrap, cancellationToken).ConfigureAwait(false) : "no mirror";
         if (error is not null)
         {
             TryDelete(WorkTree);
-            error = await GitAsync(git, ["clone", "--quiet", url, WorkTree], wrap, cancellationToken).ConfigureAwait(false);
+            error = await GitAsync(git, ["clone", "--quiet", "--", url, WorkTree], RemoteGit(wrap), cancellationToken).ConfigureAwait(false);
         }
         if (error is null && repoRef.Sha is { Length: > 0 } sha)
         {
@@ -296,7 +314,7 @@ public sealed partial class RunWorkspace : IDisposable
             // the original issue: before the agent starts, the mirror takes in what this run fetched, for the next run.
             await mirrors.UpdateFromAsync(git, url, WorkTree, cancellationToken).ConfigureAwait(false);
         }
-        return error;
+        return error is null || RepositoryCredentialNote is null ? error : error + " " + RepositoryCredentialNote;
     }
 
     /// <summary>How long a run waits for the repository's earlier history from the sender when no wait is given.</summary>
@@ -345,7 +363,7 @@ public sealed partial class RunWorkspace : IDisposable
         else if ((copy = await mirrors.FindCodeAsync(git, workspace, file, cancellationToken).ConfigureAwait(false)) is null)
         {
             string? repositoryError = null;
-            if (delivery.Envelope.Refs.FirstOrDefault(r => RepositoryUrl(r) is not null) is { } repoRef)
+            if (RunnerGit.RepositoryRef(delivery.Envelope.Refs) is { } repoRef)
             {
                 var repository = RepositoryUrl(repoRef)!;
                 const string reference = "refs/remotes/mbus/task";
@@ -354,6 +372,7 @@ public sealed partial class RunWorkspace : IDisposable
                     ?? await GitAsync(git, ["-C", WorkTree, "checkout", "--quiet", "-B", branch, reference], wrap, cancellationToken).ConfigureAwait(false);
                 if (repositoryError is null)
                     return null;
+                if (RepositoryRefused) return repositoryError;
                 TryDelete(WorkTree);
             }
 
@@ -401,13 +420,19 @@ public sealed partial class RunWorkspace : IDisposable
         // The runner copies its own mirror (no shared files, so the run can't change it); the run's git does the rest.
         var error = await GitAsync(git, ["clone", "--quiet", "--no-hardlinks", "--no-checkout", mirrors.PathFor(url), WorkTree], launch => launch, cancellationToken).ConfigureAwait(false)
                     ?? await GitAsync(git, ["-C", WorkTree, "remote", "set-url", "origin", url], wrap, cancellationToken).ConfigureAwait(false)
-                    ?? await GitAsync(git, ["-C", WorkTree, "fetch", "--quiet", "--prune", "--tags", "origin"], wrap, cancellationToken).ConfigureAwait(false);
+                    ?? await GitAsync(git, ["-C", WorkTree, "fetch", "--quiet", "--prune", "--tags", "origin"], RemoteGit(wrap), cancellationToken).ConfigureAwait(false);
         if (error is null && RepoMirrors.CurrentBranch(WorkTree) is { } branch)
         {
             error = await GitAsync(git, ["-C", WorkTree, "checkout", "--quiet", "-B", branch, "refs/remotes/origin/" + branch], wrap, cancellationToken).ConfigureAwait(false);
         }
         return error;
     }
+
+    private static Func<ProcessLaunch, ProcessLaunch> RemoteGit(Func<ProcessLaunch, ProcessLaunch> wrap) => launch => wrap(launch with
+    {
+        // Also reject a local transport introduced by an inherited URL rewrite.
+        Environment = new Dictionary<string, string?>(launch.Environment) { ["GIT_ALLOW_PROTOCOL"] = "https:ssh" },
+    });
 
     /// <summary>
     /// Ends the run and deletes its folder: the worktree, the code bundle, git settings, prompt, caches and anything the
@@ -587,7 +612,8 @@ public sealed partial class RunWorkspace : IDisposable
                 return $"https://dev.azure.com/{org}/{project}/_git/{name}";
             }
         }
-        return r.Url is { } url && url.EndsWith(".git", StringComparison.OrdinalIgnoreCase) ? url : null;
+        return r.Url is { Length: > 0 } url && (r.Kind is "git.repository" or "git.repo"
+            || url.EndsWith(".git", StringComparison.OrdinalIgnoreCase)) ? url : null;
     }
 
     /// <summary>Deletes a folder tree, including git's read-only object files; leaves it when something still holds a file.</summary>
@@ -668,7 +694,11 @@ public sealed partial class RunWorkspace : IDisposable
             // Inherited post-checkout hooks/fsmonitor can start git children that outlive checkout.
             Arguments = RunnerGit.Arguments(args),
             WorkingDirectory = Root,
-            Environment = new Dictionary<string, string?> { ["GIT_TERMINAL_PROMPT"] = "0" },
+            Environment = new Dictionary<string, string?>(GitEnvironment)
+            {
+                ["GIT_TERMINAL_PROMPT"] = "0",
+                ["GCM_INTERACTIVE"] = "never",
+            },
         }), captureOutput ? line =>
         {
             lock (output) output.Add(line);

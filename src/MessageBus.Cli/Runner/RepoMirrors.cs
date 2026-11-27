@@ -443,7 +443,7 @@ public sealed class RepoMirrors(string root, TimeProvider? time = null)
             // Mirror object paths can exceed MAX_PATH on Windows. No inherited hooks or fsmonitor outside the sandbox.
             Arguments = RunnerGit.Arguments(args),
             WorkingDirectory = directory,
-            Environment = new Dictionary<string, string?> { ["GIT_TERMINAL_PROMPT"] = "0" },
+            Environment = new Dictionary<string, string?> { ["GIT_TERMINAL_PROMPT"] = "0", ["GCM_INTERACTIVE"] = "never" },
             StandardInput = input,
         }, captureOutput ? line =>
         {

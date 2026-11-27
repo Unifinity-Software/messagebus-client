@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
+using MessageBus.Cli.Runner;
 using MessageBus.Cli.Runner.Sandbox;
 using MessageBus.Contracts.Messaging;
 using MessageBus.Contracts.Roles;
@@ -346,6 +347,44 @@ public sealed class RunNetworkTests
         var one = new byte[1];
         var read = await Record.ExceptionAsync(async () => Assert.Equal(0, await stream.ReadAsync(one, TestContext.Current.CancellationToken)));
         Assert.True(read is null or IOException, read?.ToString());
+    }
+
+    [Theory]
+    [InlineData("https://git.example.test/team/app.git")]
+    [InlineData("ssh://git@git.example.test/team/app.git")]
+    [InlineData("git@git.example.test:team/app.git")]
+    public async Task Repository_addresses_add_the_repository_host_to_the_runs_network_allow_list(string address)
+    {
+        var dialled = new List<string>();
+        using var shared = RunNetworkProxy.Start(0, TextWriter.Null, (host, _, _) =>
+        {
+            dialled.Add(host);
+            return Task.FromResult<Stream>(new MemoryStream());
+        });
+        await using var h = new RunnerHarness();
+        using var run = RunWorkspace.Create(h.WorkRoot, "dlv_repository_host", 1);
+        var sandbox = RunIsolation.Create(new RunIsolationOptions
+        {
+            WorkRoot = h.WorkRoot, HomeDirectory = h.WorkRoot, Requested = IsolationLevel.Basic,
+            LimitNetwork = true, SharedNetwork = shared,
+        }, TextWriter.Null);
+        var task = h.Task("dlv_repository_host");
+        task = task with { Envelope = task.Envelope with { Refs = [new() { Kind = "git.repository", Url = address }] } };
+        var profile = new PermissionProfile { Name = "worker" };
+        try
+        {
+            await sandbox.PrepareAsync(run, task, profile, TestContext.Current.CancellationToken);
+            var launch = sandbox.Wrap(new ProcessLaunch { FileName = "git", WorkingDirectory = run.Root }, run, profile);
+            var proxy = new Uri(launch.Environment["HTTPS_PROXY"]!);
+            var authorization = "Basic " + Convert.ToBase64String(Encoding.UTF8.GetBytes(Uri.UnescapeDataString(proxy.UserInfo)));
+            Assert.StartsWith("HTTP/1.1 200", await ConnectThroughAsync(shared.Port, "git.example.test:22", authorization));
+            Assert.StartsWith("HTTP/1.1 403", await ConnectThroughAsync(shared.Port, "other.example.test:22", authorization));
+            Assert.Equal(["git.example.test"], dialled);
+        }
+        finally
+        {
+            sandbox.Ended(run);
+        }
     }
 
     [Fact]

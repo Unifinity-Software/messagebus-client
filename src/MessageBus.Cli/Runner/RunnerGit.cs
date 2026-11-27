@@ -1,11 +1,35 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using MessageBus.Cli.Runner.Sandbox;
+using MessageBus.Contracts.Messaging;
 
 namespace MessageBus.Cli.Runner;
 
 internal static class RunnerGit
 {
+    internal static Ref? RepositoryRef(IEnumerable<Ref> references)
+    {
+        var named = references.Where(r => RunWorkspace.RepositoryUrl(r) is not null).ToArray();
+        return named.FirstOrDefault(r => IsRemoteRepository(RunWorkspace.RepositoryUrl(r)!)) ?? named.FirstOrDefault();
+    }
+
+    internal static bool IsRemoteRepository(string address) => RepositoryUri(address) is not null;
+
+    internal static Uri? RepositoryUri(string? address)
+    {
+        if (string.IsNullOrEmpty(address) || address.Any(c => char.IsWhiteSpace(c) || char.IsControl(c) || c == '\\')) return null;
+        if (Uri.TryCreate(address, UriKind.Absolute, out var uri)
+            && uri.Scheme is "https" or "ssh" && !string.IsNullOrEmpty(uri.Host))
+            return uri.Scheme == "https" && uri.UserInfo.Contains(':') ? null : uri;
+
+        // SCP-style SSH: require the git user and a host, never a drive or relative path.
+        if (!address.StartsWith("git@", StringComparison.Ordinal)) return null;
+        var colon = address.IndexOf(':', 4);
+        return colon > 4 && colon < address.Length - 1
+            && Uri.CheckHostName(address[4..colon]) != UriHostNameType.Unknown
+            ? new Uri("ssh://" + address[..colon] + "/" + address[(colon + 1)..]) : null;
+    }
+
     // Runner-owned git commands need long paths and must not start inherited hooks or fsmonitor.
     internal static string[] Arguments(IEnumerable<string> args) =>
         ["-c", "core.longpaths=true", "-c", "core.hooksPath=" + (OperatingSystem.IsWindows() ? "NUL" : "/dev/null"),
@@ -87,6 +111,7 @@ internal static class RunnerGit
         start.Environment["GIT_CONFIG_NOSYSTEM"] = "1";
         start.Environment["GIT_CONFIG_GLOBAL"] = OperatingSystem.IsWindows() ? "NUL" : "/dev/null";
         start.Environment["GIT_TERMINAL_PROMPT"] = "0";
+        start.Environment["GCM_INTERACTIVE"] = "never";
         start.Environment["GIT_ALLOW_PROTOCOL"] = protocol;
         start.Environment["GIT_NO_LAZY_FETCH"] = "1";
         if (credentials is not null)

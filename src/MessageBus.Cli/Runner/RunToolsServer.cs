@@ -101,7 +101,7 @@ internal static class RunToolsServer
                 ? RunnerGit.Arguments(start.ArgumentList)
                 : [.. start.ArgumentList],
             WorkingDirectory = start.WorkingDirectory,
-            Environment = new Dictionary<string, string?> { ["GIT_TERMINAL_PROMPT"] = "0", ["GIT_EDITOR"] = "true", ["LC_ALL"] = "C", ["LANGUAGE"] = "C" },
+            Environment = new Dictionary<string, string?> { ["GIT_TERMINAL_PROMPT"] = "0", ["GCM_INTERACTIVE"] = "never", ["GIT_EDITOR"] = "true", ["LC_ALL"] = "C", ["LANGUAGE"] = "C" },
         });
         start.FileName = launch.FileName;
         start.ArgumentList.Clear();

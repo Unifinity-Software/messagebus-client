@@ -35,6 +35,8 @@ public sealed class StepInputsTests
         await Git.RunAsync(repository, [.. commit, "--allow-empty", "-m", "Base"], Ct);
         var @base = await Git.CommitIdAsync(repository, "HEAD", Ct);
         var remote = Path.Combine(runner.Scratch, "origin.git");
+        const string url = "https://git.example.test/team/input.git";
+        sandbox.Checkout = launch => TestRepositoryRemote.Map(launch, url, remote);
         await Git.RunAsync(repository, ["clone", "--quiet", "--bare", repository, remote], Ct);
         await Git.RunAsync(repository, ["switch", "--quiet", "-c", "feature/example"], Ct);
         await File.WriteAllTextAsync(Path.Combine(repository, "README.md"), "The earlier step's code", Ct);
@@ -48,7 +50,7 @@ public sealed class StepInputsTests
         var task = runner.Task("dlv_inputs", environment: new RunEnvironment { Checkout = CheckoutMode.Bundle });
         var delivery = task with
         {
-            Envelope = task.Envelope with { Refs = [new Ref { Kind = "git.repository", Url = new Uri(remote).AbsoluteUri, Sha = @base }] },
+            Envelope = task.Envelope with { Refs = [new Ref { Kind = "git.repository", Url = url, Sha = @base }] },
             StepContext = Context(new("design", "result"), new("code", "branch")),
         };
         inputs.Reply(delivery, "design", "Design summary", "Design details", [document], exhibits, stored: true);
@@ -140,7 +142,9 @@ public sealed class StepInputsTests
     {
         public bool ProcessStarted { get; private set; }
         public IReadOnlyDictionary<string, string>? InputBranches { get; private set; }
-        public ProcessLaunch Wrap(ProcessLaunch launch, RunWorkspace workspace, PermissionProfile profile) => launch;
+        public Func<ProcessLaunch, ProcessLaunch>? Checkout { get; set; }
+        public ProcessLaunch Wrap(ProcessLaunch launch, RunWorkspace workspace, PermissionProfile profile) =>
+            launch.TrustedCheckout && Checkout is not null ? Checkout(launch) : launch;
         public void Started(RunWorkspace workspace, int processId)
         {
             ProcessStarted = true;

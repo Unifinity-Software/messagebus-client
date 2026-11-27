@@ -148,6 +148,7 @@ internal sealed class WindowsServicePaths(string programFiles, string programDat
         start.Environment["NUGET_SCRATCH"] = Path.Combine(home, "nuget-scratch");
         start.Environment["GIT_CONFIG_NOSYSTEM"] = "1";
         start.Environment["GIT_TERMINAL_PROMPT"] = "0";
+        start.Environment["GCM_INTERACTIVE"] = "never";
         return start;
     }
 

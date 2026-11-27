@@ -52,6 +52,7 @@ internal sealed class RunCommits
         ["GIT_CEILING_DIRECTORIES"] = workspace.Root,
         ["GIT_CONFIG_NOSYSTEM"] = "1",
         ["GIT_TERMINAL_PROMPT"] = "0",
+        ["GCM_INTERACTIVE"] = "never",
         ["GIT_NO_LAZY_FETCH"] = "1",
         // A protocol-specific repo setting can override protocol.allow. This whitelist cannot.
         ["GIT_ALLOW_PROTOCOL"] = "",

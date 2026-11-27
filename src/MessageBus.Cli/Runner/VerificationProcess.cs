@@ -67,6 +67,7 @@ internal sealed class VerificationProcess(TimeProvider time) : IVerificationProc
             "--setenv", "GIT_CONFIG_NOSYSTEM", "1",
             "--setenv", "GIT_CONFIG_GLOBAL", "/dev/null",
             "--setenv", "GIT_TERMINAL_PROMPT", "0",
+            "--setenv", "GCM_INTERACTIVE", "never",
             "--setenv", "GIT_NO_REPLACE_OBJECTS", "1",
             "--setenv", "GIT_NO_LAZY_FETCH", "1",
             "--setenv", "GIT_ALLOW_PROTOCOL", executable == Git ? (network ? "https" : "file") : "",
