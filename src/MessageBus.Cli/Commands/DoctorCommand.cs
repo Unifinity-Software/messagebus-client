@@ -178,6 +178,17 @@ internal static class DoctorCommand
         {
             Bad("agents", "no coding agent is installed. Fix: install Claude Code, Codex, GitHub Copilot CLI, OpenCode or Antigravity CLI, then mbus connect.");
         }
+        // A PATH too long for cmd.exe affects every agent installed as a .cmd file, so it is said once here.
+        string? longPath = null;
+        var batchAgents = found.Where(a => AgentScanner.IsBatchFile(a.Agent.ExecutablePath)).ToList();
+        if (batchAgents.Count > 0 && AgentScanner.CmdPathTooLong(env) is { } pathLength)
+        {
+            longPath = AgentScanner.LongPathProblem(pathLength);
+            var names = string.Join(", ", batchAgents.Select(a => AgentScanner.DisplayName(a.Agent.Kind)));
+            var problem = $"Windows can't start agents installed as .cmd files ({names}), or the commands they run: {longPath}";
+            if (batchAgents.Any(a => a.Agent.NotReady?.EndsWith(longPath, StringComparison.Ordinal) == true)) Bad("PATH", problem);
+            else Note("PATH", problem);
+        }
         foreach (var (agent, warning) in found)
         {
             var name = AgentScanner.DisplayName(agent.Kind);
@@ -188,7 +199,11 @@ internal static class DoctorCommand
             }
             // git's problem is on every agent (it is said once above); this is the agent's own.
             var own = agent.NotReady is { } p && (scan.Git.Works || p != scan.Git.Problem) ? p : null;
-            if (own is not null)
+            if (own is not null && longPath is not null && own.EndsWith(longPath, StringComparison.Ordinal))
+            {
+                Bad(name, "Windows can't start it because PATH is too long (see PATH above).");
+            }
+            else if (own is not null)
             {
                 Bad(name, own);
             }

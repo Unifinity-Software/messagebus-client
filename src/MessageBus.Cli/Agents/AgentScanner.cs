@@ -210,6 +210,17 @@ internal static partial class AgentScanner
             version = match.Success ? match.Value : null;
             if (version is null && run.ExitCode != 0)
             {
+                // cmd.exe ignores a PATH it can't read, so a batch file (npm's codex.cmd) can't find node: installed, but it can't start.
+                if (IsBatchFile(located.Path) && CmdPathTooLong(host.GetEnvironmentVariable) is { } length)
+                {
+                    return new(new DetectedAgent
+                    {
+                        Kind = spec.Kind, Found = true, OnPath = located.OnPath, ExecutablePath = located.Path,
+                        Vendor = spec.Vendor, SignedIn = spec.SignedIn(locations, env.Get),
+                        McpConfigured = spec.McpConfigured(locations, host.GetEnvironmentVariable),
+                        NotReady = $"Windows can't start {DisplayName(spec.Kind)}: {LongPathProblem(length)}",
+                    }, null);
+                }
                 // A shim that only says the agent isn't installed (VS Code puts a 'copilot' one on PATH).
                 return new(new DetectedAgent { Kind = spec.Kind, Found = false, Vendor = spec.Vendor }, null);
             }
@@ -247,6 +258,25 @@ internal static partial class AgentScanner
             agent = await AntigravityReadiness.CheckAsync(agent, host.CreateAntigravityHttpHandler, host.Time, cancellationToken).ConfigureAwait(false);
         return new(agent, check?.Warning);
     }
+
+    /// <summary>The longest environment variable cmd.exe reads; it ignores a longer PATH entirely.</summary>
+    internal const int CmdPathLimit = 8191;
+
+    /// <summary>True for a file only cmd.exe runs (<c>.cmd</c>, <c>.bat</c>).</summary>
+    internal static bool IsBatchFile(string? path) =>
+        path is not null && (path.EndsWith(".cmd", StringComparison.OrdinalIgnoreCase) || path.EndsWith(".bat", StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>
+    /// The length of PATH when it is too long for cmd.exe, else null. This is the PATH every process here gets (the
+    /// user PATH added to the system PATH), so it is what an agent's batch file and its own commands would see.
+    /// </summary>
+    internal static int? CmdPathTooLong(Func<string, string?> getEnvironmentVariable) =>
+        getEnvironmentVariable("PATH") is { Length: > CmdPathLimit } path ? path.Length : null;
+
+    /// <summary>What is wrong with a PATH of <paramref name="length"/> characters, and what to do about it.</summary>
+    internal static string LongPathProblem(int length) =>
+        string.Create(System.Globalization.CultureInfo.InvariantCulture,
+            $"your PATH is longer than the command prompt can read ({length:N0} of {CmdPathLimit:N0} characters). Remove folders you no longer need from your user PATH.");
 
     private static bool HasAny(Func<string, string?> env, params string[] names) =>
         names.Any(name => !string.IsNullOrWhiteSpace(env(name)));
