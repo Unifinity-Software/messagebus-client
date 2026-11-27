@@ -61,6 +61,7 @@ public sealed partial class RunWorkspace : IDisposable
         new(OperatingSystem.IsLinux() ? StringComparer.Ordinal : StringComparer.OrdinalIgnoreCase);
 
     private FileStream? _lock;
+    private bool _recoveredShallowBoundary;
 
     internal Action<string>? GitLog { get; set; }
     internal bool RepositoryUnavailable { get; private set; }
@@ -116,17 +117,31 @@ public sealed partial class RunWorkspace : IDisposable
             var run = BundleGit(git, file, wrap);
             // Record emptiness before fetch: a failed fetch can still install the bundle's objects.
             var recoverShallow = stepInput is { Prerequisites.Count: 0 }
-                && Directory.Exists(Path.Combine(WorkTree, ".git"))
-                && !Path.Exists(Path.Combine(WorkTree, ".git", "shallow"))
-                && await IsEmptyRepositoryAsync(run, ct).ConfigureAwait(false);
+                && CanWriteShallowBoundary()
+                && (_recoveredShallowBoundary || !Path.Exists(Path.Combine(WorkTree, ".git", "shallow"))
+                    && await IsEmptyRepositoryAsync(run, ct).ConfigureAwait(false));
             try
             {
                 await FetchAsync().ConfigureAwait(false);
             }
-            catch (GitException) when (recoverShallow)
+            catch (GitException original) when (recoverShallow)
             {
-                if (!await RestoreShallowBoundaryAsync(file, run, ct).ConfigureAwait(false)) throw;
-                await FetchAsync().ConfigureAwait(false);
+                ShallowRecovery? recovery;
+                try { recovery = await RestoreShallowBoundaryAsync(file, run, ct).ConfigureAwait(false); }
+                catch (GitException) { throw original; }
+                if (recovery is null) throw;
+                try { await FetchAsync().ConfigureAwait(false); }
+                catch
+                {
+                    if (CanWriteShallowBoundary())
+                    {
+                        if (recovery.Previous is null) File.Delete(Path.Combine(WorkTree, ".git", "shallow"));
+                        else await WriteShallowBoundaryAsync(recovery.Previous, CancellationToken.None).ConfigureAwait(false);
+                    }
+                    throw;
+                }
+                _recoveredShallowBoundary = true;
+                GitLog?.Invoke($"Applied the earlier step's code as a shallow copy: history before {string.Join(", ", recovery.Boundary.Select(id => id[..7]))} isn't available.");
             }
             return null;
 
@@ -155,9 +170,12 @@ public sealed partial class RunWorkspace : IDisposable
             && !counts.Any(line => line.StartsWith("alternate:", StringComparison.Ordinal));
     }
 
-    private async Task<bool> RestoreShallowBoundaryAsync(string file,
+    private sealed record ShallowRecovery(string? Previous, string[] Boundary);
+
+    private async Task<ShallowRecovery?> RestoreShallowBoundaryAsync(string file,
         Func<IReadOnlyList<string>, CancellationToken, Task<string>> run, CancellationToken ct)
     {
+        if (!CanWriteShallowBoundary()) return null;
         // A full bundle from a shallow producer has no prerequisites, but omits the parents of its
         // boundary commits. Unbundle installs the pack without fetch's parent connectivity check.
         await run(["bundle", "unbundle", Path.GetFullPath(file)], ct).ConfigureAwait(false);
@@ -174,10 +192,39 @@ public sealed partial class RunWorkspace : IDisposable
                 .Select(line => line.Split(' ')).Where(commit => commit.Skip(1).Any(parent => !present.Contains(parent)))
                 .Select(commit => commit[0]));
         }
-        if (boundary.Count == 0) return false;
+        if (boundary.Count == 0 || !CanWriteShallowBoundary()) return null;
 
-        await File.WriteAllLinesAsync(Path.Combine(WorkTree, ".git", "shallow"), boundary, ct).ConfigureAwait(false);
-        return true;
+        var path = Path.Combine(WorkTree, ".git", "shallow");
+        var previous = File.Exists(path) ? await File.ReadAllTextAsync(path, ct).ConfigureAwait(false) : null;
+        var combined = (previous ?? "").Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Concat(boundary).Distinct(StringComparer.Ordinal);
+        if (!await WriteShallowBoundaryAsync(string.Join("\n", combined) + "\n", ct).ConfigureAwait(false)) return null;
+        return new ShallowRecovery(previous, boundary.Distinct(StringComparer.Ordinal).ToArray());
+    }
+
+    private bool CanWriteShallowBoundary()
+    {
+        var directory = new DirectoryInfo(Path.Combine(WorkTree, ".git"));
+        var shallow = new FileInfo(Path.Combine(directory.FullName, "shallow"));
+        return directory.Exists && directory.LinkTarget is null && !directory.Attributes.HasFlag(FileAttributes.ReparsePoint)
+            && shallow.LinkTarget is null && (!shallow.Exists || !shallow.Attributes.HasFlag(FileAttributes.ReparsePoint));
+    }
+
+    private async Task<bool> WriteShallowBoundaryAsync(string text, CancellationToken ct)
+    {
+        if (!CanWriteShallowBoundary()) return false;
+        var path = Path.Combine(WorkTree, ".git", "shallow");
+        var temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        try
+        {
+            await using (var stream = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                await stream.WriteAsync(System.Text.Encoding.UTF8.GetBytes(text), ct).ConfigureAwait(false);
+            ct.ThrowIfCancellationRequested();
+            if (!CanWriteShallowBoundary()) return false;
+            File.Move(temporary, path, overwrite: true);
+            return true;
+        }
+        finally { File.Delete(temporary); }
     }
 
     private Func<IReadOnlyList<string>, CancellationToken, Task<string>> BundleGit(string git, string file,
