@@ -11,10 +11,13 @@ using MessageBus.Contracts.Runner;
 namespace MessageBus.Cli.Runner.Actions;
 
 internal sealed class OpenPullRequestAction(
-    IRepoCredentialSource credentials, HttpClient? http = null, string? pushDestination = null) : IRunnerAction
+    IRepoCredentialSource credentials, HttpClient? http = null, string? pushDestination = null,
+    HttpClient? azureDevOpsHttp = null) : IRunnerAction
 {
     private static readonly HttpClient GitHub = new(new HttpClientHandler { AllowAutoRedirect = false });
     private static readonly Uri GitHubApi = new("https://api.github.com/");
+    private static readonly HttpClient AzureDevOps = new(new HttpClientHandler { AllowAutoRedirect = false });
+    private static readonly Uri AzureDevOpsApi = new("https://dev.azure.com/");
     private const string AutoMergeMutation = """
         mutation($id: ID!) {
           enablePullRequestAutoMerge(input: {pullRequestId: $id, mergeMethod: SQUASH}) {
@@ -39,14 +42,24 @@ internal sealed class OpenPullRequestAction(
         var repository = delivery.Envelope.Refs.Select(RunWorkspace.RepositoryUrl)
             .Select(url => Uri.TryCreate(url, UriKind.Absolute, out var uri) && uri.Scheme == Uri.UriSchemeHttps ? uri : null)
             .FirstOrDefault(uri => uri is not null);
-        if (repository is null || repository.Host != "github.com" || !repository.IsDefaultPort
-            || repository.UserInfo.Length != 0 || repository.Query.Length != 0 || repository.Fragment.Length != 0
-            || repository.AbsolutePath.Trim('/').Split('/') is not [var owner, var name])
-            return Failed("The task repository must be a GitHub HTTPS repository.");
+        const string invalidRepository = "The task repository must be a GitHub or Azure DevOps HTTPS repository.";
+        if (repository is null || !repository.IsDefaultPort
+            || repository.UserInfo.Length != 0 || repository.Query.Length != 0 || repository.Fragment.Length != 0)
+            return Failed(invalidRepository);
 
-        name = name.EndsWith(".git", StringComparison.OrdinalIgnoreCase) ? name[..^4] : name;
-        if (owner.Length == 0 || name.Length == 0)
-            return Failed("The task repository must be a GitHub HTTPS repository.");
+        var github = repository.Host == "github.com";
+        var parts = github ? repository.AbsolutePath.Trim('/').Split('/') : repository.AbsolutePath[1..].Split('/');
+        if (github)
+        {
+            if (parts is not [var owner, var name]) return Failed(invalidRepository);
+            parts[1] = name.EndsWith(".git", StringComparison.OrdinalIgnoreCase) ? name[..^4] : name;
+            if (owner.Length == 0 || parts[1].Length == 0) return Failed(invalidRepository);
+        }
+        else if (repository.Host != "dev.azure.com" || parts is not [_, _, "_git", _]
+            || parts.Any(part => part.Length == 0 || Uri.UnescapeDataString(part).IndexOfAny(['/', '\\']) >= 0))
+        {
+            return Failed(invalidRepository);
+        }
 
         var operation = "Read workflow inputs";
         try
@@ -76,6 +89,12 @@ internal sealed class OpenPullRequestAction(
             if (credential is null || string.IsNullOrEmpty(credential.Secret))
                 return Failed("no repository credential");
 
+            if (!github)
+                return await OpenAzureDevOpsAsync(context, repository, parts, headRef, baseRef, description,
+                    credential, parameters.AutoMerge is true, cancellationToken).ConfigureAwait(false);
+
+            var owner = parts[0];
+            var name = parts[1];
             var repo = owner + "/" + name;
             var pulls = $"repos/{Uri.EscapeDataString(owner)}/{Uri.EscapeDataString(name)}/pulls";
             var lookup = pulls + "?state=open&head=" + Uri.EscapeDataString(owner + ":" + branch);
@@ -135,18 +154,107 @@ internal sealed class OpenPullRequestAction(
                 }
             }
 
-            return new SettleResult
-            {
-                Status = SettleStatus.Succeeded,
-                Outcome = "opened",
-                Summary = $"Pull request #{number} is open.",
-                Refs = [reference],
-            };
+            return Opened(reference);
         }
         catch (Exception ex) when (IsOperationFailure(ex, cancellationToken))
         {
             return Failed(FailureReason(operation, ex));
         }
+    }
+
+    private async Task<SettleResult> OpenAzureDevOpsAsync(RunnerActionContext context, Uri repository,
+        string[] parts, string headRef, string baseRef, string description, RepoCredential credential,
+        bool autoMerge, CancellationToken ct)
+    {
+        var operation = "Push the branch";
+        Ref? reference = null;
+        try
+        {
+            if (!await RunnerGit.PushBranchAsync(context.WorkDirectory, context.RunDirectory, headRef, repository,
+                pushDestination ?? repository.AbsoluteUri, credential, ct).ConfigureAwait(false))
+                return Failed("Git could not push the source branch.");
+
+            const string version = "api-version=7.1";
+            var pulls = $"./{parts[0]}/{parts[1]}/_apis/git/repositories/{parts[3]}/pullrequests";
+            var lookup = $"{pulls}?searchCriteria.sourceRefName={Uri.EscapeDataString(headRef)}"
+                + $"&searchCriteria.targetRefName={Uri.EscapeDataString(baseRef)}&searchCriteria.status=active&{version}";
+            var secret = credential.Secret;
+            var segments = secret.Split('.');
+            var authorization = segments.Length == 3
+                && segments.All(segment => segment.Length > 0
+                    && segment.All(c => char.IsAsciiLetterOrDigit(c) || c is '-' or '_'))
+                ? new AuthenticationHeaderValue("Bearer", secret)
+                : new AuthenticationHeaderValue("Basic", Convert.ToBase64String(Encoding.UTF8.GetBytes(":" + secret)));
+
+            operation = "Look up the open pull request";
+            var found = await FindAzureDevOpsAsync(lookup, authorization, ct).ConfigureAwait(false);
+            if (found is null)
+            {
+                operation = "Open the pull request";
+                // Keep a surrogate pair intact if it straddles the description limit.
+                if (description.Length > 4000)
+                    description = description[..(char.IsHighSurrogate(description[3999]) ? 3999 : 4000)];
+                using var response = await SendAzureDevOpsAsync(HttpMethod.Post, $"{pulls}?{version}", authorization, new JsonObject
+                {
+                    ["sourceRefName"] = headRef,
+                    ["targetRefName"] = baseRef,
+                    ["title"] = context.Delivery.Envelope.Title,
+                    ["description"] = description,
+                }, ct).ConfigureAwait(false);
+                if (response.StatusCode == HttpStatusCode.Conflict)
+                    found = await FindAzureDevOpsAsync(lookup, authorization, ct).ConfigureAwait(false);
+                found ??= await ReadJsonAsync(response, ct).ConfigureAwait(false);
+            }
+
+            operation = "Read the pull request reference";
+            var id = found.Value.GetProperty("pullRequestId").GetInt64();
+            if (id <= 0) return Failed("Azure DevOps did not return a usable pull request reference.");
+            var idText = id.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            reference = new Ref
+            {
+                Kind = "ado.pr",
+                Repo = string.Join("/", Uri.UnescapeDataString(parts[0]), Uri.UnescapeDataString(parts[1]), Uri.UnescapeDataString(parts[3])),
+                Number = id,
+                Url = $"{repository.AbsoluteUri}/pullrequest/{idText}",
+            };
+            if (autoMerge && (!found.Value.TryGetProperty("autoCompleteSetBy", out var autoComplete)
+                || autoComplete.ValueKind == JsonValueKind.Null))
+            {
+                operation = "Request pull request auto-complete";
+                var creator = found.Value.GetProperty("createdBy").GetProperty("id").GetString();
+                if (string.IsNullOrWhiteSpace(creator))
+                    return Failed("Azure DevOps did not return the pull request creator ID.", reference);
+                using var response = await SendAzureDevOpsAsync(HttpMethod.Patch, $"{pulls}/{idText}?{version}", authorization,
+                    new JsonObject
+                    {
+                        ["autoCompleteSetBy"] = new JsonObject { ["id"] = creator },
+                        ["completionOptions"] = new JsonObject { ["mergeStrategy"] = "squash" },
+                    }, ct).ConfigureAwait(false);
+                response.EnsureSuccessStatusCode();
+            }
+
+            return Opened(reference);
+        }
+        catch (Exception ex) when (IsOperationFailure(ex, ct))
+        {
+            return Failed(FailureReason(operation, ex), reference);
+        }
+    }
+
+    private async Task<JsonElement?> FindAzureDevOpsAsync(string lookup, AuthenticationHeaderValue authorization, CancellationToken ct)
+    {
+        using var response = await SendAzureDevOpsAsync(HttpMethod.Get, lookup, authorization, null, ct).ConfigureAwait(false);
+        var results = (await ReadJsonAsync(response, ct).ConfigureAwait(false)).GetProperty("value");
+        return results.GetArrayLength() > 0 ? results[0] : null;
+    }
+
+    private async Task<HttpResponseMessage> SendAzureDevOpsAsync(HttpMethod method, string path,
+        AuthenticationHeaderValue authorization, JsonObject? body, CancellationToken ct)
+    {
+        using var request = new HttpRequestMessage(method, new Uri(azureDevOpsHttp?.BaseAddress ?? AzureDevOpsApi, path));
+        request.Headers.Authorization = authorization;
+        if (body is not null) request.Content = new StringContent(body.ToJsonString(), Encoding.UTF8, "application/json");
+        return await (azureDevOpsHttp ?? AzureDevOps).SendAsync(request, ct).ConfigureAwait(false);
     }
 
     private async Task<JsonElement?> FindAsync(string lookup, string secret, CancellationToken ct)
@@ -238,5 +346,13 @@ internal sealed class OpenPullRequestAction(
         Summary = reason,
         Error = reason,
         Refs = reference is null ? [] : [reference],
+    };
+
+    private static SettleResult Opened(Ref reference) => new()
+    {
+        Status = SettleStatus.Succeeded,
+        Outcome = "opened",
+        Summary = $"Pull request #{reference.Number} is open.",
+        Refs = [reference],
     };
 }

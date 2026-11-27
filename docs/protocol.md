@@ -1060,6 +1060,13 @@ If the service does not advertise `workflows`, the inventory omits all
   `roll-back` uses `rollBack` with `deploymentId`.
   For an unsupported kind, the runner accepts the delivery and settles it as
   failed with `failureCategory: "refused"`, without starting an agent.
+- The `open-pull-request` runner action uses the repository named by the task.
+  For Azure DevOps Services the task names it with an `ado.workitem` ref whose
+  `repo` is `org/project/repo`. The runner uses the existing push credential
+  request, pushes the source branch, and reuses or creates an active pull
+  request for the source and base branches. With `autoMerge: true` it
+  requests squash auto-complete. It settles with `opened` and an `ado.pr` ref
+  containing `repo`, `number`, and the pull request web `url`.
 - The `record-walkthrough` runner action runs the checkout's Playwright Test
   configuration with the project's installed dependencies and the browsers on
   the runner. It records video, screenshots, and traces and uploads them using
