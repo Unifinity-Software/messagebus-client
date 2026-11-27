@@ -10,8 +10,8 @@ namespace MessageBus.Cli.Runner;
 // The authorization and its explicit send reservation live until the actual upgrade finishes.
 internal static class RunnerHandshake
 {
-    internal static bool IsTerminal(Exception exception) => exception is ServerBindingException
-        && exception.InnerException is not (HttpRequestException or OperationCanceledException);
+    internal static bool IsTerminal(Exception exception) =>
+        exception is ServerBindingException { IsTransientDiscoveryFailure: false };
 
     internal static async Task ConnectAsync(ServerSendGate gate, ConnectRequest request,
         MachineRequestSigner? signer, string? apiKey, string? workspace, Func<CancellationToken, Task> connect,

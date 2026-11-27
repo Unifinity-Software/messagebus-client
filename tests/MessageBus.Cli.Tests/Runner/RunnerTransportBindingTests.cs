@@ -18,12 +18,85 @@ using Xunit;
 
 namespace MessageBus.Cli.Tests.Runner;
 
-public sealed class RunnerTransportBindingTests
+public sealed class RunnerTransportBindingTests(ITestOutputHelper output)
 {
     private const string Origin = "https://eu.runner.example.test";
     private const string Machine = "mch_00000000000000000000000000";
     private const string Legacy = """{"product":"messagebus.ai","signIn":{"microsoft":true}}""";
     private const string Isolated = """{"product":"messagebus.ai","stamp":{"stampId":"eu","geography":"eu","azureRegion":"westeurope","url":"https://eu.runner.example.test","aliases":[]},"signIn":{"authority":{"version":1,"stampId":"eu","issuer":"https://eu.runner.example.test","audience":"https://eu.runner.example.test"},"machineSignature":{"version":2,"required":true}}}""";
+
+    [Fact(Timeout = 30_000)]
+    public async Task Reconnect_recovers_from_discovery_and_upgrade_outages_then_stops_on_coded_refusal()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        using var machine = new TestMachine();
+        await using var server = new IsolatedHttpsServer(ct, output);
+        machine.Env[EnvVars.Server] = server.Selected;
+        machine.Env[EnvVars.ApiKey] = "fixture-runner-key";
+        machine.Env[EnvVars.Home] = machine.MbusFolder;
+        var discoveries = 0;
+        var host = new EnvironmentRunnerHostContext(name => machine.Env.GetValueOrDefault(name), machine.Home,
+            () => new Handler(_ => ++discoveries switch
+            {
+                2 or 3 => new(HttpStatusCode.BadGateway),
+                4 => throw new HttpRequestException("Fixture connection failure."),
+                5 => throw new TaskCanceledException("Fixture discovery timeout."),
+                _ => new(HttpStatusCode.OK) { Content = new StringContent(Legacy) },
+            }));
+        var upgrades = 0;
+        server.Respond = async (request, stream, token) =>
+        {
+            var response = Interlocked.Increment(ref upgrades) switch
+            {
+                1 or 4 => null,
+                2 => "HTTP/1.1 503 Unavailable\r\nRetry-After: 300\r\n",
+                3 => "HTTP/1.1 403 Forbidden\r\n",
+                _ => $"HTTP/1.1 403 Forbidden\r\n{MbusHeaders.Error}: machine-removed\r\n",
+            };
+            if (response is null)
+                await IsolatedHttpsServer.UpgradeAsync(request, stream, token);
+            else
+                await stream.WriteAsync(Encoding.ASCII.GetBytes(response + "Content-Length: 0\r\nConnection: close\r\n\r\n"), token);
+        };
+
+        ReverseConnectionClient? client = null;
+        var connected = 0;
+        var dropped = 0;
+        var retryDelays = new List<TimeSpan>();
+        var options = RunnerTransport.ClientOptions(new Uri(server.Selected), _ => { }) with
+        {
+            CertificateChainPolicy = server.ChainPolicy(),
+            TimeProvider = machine.Time,
+            ExecuteConnect = host.ConnectAsync,
+            IsTerminalPreparationException = RunnerHandshake.IsTerminal,
+            OnStatus = status =>
+            {
+                if (status.State == ReverseConnectionState.Connected)
+                {
+                    connected++;
+                    if (client!.DropConnection("Fixture reconnect."))
+                        dropped++;
+                }
+                if (status.RetryDelay is { } delay)
+                {
+                    retryDelays.Add(delay);
+                    machine.Time.Advance(delay);
+                }
+            },
+        };
+        client = new ReverseConnectionClient(options);
+        var stop = await client.RunAsync(ct);
+
+        Assert.Equal(2, connected);
+        Assert.Equal(2, dropped);
+        Assert.Equal(9, discoveries);
+        Assert.Equal(5, upgrades);
+        Assert.Equal(8, retryDelays.Count);
+        Assert.All(retryDelays, delay => Assert.InRange(delay, TimeSpan.FromMilliseconds(1), TimeSpan.FromSeconds(60)));
+        Assert.Equal(TimeSpan.FromSeconds(60), retryDelays[5]);
+        Assert.Equal(ReverseConnectionStopReason.Refused, stop.Reason);
+        Assert.Equal(403, stop.StatusCode);
+    }
 
     [Theory]
     [InlineData(301, false)]

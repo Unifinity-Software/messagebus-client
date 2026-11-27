@@ -388,6 +388,7 @@ namespace MessageBus.Cli.Runner
             engine.SetResourceConnectionAvailable(false);
             engine.SessionId = session;
             ReverseConnectionClient? client = null;
+            ReverseConnectionState? previousState = null;
             long connectedAt = 0; // UTC ticks of the open connection; 0 while not connected
             void OnServiceLacksConnection(DateTimeOffset sentAt)
             {
@@ -430,6 +431,9 @@ namespace MessageBus.Cli.Runner
                 },
                 OnStatus = status =>
                 {
+                    if (status.State == previousState)
+                        return;
+                    previousState = status.State;
                     engine.SetResourceConnectionAvailable(status.State == ReverseConnectionState.Connected);
                     Interlocked.Exchange(ref connectedAt, status.State == ReverseConnectionState.Connected ? time.GetUtcNow().UtcTicks : 0);
                     if (status.State == ReverseConnectionState.Connected)

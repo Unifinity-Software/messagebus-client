@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Net.WebSockets;
 using Groundhog.Protocol;
+using MessageBus.Contracts.Http;
 using MessageBus.Runner.Transport.Internal;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Connections;
@@ -117,6 +118,7 @@ public sealed class ReverseConnectionClient(ReverseConnectionClientOptions optio
     {
         var time = options.TimeProvider;
         var attempt = 0;
+        var reconnecting = false;
         while (true)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -135,6 +137,7 @@ public sealed class ReverseConnectionClient(ReverseConnectionClientOptions optio
                     break;
 
                 case ConnectOutcome.Connected connected:
+                    reconnecting = false;
                     var connection = new SocketConnection(connected.WebSocket, time);
                     if (!listener.TryAdd(connection))
                     {
@@ -209,7 +212,11 @@ public sealed class ReverseConnectionClient(ReverseConnectionClientOptions optio
             // Start the wait before reporting it, so whoever sees the report (a test advancing a fake clock, say)
             // can rely on the wait already counting.
             var wait = Task.Delay(delay, time, cancellationToken);
-            _logger.LogInformation("{Reason} Retrying in {Delay}.", reason, delay);
+            if (!reconnecting)
+            {
+                _logger.LogInformation("{Reason} Retrying in {Delay}.", reason, delay);
+                reconnecting = true;
+            }
             Report(new ReverseConnectionStatus(ReverseConnectionState.Reconnecting, reason, delay, closeCode));
             await wait.ConfigureAwait(false);
         }
@@ -261,7 +268,6 @@ public sealed class ReverseConnectionClient(ReverseConnectionClientOptions optio
         {
             // Most likely preparing the request failed (a credential store was unavailable): worth retrying.
             webSocket.Dispose();
-            _logger.LogWarning(ex, "Connection attempt failed before reaching the server.");
             return new ConnectOutcome.Retry($"Couldn't connect: {ex.Message}", null);
         }
         catch
@@ -286,7 +292,9 @@ public sealed class ReverseConnectionClient(ReverseConnectionClientOptions optio
         if (status < 400)
             return new ConnectOutcome.Retry("Couldn't reach the server.", null); // DNS, TCP or TLS failed.
 
-        if (ConnectRefusal.IsPermanent(status))
+        var authFailure = status is 401 or 403;
+        if (ConnectRefusal.IsPermanent(status)
+            && (!authFailure || !string.IsNullOrWhiteSpace(Header(webSocket, MbusHeaders.Error))))
         {
             var detail = status == ConnectRefusal.Unauthorized && Header(webSocket, "WWW-Authenticate") is { } accepted
                 ? $" It accepts: {accepted}."
@@ -294,8 +302,13 @@ public sealed class ReverseConnectionClient(ReverseConnectionClientOptions optio
             return new ConnectOutcome.Refused(status, $"The server refused the connection (HTTP {status}).{detail}");
         }
 
-        return new ConnectOutcome.Retry($"The server answered HTTP {status}.",
-            status == ConnectRefusal.TooManyAttempts || status == 503 ? RetryAfter(webSocket) : null);
+        var retryAfter = status switch
+        {
+            503 => RetryAfter(webSocket, TimeSpan.FromSeconds(60)),
+            ConnectRefusal.TooManyAttempts => RetryAfter(webSocket, MaxRetryAfter),
+            _ => null,
+        };
+        return new ConnectOutcome.Retry($"The server answered HTTP {status}.", retryAfter);
     }
 
     private static string? Header(ClientWebSocket webSocket, string name) =>
@@ -303,9 +316,9 @@ public sealed class ReverseConnectionClient(ReverseConnectionClientOptions optio
             ? string.Join(", ", values)
             : null;
 
-    private static TimeSpan? RetryAfter(ClientWebSocket webSocket) =>
+    private static TimeSpan? RetryAfter(ClientWebSocket webSocket, TimeSpan maximum) =>
         int.TryParse(Header(webSocket, "Retry-After"), NumberStyles.None, CultureInfo.InvariantCulture, out var seconds)
-            ? TimeSpan.FromSeconds(Math.Min(seconds, MaxRetryAfter.TotalSeconds))
+            ? TimeSpan.FromSeconds(Math.Min(seconds, maximum.TotalSeconds))
             : null;
 
     private static string Describe(string? description) =>

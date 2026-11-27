@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using MessageBus.Cli.Configuration;
 using MessageBus.Cli.Hosting;
+using MessageBus.Contracts.Http;
 
 namespace MessageBus.Cli.Server;
 
@@ -73,10 +74,7 @@ public sealed class ServerSendGate : IDisposable
                         tx.ValidateProvisioning(Endpoint, expectedJson, home)), ct).ConfigureAwait(false);
             }
 
-            using var response = await _discovery.GetAsync("api/server", ct).ConfigureAwait(false);
-            if (!response.IsSuccessStatusCode)
-                throw new ServerBindingException($"Anonymous discovery refused ({(int)response.StatusCode}); credentials were not sent.");
-            var discovery = ServerDiscoveryParser.Parse(await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false));
+            var discovery = await DiscoverAsync(ct).ConfigureAwait(false);
             var snapshot = transaction is not null
                 ? PrepareBinding(transaction)
                 : await _store.PrepareBindingForSendAsync(Endpoint, discovery, expected, ct).ConfigureAwait(false);
@@ -101,6 +99,34 @@ public sealed class ServerSendGate : IDisposable
             if (ex is HttpRequestException or IOException or UnauthorizedAccessException or OperationCanceledException or CliException)
                 throw new ServerBindingException("Current anonymous discovery or durable binding preparation failed; credentials refused.", ex);
             throw;
+        }
+    }
+
+    private async Task<ServerDiscovery> DiscoverAsync(CancellationToken ct)
+    {
+        try
+        {
+            using var response = await _discovery.GetAsync("api/server", ct).ConfigureAwait(false);
+            var status = (int)response.StatusCode;
+            if (!response.IsSuccessStatusCode)
+            {
+                var hasErrorCode = response.Headers.TryGetValues(MbusHeaders.Error, out var codes)
+                    && codes.Any(code => !string.IsNullOrWhiteSpace(code));
+                throw new ServerBindingException($"Anonymous discovery refused ({status}); credentials were not sent.")
+                {
+                    IsTransientDiscoveryFailure = status is >= 500 and <= 599 or 408 or 429
+                        || status is 401 or 403 && !hasErrorCode,
+                };
+            }
+            return ServerDiscoveryParser.Parse(await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false));
+        }
+        catch (Exception ex) when (ex is HttpRequestException or IOException or TimeoutException
+            || ex is OperationCanceledException && !ct.IsCancellationRequested)
+        {
+            throw new ServerBindingException("Current anonymous discovery failed; credentials were not sent.", ex)
+            {
+                IsTransientDiscoveryFailure = true,
+            };
         }
     }
 
