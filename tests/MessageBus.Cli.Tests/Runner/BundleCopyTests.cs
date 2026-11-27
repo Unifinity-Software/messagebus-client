@@ -314,6 +314,36 @@ public sealed class BundleCopyTests(BundleCopyTests.Code code) : IClassFixture<B
     }
 
     [Fact]
+    public async Task A_shallow_full_step_bundle_never_truncates_an_existing_repository()
+    {
+        code.RequireLocalFetch();
+        var ct = TestContext.Current.CancellationToken;
+        var root = Directory.CreateDirectory(Path.Combine(code.Root, Guid.NewGuid().ToString("N"))).FullName;
+        var producer = Path.Combine(root, "producer");
+        await Git.RunAsync(root, ["clone", "--quiet", "--depth=1", new Uri(code.Remote).AbsoluteUri, producer], ct);
+        await Git.RunAsync(producer, ["switch", "--quiet", "-c", "feature/shallow"], ct);
+        await Git.RunAsync(producer, ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false",
+            "commit", "--quiet", "--allow-empty", "-m", "Code step"], ct);
+        var bundle = await GitBundles.CreateAsync(producer, Path.Combine(root, "code.bundle"), baseCommit: "", ct: ct);
+        Assert.Empty(bundle.Prerequisites);
+
+        using var run = RunWorkspace.Create(root, "dlv_existing", 1);
+        Directory.CreateDirectory(run.WorkTree);
+        await Git.RunAsync(run.WorkTree, ["init", "--quiet"], ct);
+        await Git.RunAsync(run.WorkTree, ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false",
+            "commit", "--quiet", "--allow-empty", "-m", "Existing step"], ct);
+        var existing = await Git.CommitIdAsync(run.WorkTree, "HEAD", ct);
+
+        var error = await run.ImportStepBranchAsync(code.Git!, Delivery("dlv_existing", bundle.Branch), bundle.Path,
+            GitBundles.ReadHeader(bundle.Path), bundle.Branch, launch => launch, ct);
+
+        Assert.Contains("did not send all necessary objects", error);
+        Assert.Equal(existing, await Git.CommitIdAsync(run.WorkTree, "HEAD", ct));
+        Assert.False(File.Exists(Path.Combine(run.WorkTree, ".git", "shallow")));
+        Assert.Equal("false", (await Git.RunAsync(run.WorkTree, ["rev-parse", "--is-shallow-repository"], ct)).Trim());
+    }
+
+    [Fact]
     public async Task Step_bundle_error_keeps_the_repository_refusal_reason()
     {
         code.RequireLocalFetch();
