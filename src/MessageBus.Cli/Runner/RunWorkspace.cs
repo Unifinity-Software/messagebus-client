@@ -7,9 +7,7 @@ using MessageBus.Contracts.Runner;
 namespace MessageBus.Cli.Runner;
 
 /// <summary>
-/// Gets a delivery's git bundle as a plain file on this machine. Downloading the attachment and
-/// decrypting it is the attachments (the original issue) and encryption (the original issue) work; until a source is plugged in the
-/// run starts in an empty repository and the agent fetches the bundle through the mbus MCP tools.
+/// Downloads and decrypts a delivery's git bundle to a local file.
 /// </summary>
 public interface IBundleSource
 {
@@ -211,7 +209,10 @@ public sealed partial class RunWorkspace : IDisposable
         InProgress.TryRemove(Root, out _);
     }
 
-    /// <summary>Prepares <see cref="WorkTree"/> as the role's run environment says.</summary>
+    /// <summary>
+    /// Prepares <see cref="WorkTree"/> as the role's run environment says. In bundle mode without
+    /// a bundle attachment, agent runs try the referenced repository before initialising an empty one.
+    /// </summary>
     /// <param name="delivery">The task.</param>
     /// <param name="locate">Finds a command (git).</param>
     /// <param name="bundles">Gets the task's git bundle.</param>
@@ -246,8 +247,20 @@ public sealed partial class RunWorkspace : IDisposable
                 if (bundle is not null && delivery.RunnerAction is not null)
                     return "The workflow action could not check out the task's code bundle.";
 
-                // With no decrypted bundle here, start from an empty
-                // repository; the agent pulls the bundle in with the mbus tools.
+                if (bundle is null && delivery.RunnerAction is null
+                    && delivery.Envelope.Refs.FirstOrDefault(r => RepositoryUrl(r) is not null) is { } repositoryRef)
+                {
+                    var error = await CheckOutRepositoryAsync(git, repositoryRef, wrap, cancellationToken).ConfigureAwait(false);
+                    if (error is null)
+                        return null;
+
+                    if (!TryDelete(WorkTree))
+                        return $"Couldn't remove the incomplete repository checkout. {error}";
+
+                    GitLog?.Invoke($"Repository checkout failed. Starting with an empty repository. {error}");
+                }
+
+                // A bundle the runner couldn't get is still available to the agent through the mbus tools.
                 return await GitAsync(git, ["init", "--quiet", WorkTree], wrap, cancellationToken).ConfigureAwait(false);
             }
             return await CheckOutBundleAsync(git, delivery, bundle!, file, bundles!, wrap, ask, historyWait ?? DefaultHistoryWait, cancellationToken).ConfigureAwait(false);

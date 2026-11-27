@@ -31,6 +31,7 @@ public sealed class BundleCopyTests(BundleCopyTests.Code code) : IClassFixture<B
         public string History { get; private set; } = "";
         public string Secret { get; private set; } = "";
         public string C { get; private set; } = "";
+        public string Remote => Path.Combine(Root, "origin.git");
         public string? LocalFetchUnavailable { get; private set; }
 
         public async ValueTask InitializeAsync()
@@ -50,6 +51,7 @@ public sealed class BundleCopyTests(BundleCopyTests.Code code) : IClassFixture<B
             C = await CommitAsync(repo, "three");
             Next = (await GitBundles.CreateAsync(repo, Path.Combine(Root, "next.bundle"), "main", b)).Path;
             History = (await GitBundles.CreateAsync(repo, Path.Combine(Root, "history.bundle"), "main")).Path;
+            await MessageBus.Attachments.Client.Git.RunAsync(repo, ["clone", "--quiet", "--bare", repo, Remote]);
 
             LocalFetchUnavailable = await WindowsRunCapabilities.GitShellUnavailableAsync();
         }
@@ -72,6 +74,46 @@ public sealed class BundleCopyTests(BundleCopyTests.Code code) : IClassFixture<B
         {
             RunWorkspace.TryDelete(Root);
             return ValueTask.CompletedTask;
+        }
+    }
+
+    [Theory]
+    [InlineData(null, false)]
+    [InlineData(null, true)]
+    [InlineData("missing-revision", false)]
+    public async Task Bundle_checkout_without_an_attachment_uses_the_referenced_repository(string? revision, bool missingRemote)
+    {
+        code.RequireLocalFetch();
+        var ct = TestContext.Current.CancellationToken;
+        var delivery = Delivery("dlv_no_bundle", "main");
+        var remote = missingRemote ? Path.Combine(code.Root, "missing.git") : code.Remote;
+        delivery = delivery with
+        {
+            Envelope = delivery.Envelope with
+            {
+                Attachments = [],
+                Refs = [new Ref { Kind = "git.repository", Url = new Uri(remote).AbsoluteUri, Sha = revision }],
+            },
+            StepContext = new StepContext { JobId = "job_test", StepId = "code", StepName = "Code", Round = 1, AllowedOutcomes = [], Inputs = [] },
+        };
+        using var run = RunWorkspace.Create(code.Root, delivery.DeliveryId, 1);
+        var log = new List<string>();
+        run.GitLog = log.Add;
+
+        var error = await run.CheckOutAsync(delivery, _ => code.Git, bundles: null, ct);
+
+        Assert.True(error is null, error);
+        if (missingRemote || revision is not null)
+        {
+            Assert.True(Directory.Exists(Path.Combine(run.WorkTree, ".git")));
+            Assert.Empty((await Git.RunAsync(run.WorkTree, ["for-each-ref"], ct)).Trim());
+            Assert.False(File.Exists(Path.Combine(run.WorkTree, "README.md")));
+            Assert.Contains("Starting with an empty repository", Assert.Single(log));
+        }
+        else
+        {
+            Assert.Equal("main", (await Git.RunAsync(run.WorkTree, ["branch", "--show-current"], ct)).Trim());
+            Assert.Equal(code.C, await Git.CommitIdAsync(run.WorkTree, "HEAD", ct));
         }
     }
 
