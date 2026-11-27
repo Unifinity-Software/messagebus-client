@@ -71,7 +71,7 @@ public sealed class RunnerTaskTests
         {
             if (tryInvalid)
             {
-                foreach (var invalid in new string?[] { null, "Changes-needed", "timed-out" })
+                foreach (var invalid in new string?[] { null, "", "Changes-needed", "timed-out" })
                 {
                     arguments["outcome"] = invalid;
                     var refused = await CallAsync();
@@ -80,16 +80,35 @@ public sealed class RunnerTaskTests
                     Assert.Contains("approved, changes-needed", refused.Error?.Message);
                     Assert.DoesNotContain("timed-out", refused.Error?.Message);
                 }
-                arguments["result"]!["status"] = "failed";
-                arguments["outcome"] = "approved";
-                var failedVerdict = await CallAsync();
-                Assert.Equal(McpErrorCodes.InvalidInput, failedVerdict.Error?.Code);
-                Assert.Equal("result.status", failedVerdict.Error?.Field);
-                Assert.Contains("approved, changes-needed", failedVerdict.Error?.Message);
-                Assert.Contains("friction", failedVerdict.Error?.Message);
+                foreach (var status in new[] { "failed", "abandoned", "cancelled" })
+                {
+                    arguments["result"]!["status"] = status;
+                    arguments["outcome"] = "approved";
+                    var failedVerdict = await CallAsync();
+                    Assert.Equal(McpErrorCodes.InvalidInput, failedVerdict.Error?.Code);
+                    Assert.Equal("result.status", failedVerdict.Error?.Field);
+                    Assert.Contains("approved, changes-needed", failedVerdict.Error?.Message);
+                    Assert.Contains("friction", failedVerdict.Error?.Message);
+                }
                 var settleFile = Path.Combine(Path.GetDirectoryName(h.WorkTreeOf(task.DeliveryId))!, "settle.json");
                 Assert.False(File.Exists(settleFile));
                 Assert.False(File.Exists(KeptAnswer.KeptFile(settleFile)));
+            }
+            if (failed)
+            {
+                arguments["outcome"] = "";
+                foreach (var status in new[] { "failed", "abandoned", "cancelled" })
+                {
+                    arguments["result"]!["status"] = status;
+                    var emptyOutcome = await CallAsync();
+                    Assert.True(emptyOutcome.Succeeded, emptyOutcome.Error?.Message);
+                }
+
+                arguments["result"]!["status"] = "succeeded";
+                arguments["outcome"] = "approved";
+                var approved = await CallAsync();
+                Assert.True(approved.Succeeded, approved.Error?.Message);
+                arguments["result"]!["summary"] = "The review could not run.";
             }
             if (!workflow || outcome is not null || failed)
             {
@@ -109,6 +128,7 @@ public sealed class RunnerTaskTests
         var result = (await h.Service.SettledAsync(task.DeliveryId)).Result;
         Assert.Equal(workflow ? outcome : null, result.Outcome);
         Assert.Equal(workflow && outcome is null ? SettleStatus.Failed : SettleStatus.Succeeded, result.Status);
+        if (failed) Assert.Equal("The review could not run.", result.Summary);
         var prompt = File.ReadAllText(Path.Combine(Path.GetDirectoryName(h.WorkTreeOf(task.DeliveryId))!, "prompt.md"));
         if (workflow)
         {

@@ -1044,10 +1044,11 @@ If the service does not advertise `workflows`, the inventory omits all
   `succeeded` with an exact, case-sensitive match in `allowedOutcomes`, excluding
   the built-in `timed-out`, and reports any checks it couldn't perform as friction.
   If the agent couldn't do the step, it settles as `failed` and can omit `outcome`.
-  A `failed` status can accompany the `failed` outcome if the step allows it.
-  Other outcome words paired with a `failed` status return `invalid-input` for
-  `result.status`. Every other status requires an allowed outcome. A required
-  but missing outcome or a disallowed outcome returns
+  An empty string is treated as an omitted outcome. The `failed`, `abandoned`,
+  and `cancelled` statuses accept an omitted outcome or the `failed` outcome
+  if the step allows that word.
+  Other outcome words paired with these statuses return `invalid-input` for
+  `result.status`. A required but missing outcome or a disallowed outcome returns
   `invalid-input` for `outcome`. The runner sends the accepted word in its
   final `SettleResult.outcome`. A run without an accepted settle reports no
   outcome. The local tool ignores the argument for deliveries without step context.

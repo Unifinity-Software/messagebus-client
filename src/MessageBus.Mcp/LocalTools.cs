@@ -1259,18 +1259,21 @@ internal sealed partial class LocalTools : IAsyncDisposable
         if (Delivery!.StepContext is { } step)
         {
             var allowed = step.AllowedOutcomes.Where(word => word != "timed-out").ToArray();
+            var succeeded = input.Result.Status == SettleStatus.Succeeded;
+            var outcomeGuidance = $"Use one of the allowed outcomes: {string.Join(", ", allowed)}.";
+            if (!succeeded)
+                outcomeGuidance += " Omit outcome if you couldn't do the step.";
             if (arguments is not null && arguments.TryGetValue("outcome", out var value) && value.ValueKind != JsonValueKind.Null)
             {
                 if (value.ValueKind != JsonValueKind.String)
-                    throw McpToolException.Invalid("outcome", $"Use one of the allowed outcomes: {string.Join(", ", allowed)}.");
-                outcome = value.GetString();
+                    throw McpToolException.Invalid("outcome", outcomeGuidance);
+                outcome = value.GetString() is { Length: > 0 } word ? word : null;
             }
-            var failed = input.Result.Status == SettleStatus.Failed;
-            if (failed && !string.IsNullOrEmpty(outcome) && outcome != "failed")
+            if (!succeeded && outcome is not null && outcome != "failed")
                 throw McpToolException.Invalid("result.status",
                     $"Settle as succeeded with an allowed outcome ({string.Join(", ", allowed)}) and put what you couldn't check in friction. Use failed only if you couldn't do the step at all.");
-            if (!(failed && outcome is null) && (string.IsNullOrEmpty(outcome) || !allowed.Contains(outcome, StringComparer.Ordinal)))
-                throw McpToolException.Invalid("outcome", $"Use one of the allowed outcomes: {string.Join(", ", allowed)}.");
+            if (outcome is null ? succeeded : !allowed.Contains(outcome, StringComparer.Ordinal))
+                throw McpToolException.Invalid("outcome", outcomeGuidance);
         }
 
         // A pinned settle must clear any fallback written by an earlier call.
