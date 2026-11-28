@@ -920,6 +920,7 @@ internal sealed class AgentRun
     {
         var env = new Dictionary<string, string?>(StringComparer.Ordinal)
         {
+            [RunnerDotnetEnvironment.AddGlobalToolsToPath] = RunnerDotnetEnvironment.GlobalToolsPathValue(_s.Host.GetEnvironmentVariable),
             ["MBUS_DELIVERY_ID"] = DeliveryId,
             ["MBUS_THREAD_ID"] = Delivery.Envelope.ThreadId,
             ["MBUS_MESSAGE_ID"] = Delivery.Envelope.Id,
@@ -960,7 +961,7 @@ internal sealed class AgentRun
     private Dictionary<string, string> McpEnvironment(Dictionary<string, string?> environment)
     {
         string[] names = ["MBUS_DELIVERY_FILE", "MBUS_SETTLE_FILE", "MBUS_DELIVERY_ID", "MBUS_THREAD_ID", "MBUS_MESSAGE_ID", "MBUS_RUN_DIR", "MBUS_ROLE", "MBUS_AGENT",
-            RunToolsVariables.File];
+            RunToolsVariables.File, RunnerDotnetEnvironment.AddGlobalToolsToPath];
         var result = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (var name in names)
         {

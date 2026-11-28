@@ -59,6 +59,7 @@ internal sealed class VerificationProcess(TimeProvider time) : IVerificationProc
             "--dir", "/tmp/home",
             "--clearenv",
             "--setenv", "HOME", "/tmp/home",
+            "--setenv", RunnerDotnetEnvironment.AddGlobalToolsToPath, RunnerDotnetEnvironment.GlobalToolsPathValue(Environment.GetEnvironmentVariable),
             "--setenv", "TMPDIR", "/tmp",
             "--setenv", "PATH", "/usr/bin:/bin",
             "--setenv", "LANG", "C",
