@@ -56,13 +56,15 @@ public static class RunEnvironmentScrubber
     /// <summary>
     /// The variables to give a launch, in <see cref="ProcessLaunch.Environment"/>'s terms: every
     /// inherited variable that isn't allowed is removed (null), then <paramref name="set"/> is applied.
+    /// DOTNET_ADD_GLOBAL_TOOLS_TO_PATH defaults to 0 unless inherited or explicitly set.
     /// </summary>
     /// <param name="inherited">The runner's environment (what a started process would inherit).</param>
     /// <param name="extra">Names the machine's owner also lets through.</param>
     /// <param name="set">The run's own variables (the launch's, then the sandbox's).</param>
     public static Dictionary<string, string?> Build(IDictionary inherited, IReadOnlyCollection<string> extra, IEnumerable<KeyValuePair<string, string?>> set)
     {
-        var result = new Dictionary<string, string?>(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+        var comparer = OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
+        var result = new Dictionary<string, string?>(comparer);
         foreach (DictionaryEntry entry in inherited)
         {
             if (entry.Key is string name && !IsAllowed(name, extra))
@@ -75,7 +77,8 @@ public static class RunEnvironmentScrubber
             result[name] = value;
         }
         result.TryAdd(RunnerDotnetEnvironment.AddGlobalToolsToPath,
-            RunnerDotnetEnvironment.GlobalToolsPathValue(name => inherited[name] as string));
+            RunnerDotnetEnvironment.GlobalToolsPathValue(name => inherited.Cast<DictionaryEntry>()
+                .FirstOrDefault(entry => entry.Key is string key && comparer.Equals(key, name)).Value as string));
         return result;
     }
 }

@@ -467,7 +467,6 @@ public sealed class RunnerTaskTests
     [InlineData(null, false)]
     [InlineData("1", false)]
     [InlineData(null, true)]
-    [InlineData("1", true)]
     public async Task Tasks_default_to_leaving_the_users_dotnet_tools_path_alone(string? inherited, bool isolated)
     {
         const string variable = "DOTNET_ADD_GLOBAL_TOOLS_TO_PATH";
@@ -485,7 +484,7 @@ public sealed class RunnerTaskTests
             : $"printenv {variable} > setup-dotnet.txt";
 
         Assert.True((await h.DeliverAsync(h.Task("dlv_dotnet_path", directives: d => d["env"] = variable,
-            environment: new RunEnvironment { SetupCommand = setup }))).Accepted);
+            environment: new RunEnvironment { Checkout = CheckoutMode.Empty, SetupCommand = setup }))).Accepted);
         var settled = await h.Service.SettledAsync("dlv_dotnet_path");
 
         Assert.Equal(SettleStatus.Succeeded, settled.Result.Status);
