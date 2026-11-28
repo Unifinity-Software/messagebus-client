@@ -463,6 +463,37 @@ public sealed class RunnerTaskTests
         Assert.Equal(122, b.Usage.TokensOut);
     }
 
+    [Theory]
+    [InlineData(null, false)]
+    [InlineData("1", false)]
+    [InlineData(null, true)]
+    [InlineData("1", true)]
+    public async Task Tasks_default_to_leaving_the_users_dotnet_tools_path_alone(string? inherited, bool isolated)
+    {
+        const string variable = "DOTNET_ADD_GLOBAL_TOOLS_TO_PATH";
+        var environment = new Dictionary<string, string>();
+        if (inherited is not null) environment[variable] = inherited;
+        await using var h = new RunnerHarness(environment: environment, sandbox: isolated
+            ? root => MessageBus.Cli.Runner.Sandbox.RunIsolation.Create(new()
+            {
+                WorkRoot = root, HomeDirectory = Path.Combine(root, "home"), MachineName = "test-machine",
+                Requested = MessageBus.Cli.Runner.Sandbox.IsolationLevel.Basic,
+            }, TextWriter.Null)
+            : null);
+        var setup = OperatingSystem.IsWindows()
+            ? $"echo %{variable}% > setup-dotnet.txt"
+            : $"printenv {variable} > setup-dotnet.txt";
+
+        Assert.True((await h.DeliverAsync(h.Task("dlv_dotnet_path", directives: d => d["env"] = variable,
+            environment: new RunEnvironment { SetupCommand = setup }))).Accepted);
+        var settled = await h.Service.SettledAsync("dlv_dotnet_path");
+
+        Assert.Equal(SettleStatus.Succeeded, settled.Result.Status);
+        var work = h.WorkTreeOf("dlv_dotnet_path");
+        Assert.Equal($"{variable}={inherited ?? "0"}", File.ReadAllText(Path.Combine(work, "env.txt")).Trim());
+        Assert.Equal(inherited ?? "0", File.ReadAllText(Path.Combine(work, "setup-dotnet.txt")).Trim());
+    }
+
     [Fact]
     public async Task Codex_gives_the_mbus_mcp_server_the_runs_variables_so_its_settle_reaches_the_runner()
     {

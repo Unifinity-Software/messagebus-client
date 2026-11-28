@@ -59,6 +59,7 @@ internal sealed class VerificationProcess(TimeProvider time) : IVerificationProc
             "--dir", "/tmp/home",
             "--clearenv",
             "--setenv", "HOME", "/tmp/home",
+            "--setenv", RunnerDotnetEnvironment.AddGlobalToolsToPath, RunnerDotnetEnvironment.GlobalToolsPathValue(Environment.GetEnvironmentVariable),
             "--setenv", "TMPDIR", "/tmp",
             "--setenv", "PATH", "/usr/bin:/bin",
             "--setenv", "LANG", "C",
@@ -106,6 +107,7 @@ internal sealed class VerificationProcess(TimeProvider time) : IVerificationProc
             RedirectStandardOutput = true, RedirectStandardError = true,
         };
         start.Environment.Clear();
+        start.Environment[RunnerDotnetEnvironment.AddGlobalToolsToPath] = RunnerDotnetEnvironment.GlobalToolsPathValue(Environment.GetEnvironmentVariable);
         foreach (var arg in args) start.ArgumentList.Add(arg);
         using var process = new Process { StartInfo = start };
         try

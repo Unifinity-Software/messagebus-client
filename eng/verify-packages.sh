@@ -28,6 +28,7 @@ scratch=$(mktemp -d "${TMPDIR:-/tmp}/mbus-packages.XXXXXXXX")
 trap 'rm -rf -- "$scratch"' EXIT
 export NUGET_PACKAGES="$scratch/packages"
 export DOTNET_CLI_HOME="$scratch/home"
+export DOTNET_ADD_GLOBAL_TOOLS_TO_PATH=0
 export NUGET_HTTP_CACHE_PATH="$scratch/http-cache"
 export DOTNET_NOLOGO=1
 unset NUGET_FALLBACK_PACKAGES

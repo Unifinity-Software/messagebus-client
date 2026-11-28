@@ -74,6 +74,8 @@ public static class RunEnvironmentScrubber
         {
             result[name] = value;
         }
+        result.TryAdd(RunnerDotnetEnvironment.AddGlobalToolsToPath,
+            RunnerDotnetEnvironment.GlobalToolsPathValue(name => inherited[name] as string));
         return result;
     }
 }

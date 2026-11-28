@@ -139,6 +139,7 @@ internal sealed class WindowsServicePaths(string programFiles, string programDat
         start.Environment["LOCALAPPDATA"] = Directory.CreateDirectory(Path.Combine(home, "Local")).FullName;
         start.Environment["TEMP"] = start.Environment["TMP"] = Directory.CreateDirectory(Path.Combine(home, "Temp")).FullName;
         start.Environment["DOTNET_CLI_HOME"] = home;
+        start.Environment[RunnerDotnetEnvironment.AddGlobalToolsToPath] = RunnerDotnetEnvironment.GlobalToolsPathValue(Environment.GetEnvironmentVariable);
         start.Environment["DOTNET_ROOT"] = Path.GetDirectoryName(Dotnet)!;
         start.Environment["DOTNET_CLI_TELEMETRY_OPTOUT"] = "1";
         start.Environment["DOTNET_NOLOGO"] = "1";
